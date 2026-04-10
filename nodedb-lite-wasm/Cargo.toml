@@ -1,0 +1,40 @@
+[package]
+name = "nodedb-lite-wasm"
+description = "JavaScript/TypeScript bindings for NodeDB-Lite via wasm-bindgen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+nodedb-lite = { workspace = true }
+nodedb-types = { workspace = true }
+nodedb-client = { workspace = true }
+wasm-bindgen = { workspace = true }
+js-sys = { workspace = true }
+serde-wasm-bindgen = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sonic-rs = { workspace = true }
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "console",
+    "FileSystemSyncAccessHandle",
+    "FileSystemReadWriteOptions",
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemGetFileOptions",
+    "WorkerGlobalScope",
+    "WorkerNavigator",
+    "StorageManager",
+] }
+redb = { workspace = true }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"

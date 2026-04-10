@@ -1,0 +1,55 @@
+[package]
+name = "nodedb-lite"
+description = "Embedded edge client for NodeDB — offline vector search, graph traversal, and CRDT sync"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+nodedb-types = { workspace = true }
+nodedb-codec = { workspace = true }
+nodedb-client = { workspace = true }
+nodedb-crdt = { workspace = true }
+nodedb-query = { workspace = true }
+nodedb-spatial = { workspace = true }
+nodedb-graph = { workspace = true }
+nodedb-vector = { workspace = true }
+nodedb-fts = { workspace = true }
+roaring = { workspace = true }
+nodedb-strict = { workspace = true }
+nodedb-columnar = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+zerompk = { workspace = true }
+serde_json = { workspace = true }
+sonic-rs = { workspace = true }
+loro = { workspace = true }
+wasmtime = { workspace = true }
+redb = { workspace = true }
+nodedb-sql = { workspace = true }
+arrow = { workspace = true }
+crc32c = { workspace = true }
+aes-gcm = { workspace = true }
+argon2 = { workspace = true }
+zeroize = { workspace = true }
+getrandom = { workspace = true }
+
+# Async runtime (native only — WASM uses wasm-bindgen-futures)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["rt", "sync", "time", "net"] }
+tokio-tungstenite = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+tempfile = { workspace = true }
+rust_decimal = { workspace = true }

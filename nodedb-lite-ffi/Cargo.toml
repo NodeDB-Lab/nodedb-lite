@@ -1,0 +1,26 @@
+[package]
+name = "nodedb-lite-ffi"
+description = "C FFI bindings for NodeDB-Lite — iOS/Android interop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+nodedb-lite = { workspace = true }
+nodedb-client = { workspace = true }
+nodedb-types = { workspace = true }
+serde_json = { workspace = true }
+sonic-rs = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tracing = { workspace = true }
+jni = "0.21"
+
+[build-dependencies]
+cbindgen = "0.29"
