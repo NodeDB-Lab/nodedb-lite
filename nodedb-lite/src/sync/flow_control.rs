@@ -95,6 +95,8 @@ pub struct SyncMetrics {
     pub conflicts_total: AtomicU64,
     /// Per-collection conflict counts. Protected by std::sync::Mutex for HashMap.
     conflicts_by_collection: std::sync::Mutex<HashMap<String, u64>>,
+    /// Clock-skew warnings received from Origin on DeltaAck.
+    pub clock_skew_warnings: AtomicU64,
 }
 
 impl SyncMetrics {
@@ -108,7 +110,13 @@ impl SyncMetrics {
             checksum_failures: AtomicU64::new(0),
             conflicts_total: AtomicU64::new(0),
             conflicts_by_collection: std::sync::Mutex::new(HashMap::new()),
+            clock_skew_warnings: AtomicU64::new(0),
         }
+    }
+
+    /// Record a clock-skew warning reported by Origin in a DeltaAck.
+    pub fn record_clock_skew_warning(&self) {
+        self.clock_skew_warnings.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_push(&self, count: u64) {

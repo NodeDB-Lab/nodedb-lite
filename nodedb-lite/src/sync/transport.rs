@@ -517,6 +517,7 @@ mod tests {
         let ack = nodedb_types::sync::wire::DeltaAckMsg {
             mutation_id: 42,
             lsn: 100,
+            clock_skew_warning_ms: None,
         };
         let frame = SyncFrame::encode_or_empty(SyncMessageType::DeltaAck, &ack);
 
