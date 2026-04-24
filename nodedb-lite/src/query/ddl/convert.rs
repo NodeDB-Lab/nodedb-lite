@@ -317,6 +317,8 @@ fn parse_convert_sql(sql: &str, target_mode: &str) -> Result<(String, StrictSche
                     ColumnDef::nullable("data", ColumnType::String),
                 ],
                 version: 1,
+                dropped_columns: Vec::new(),
+                bitemporal: false,
             },
         ))
     }

@@ -204,6 +204,8 @@ impl<S: StorageEngine> StrictEngine<S> {
                     let old_schema = nodedb_types::columnar::StrictSchema {
                         columns: state.schema.columns[..old_col_count].to_vec(),
                         version: tuple_version,
+                        dropped_columns: Vec::new(),
+                        bitemporal: state.schema.bitemporal,
                     };
                     let old_decoder = nodedb_strict::TupleDecoder::new(&old_schema);
                     let mut values = old_decoder

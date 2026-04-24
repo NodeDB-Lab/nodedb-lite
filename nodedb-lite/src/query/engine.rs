@@ -100,8 +100,11 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 ..
             } => self.execute_point_get(collection, engine, key_value),
             SqlPlan::Insert {
-                collection, rows, ..
-            } => self.execute_insert(collection, rows),
+                collection,
+                rows,
+                if_absent,
+                ..
+            } => self.execute_insert(collection, rows, *if_absent),
             SqlPlan::Update {
                 collection,
                 assignments,
@@ -194,13 +197,14 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         rows: &[Vec<(String, nodedb_sql::SqlValue)>],
     ) -> Result<QueryResult, LiteError> {
         // In Lite, CRDT storage is naturally upsert — same as insert.
-        self.execute_insert(collection, rows)
+        self.execute_insert(collection, rows, true)
     }
 
     fn execute_insert(
         &self,
         collection: &str,
         rows: &[Vec<(String, SqlValue)>],
+        if_absent: bool,
     ) -> Result<QueryResult, LiteError> {
         let mut crdt = self.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
         let mut affected = 0;
@@ -210,6 +214,14 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 .find(|(k, _)| k == "id")
                 .map(|(_, v)| sql_value_to_string(v))
                 .unwrap_or_default();
+            if crdt.exists(collection, &id) {
+                if if_absent {
+                    continue;
+                }
+                return Err(LiteError::Query(format!(
+                    "duplicate key value violates unique constraint on '{collection}' (id = '{id}')"
+                )));
+            }
             let fields: Vec<(&str, loro::LoroValue)> = row
                 .iter()
                 .map(|(k, v)| (k.as_str(), sql_value_to_loro(v)))

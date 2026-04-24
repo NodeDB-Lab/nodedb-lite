@@ -14,7 +14,7 @@ pub fn column_type_to_arrow(ct: &ColumnType) -> arrow::datatypes::DataType {
         ColumnType::Bytes | ColumnType::Geometry | ColumnType::Json => {
             arrow::datatypes::DataType::Binary
         }
-        ColumnType::Timestamp => {
+        ColumnType::Timestamp | ColumnType::SystemTimestamp => {
             arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None)
         }
         ColumnType::Decimal => arrow::datatypes::DataType::Utf8, // Lossless string representation

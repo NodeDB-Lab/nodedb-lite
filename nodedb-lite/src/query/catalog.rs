@@ -33,7 +33,10 @@ impl<S: StorageEngine> LiteCatalog<S> {
 }
 
 impl<S: StorageEngine> SqlCatalog for LiteCatalog<S> {
-    fn get_collection(&self, name: &str) -> Option<CollectionInfo> {
+    fn get_collection(
+        &self,
+        name: &str,
+    ) -> Result<Option<CollectionInfo>, nodedb_sql::catalog::SqlCatalogError> {
         // Check strict collections first.
         if let Ok(strict) = self.strict.lock()
             && let Some(schema) = strict.schema(name)
@@ -54,33 +57,37 @@ impl<S: StorageEngine> SqlCatalog for LiteCatalog<S> {
                 .iter()
                 .find(|c| c.primary_key)
                 .map(|c| c.name.clone());
-            return Some(CollectionInfo {
+            return Ok(Some(CollectionInfo {
                 name: name.into(),
                 engine: EngineType::DocumentStrict,
                 columns,
                 primary_key: pk,
                 has_auto_tier: false,
-            });
+                indexes: Vec::new(),
+                bitemporal: false,
+            }));
         }
 
         // Check columnar collections.
         if let Ok(columnar) = self.columnar.lock()
             && columnar.schema(name).is_some()
         {
-            return Some(CollectionInfo {
+            return Ok(Some(CollectionInfo {
                 name: name.into(),
                 engine: EngineType::Columnar,
                 columns: Vec::new(),
                 primary_key: None,
                 has_auto_tier: false,
-            });
+                indexes: Vec::new(),
+                bitemporal: false,
+            }));
         }
 
         // Check CRDT (schemaless) collections.
         if let Ok(crdt) = self.crdt.lock()
             && crdt.collection_names().iter().any(|n| n == name)
         {
-            return Some(CollectionInfo {
+            return Ok(Some(CollectionInfo {
                 name: name.into(),
                 engine: EngineType::DocumentSchemaless,
                 columns: vec![ColumnInfo {
@@ -92,10 +99,12 @@ impl<S: StorageEngine> SqlCatalog for LiteCatalog<S> {
                 }],
                 primary_key: Some("id".into()),
                 has_auto_tier: false,
-            });
+                indexes: Vec::new(),
+                bitemporal: false,
+            }));
         }
 
-        None
+        Ok(None)
     }
 }
 
@@ -107,7 +116,7 @@ fn convert_column_type(ct: &nodedb_types::columnar::ColumnType) -> SqlDataType {
         ColumnType::String => SqlDataType::String,
         ColumnType::Bool => SqlDataType::Bool,
         ColumnType::Bytes | ColumnType::Geometry | ColumnType::Json => SqlDataType::Bytes,
-        ColumnType::Timestamp => SqlDataType::Timestamp,
+        ColumnType::Timestamp | ColumnType::SystemTimestamp => SqlDataType::Timestamp,
         ColumnType::Decimal | ColumnType::Uuid | ColumnType::Ulid | ColumnType::Regex => {
             SqlDataType::String
         }

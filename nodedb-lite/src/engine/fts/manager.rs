@@ -57,15 +57,15 @@ impl FtsCollectionManager {
             .entry(key.clone())
             .or_insert_with(|| FtsIndex::new(MemoryBackend::new()));
         // Remove old entry first (upsert semantics).
-        let _ = idx.remove_document(&key, doc_id);
-        let _ = idx.index_document(&key, doc_id, text);
+        let _ = idx.remove_document(0, &key, doc_id);
+        let _ = idx.index_document(0, &key, doc_id, text);
     }
 
     /// Remove a document from the whole-document index.
     pub fn remove_document(&mut self, collection: &str, doc_id: &str) {
         let key = format!("{collection}:_doc");
         if let Some(idx) = self.indices.get_mut(&key) {
-            let _ = idx.remove_document(&key, doc_id);
+            let _ = idx.remove_document(0, &key, doc_id);
         }
     }
 
@@ -88,7 +88,7 @@ impl FtsCollectionManager {
             QueryMode::Or => FtsQueryMode::Or,
             QueryMode::And => FtsQueryMode::And,
         };
-        idx.search_with_mode(&key, query, top_k, params.fuzzy, mode)
+        idx.search_with_mode(0, &key, query, top_k, params.fuzzy, mode)
             .inspect_err(|e| tracing::warn!(collection, error = %e, "fts search failed"))
             .unwrap_or_default()
     }
@@ -108,15 +108,15 @@ impl FtsCollectionManager {
             .indices
             .entry(key.clone())
             .or_insert_with(|| FtsIndex::new(MemoryBackend::new()));
-        let _ = idx.remove_document(&key, doc_id);
-        let _ = idx.index_document(&key, doc_id, text);
+        let _ = idx.remove_document(0, &key, doc_id);
+        let _ = idx.index_document(0, &key, doc_id, text);
     }
 
     /// Remove all field entries for a document across all fields in a collection.
     pub fn remove_field(&mut self, collection: &str, field: &str, doc_id: &str) {
         let key = format!("{collection}:{field}");
         if let Some(idx) = self.indices.get_mut(&key) {
-            let _ = idx.remove_document(&key, doc_id);
+            let _ = idx.remove_document(0, &key, doc_id);
         }
     }
 

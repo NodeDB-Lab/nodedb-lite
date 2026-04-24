@@ -88,6 +88,7 @@ impl TimeseriesEngine {
             interval_ms: (global_max_ts - global_min_ts) as u64,
             last_flushed_wal_lsn: 0,
             column_stats: HashMap::new(),
+            max_system_ts: 0,
         };
 
         let merged_partition = FlushedPartition {
