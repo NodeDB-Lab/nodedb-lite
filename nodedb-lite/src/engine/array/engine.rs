@@ -227,9 +227,7 @@ impl ArrayEngineState {
                 detail: format!("array '{name}' not found"),
             })?;
         let schema = state.schema.clone();
-        state
-            .memtable
-            .erase_cell(&schema, coord, system_from_ms)?;
+        state.memtable.erase_cell(&schema, coord, system_from_ms)?;
         self.flush_memtable(storage, name)
     }
 
