@@ -91,7 +91,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             }
         }
         // Sort by depth (closer = higher rank), deduplicate keeping smallest depth.
-        graph_nodes.sort_by(|a, b| a.1.cmp(&b.1));
+        graph_nodes.sort_by_key(|n| n.1);
         let mut seen = std::collections::HashSet::new();
         graph_nodes.retain(|(id, _)| seen.insert(id.clone()));
         let graph_ranked: Vec<nodedb_query::fusion::RankedResult> = graph_nodes

@@ -56,36 +56,28 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             inline_threshold: nodedb_types::KV_DEFAULT_INLINE_THRESHOLD,
         };
 
-        // Store KV collection metadata via NodeDbLite.
-        let db = self.storage.clone();
-        let config_clone = config.clone();
-        let name_clone = name.clone();
-        tokio::task::block_in_place(|| {
-            let handle = tokio::runtime::Handle::current();
-            handle.block_on(async {
-                // Use the low-level storage to write metadata, same pattern as
-                // other Lite DDL handlers.
-                let meta = crate::nodedb::collection::ddl::CollectionMeta {
-                    name: name_clone.clone(),
-                    collection_type: "kv".to_string(),
-                    created_at_ms: crate::nodedb::collection::ddl::now_ms(),
-                    fields: config_clone
-                        .schema
-                        .columns
-                        .iter()
-                        .map(|c| (c.name.clone(), c.column_type.to_string()))
-                        .collect(),
-                    config_json: sonic_rs::to_string(&config_clone).ok(),
-                };
-                let key = format!("collection:{name_clone}");
-                let bytes = sonic_rs::to_vec(&meta)
-                    .map_err(|e| LiteError::Query(format!("serialize: {e}")))?;
-                db.put(nodedb_types::Namespace::Meta, key.as_bytes(), &bytes)
-                    .await
-                    .map_err(|e| LiteError::Query(format!("storage: {e}")))?;
-                Ok::<(), LiteError>(())
-            })
-        })?;
+        // Store KV collection metadata via the low-level storage. The
+        // outer fn is already `async`, so we just `.await` directly —
+        // no `block_in_place` / `block_on` dance is needed.
+        let meta = crate::nodedb::collection::ddl::CollectionMeta {
+            name: name.clone(),
+            collection_type: "kv".to_string(),
+            created_at_ms: crate::nodedb::collection::ddl::now_ms(),
+            fields: config
+                .schema
+                .columns
+                .iter()
+                .map(|c| (c.name.clone(), c.column_type.to_string()))
+                .collect(),
+            config_json: sonic_rs::to_string(&config).ok(),
+        };
+        let key = format!("collection:{name}");
+        let bytes =
+            sonic_rs::to_vec(&meta).map_err(|e| LiteError::Query(format!("serialize: {e}")))?;
+        self.storage
+            .put(nodedb_types::Namespace::Meta, key.as_bytes(), &bytes)
+            .await
+            .map_err(|e| LiteError::Query(format!("storage: {e}")))?;
 
         let ttl_info = match &config.ttl {
             Some(nodedb_types::KvTtlPolicy::FixedDuration { duration_ms }) => {

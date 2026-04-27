@@ -106,7 +106,7 @@ fn crm_schema() -> nodedb_types::columnar::StrictSchema {
 #[tokio::test]
 async fn create_collection_and_insert() {
     let storage = Arc::new(MemStorage::new());
-    let mut engine = StrictEngine::new(Arc::clone(&storage));
+    let engine = StrictEngine::new(Arc::clone(&storage));
 
     engine
         .create_collection("customers", crm_schema())
@@ -138,7 +138,7 @@ async fn create_collection_and_insert() {
 #[tokio::test]
 async fn get_by_pk() {
     let storage = Arc::new(MemStorage::new());
-    let mut engine = StrictEngine::new(Arc::clone(&storage));
+    let engine = StrictEngine::new(Arc::clone(&storage));
     engine
         .create_collection("customers", crm_schema())
         .await
@@ -172,7 +172,7 @@ async fn get_by_pk() {
 #[tokio::test]
 async fn get_projected() {
     let storage = Arc::new(MemStorage::new());
-    let mut engine = StrictEngine::new(Arc::clone(&storage));
+    let engine = StrictEngine::new(Arc::clone(&storage));
     engine
         .create_collection("customers", crm_schema())
         .await
@@ -207,7 +207,7 @@ async fn get_projected() {
 #[tokio::test]
 async fn update_row() {
     let storage = Arc::new(MemStorage::new());
-    let mut engine = StrictEngine::new(Arc::clone(&storage));
+    let engine = StrictEngine::new(Arc::clone(&storage));
     engine
         .create_collection("customers", crm_schema())
         .await
@@ -253,7 +253,7 @@ async fn update_row() {
 #[tokio::test]
 async fn delete_row() {
     let storage = Arc::new(MemStorage::new());
-    let mut engine = StrictEngine::new(Arc::clone(&storage));
+    let engine = StrictEngine::new(Arc::clone(&storage));
     engine
         .create_collection("customers", crm_schema())
         .await
@@ -297,7 +297,7 @@ async fn delete_row() {
 #[tokio::test]
 async fn duplicate_pk_rejected() {
     let storage = Arc::new(MemStorage::new());
-    let mut engine = StrictEngine::new(Arc::clone(&storage));
+    let engine = StrictEngine::new(Arc::clone(&storage));
     engine
         .create_collection("customers", crm_schema())
         .await
@@ -322,7 +322,7 @@ async fn duplicate_pk_rejected() {
 #[tokio::test]
 async fn scan_and_count() {
     let storage = Arc::new(MemStorage::new());
-    let mut engine = StrictEngine::new(Arc::clone(&storage));
+    let engine = StrictEngine::new(Arc::clone(&storage));
     engine
         .create_collection("customers", crm_schema())
         .await
@@ -356,7 +356,7 @@ async fn restore_from_storage() {
 
     // Create and populate.
     {
-        let mut engine = StrictEngine::new(Arc::clone(&storage));
+        let engine = StrictEngine::new(Arc::clone(&storage));
         engine
             .create_collection("customers", crm_schema())
             .await
@@ -394,7 +394,7 @@ async fn restore_from_storage() {
 #[tokio::test]
 async fn batch_insert() {
     let storage = Arc::new(MemStorage::new());
-    let mut engine = StrictEngine::new(Arc::clone(&storage));
+    let engine = StrictEngine::new(Arc::clone(&storage));
     engine
         .create_collection("customers", crm_schema())
         .await
@@ -423,7 +423,7 @@ async fn batch_insert() {
 #[tokio::test]
 async fn drop_collection() {
     let storage = Arc::new(MemStorage::new());
-    let mut engine = StrictEngine::new(Arc::clone(&storage));
+    let engine = StrictEngine::new(Arc::clone(&storage));
     engine
         .create_collection("customers", crm_schema())
         .await
@@ -452,7 +452,7 @@ async fn drop_collection() {
 #[tokio::test]
 async fn alter_add_column() {
     let storage = Arc::new(MemStorage::new());
-    let mut engine = StrictEngine::new(Arc::clone(&storage));
+    let engine = StrictEngine::new(Arc::clone(&storage));
     engine
         .create_collection("customers", crm_schema())
         .await
@@ -502,7 +502,7 @@ async fn alter_add_column() {
 #[tokio::test]
 async fn alter_add_non_nullable_without_default_rejected() {
     let storage = Arc::new(MemStorage::new());
-    let mut engine = StrictEngine::new(Arc::clone(&storage));
+    let engine = StrictEngine::new(Arc::clone(&storage));
     engine
         .create_collection("customers", crm_schema())
         .await
@@ -520,7 +520,7 @@ async fn alter_add_non_nullable_without_default_rejected() {
 #[tokio::test]
 async fn alter_add_duplicate_column_rejected() {
     let storage = Arc::new(MemStorage::new());
-    let mut engine = StrictEngine::new(Arc::clone(&storage));
+    let engine = StrictEngine::new(Arc::clone(&storage));
     engine
         .create_collection("customers", crm_schema())
         .await

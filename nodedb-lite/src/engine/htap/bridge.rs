@@ -9,6 +9,11 @@
 //! - Source → target collection mapping
 //! - Last replicated timestamp (for lag measurement)
 //! - Row count delta (for consistency checks)
+//!
+//! All methods take `&self`; the view map lives behind a `Mutex` that is
+//! held only briefly and never across `.await`. The bridge is therefore
+//! natively `Send + Sync` and is stored as `Arc<HtapBridge>` (no outer
+//! `Mutex<HtapBridge>` needed).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -34,84 +39,86 @@ pub struct MaterializedView {
 
 /// Manages CDC bridges between strict document collections and columnar
 /// materialized views.
-///
-/// Each bridge replicates changes from a source strict collection into a
-/// target columnar collection. Multiple views can be created from the same source.
 pub struct HtapBridge {
     /// Source collection name → list of materialized views.
-    views: HashMap<String, Vec<MaterializedView>>,
+    views: Mutex<HashMap<String, Vec<MaterializedView>>>,
 }
 
 impl HtapBridge {
     /// Create an empty bridge with no materialized views.
     pub fn new() -> Self {
         Self {
-            views: HashMap::new(),
+            views: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn lock_views(&self) -> std::sync::MutexGuard<'_, HashMap<String, Vec<MaterializedView>>> {
+        match self.views.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
         }
     }
 
     /// Register a new materialized view.
-    ///
-    /// The target columnar collection must already exist in the ColumnarEngine.
-    pub fn register_view(&mut self, source: &str, target: &str) {
+    pub fn register_view(&self, source: &str, target: &str) {
         let view = MaterializedView {
             source: source.to_string(),
             target: target.to_string(),
             last_replicated_ms: now_ms(),
             rows_replicated: 0,
         };
-        self.views.entry(source.to_string()).or_default().push(view);
+        self.lock_views()
+            .entry(source.to_string())
+            .or_default()
+            .push(view);
     }
 
     /// Remove a materialized view by target name.
-    pub fn remove_view(&mut self, target: &str) {
-        for views in self.views.values_mut() {
+    pub fn remove_view(&self, target: &str) {
+        let mut g = self.lock_views();
+        for views in g.values_mut() {
             views.retain(|v| v.target != target);
         }
-        self.views.retain(|_, views| !views.is_empty());
+        g.retain(|_, views| !views.is_empty());
     }
 
-    /// Get all materialized views for a source collection.
-    pub fn views_for_source(&self, source: &str) -> &[MaterializedView] {
-        self.views.get(source).map(|v| v.as_slice()).unwrap_or(&[])
+    /// Get all materialized views for a source collection (returns clones).
+    pub fn views_for_source(&self, source: &str) -> Vec<MaterializedView> {
+        self.lock_views().get(source).cloned().unwrap_or_default()
     }
 
-    /// Get a materialized view by target name.
-    pub fn view_by_target(&self, target: &str) -> Option<&MaterializedView> {
-        self.views.values().flatten().find(|v| v.target == target)
+    /// Get a materialized view by target name (returns clone).
+    pub fn view_by_target(&self, target: &str) -> Option<MaterializedView> {
+        self.lock_views()
+            .values()
+            .flatten()
+            .find(|v| v.target == target)
+            .cloned()
     }
 
     /// List all materialized view target names.
-    pub fn all_targets(&self) -> Vec<&str> {
-        self.views
+    pub fn all_targets(&self) -> Vec<String> {
+        self.lock_views()
             .values()
             .flatten()
-            .map(|v| v.target.as_str())
+            .map(|v| v.target.clone())
             .collect()
     }
 
     /// Replicate an INSERT from a source strict collection to all its
     /// materialized columnar views.
-    ///
-    /// Called after `strict_insert()` succeeds. Writes the same row into
-    /// each target columnar collection's memtable.
     pub fn replicate_insert<S: StorageEngine>(
-        &mut self,
+        &self,
         source: &str,
         values: &[Value],
-        columnar: &Mutex<ColumnarEngine<S>>,
+        columnar: &ColumnarEngine<S>,
     ) {
-        let Some(views) = self.views.get_mut(source) else {
+        let mut g = self.lock_views();
+        let Some(views) = g.get_mut(source) else {
             return;
         };
-
-        let mut engine = match columnar.lock() {
-            Ok(e) => e,
-            Err(p) => p.into_inner(),
-        };
-
         for view in views.iter_mut() {
-            if engine.insert(&view.target, values).is_ok() {
+            if columnar.insert(&view.target, values).is_ok() {
                 view.rows_replicated += 1;
                 view.last_replicated_ms = now_ms();
             }
@@ -121,22 +128,17 @@ impl HtapBridge {
     /// Replicate a DELETE from a source strict collection to all its
     /// materialized columnar views.
     pub fn replicate_delete<S: StorageEngine>(
-        &mut self,
+        &self,
         source: &str,
         pk: &Value,
-        columnar: &Mutex<ColumnarEngine<S>>,
+        columnar: &ColumnarEngine<S>,
     ) {
-        let Some(views) = self.views.get_mut(source) else {
+        let mut g = self.lock_views();
+        let Some(views) = g.get_mut(source) else {
             return;
         };
-
-        let mut engine = match columnar.lock() {
-            Ok(e) => e,
-            Err(p) => p.into_inner(),
-        };
-
         for view in views.iter_mut() {
-            if engine.delete(&view.target, pk).unwrap_or(false) {
+            if columnar.delete(&view.target, pk).unwrap_or(false) {
                 view.last_replicated_ms = now_ms();
             }
         }
@@ -151,7 +153,7 @@ impl HtapBridge {
 
     /// Whether any materialized views exist.
     pub fn is_empty(&self) -> bool {
-        self.views.is_empty()
+        self.lock_views().is_empty()
     }
 }
 
@@ -174,7 +176,7 @@ mod tests {
 
     #[test]
     fn register_and_lookup_view() {
-        let mut bridge = HtapBridge::new();
+        let bridge = HtapBridge::new();
         bridge.register_view("customers", "customer_analytics");
 
         assert!(!bridge.is_empty());
@@ -189,7 +191,7 @@ mod tests {
 
     #[test]
     fn remove_view() {
-        let mut bridge = HtapBridge::new();
+        let bridge = HtapBridge::new();
         bridge.register_view("customers", "analytics_1");
         bridge.register_view("customers", "analytics_2");
 
@@ -205,7 +207,7 @@ mod tests {
 
     #[test]
     fn multiple_sources() {
-        let mut bridge = HtapBridge::new();
+        let bridge = HtapBridge::new();
         bridge.register_view("orders", "order_analytics");
         bridge.register_view("customers", "customer_analytics");
 

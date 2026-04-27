@@ -318,7 +318,7 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
     ) -> NodeDbResult<EdgeId> {
         {
             let mut csr = self.csr.lock_or_recover();
-            csr.add_edge(from.as_str(), edge_type, to.as_str());
+            let _ = csr.add_edge(from.as_str(), edge_type, to.as_str());
         }
 
         // ── Record in CRDT (including properties) ──
@@ -520,6 +520,7 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
             label_filter,
             max_depth as usize,
             DEFAULT_MAX_VISITED,
+            None,
         );
 
         Ok(path.map(|p| p.into_iter().map(NodeId::new).collect()))

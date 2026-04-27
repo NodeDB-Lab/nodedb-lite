@@ -47,21 +47,17 @@ async fn concurrent_columnar_scan_and_delete() {
     }
 
     // Flush to create a segment.
-    tokio::task::block_in_place(|| {
-        let mut columnar = db.columnar_engine().lock().unwrap();
-        tokio::runtime::Handle::current()
-            .block_on(columnar.flush_collection("products"))
-            .unwrap();
-    });
+    db.columnar_engine()
+        .flush_collection("products")
+        .await
+        .unwrap();
 
     // Spawn concurrent delete and scan operations.
     let db_del = Arc::clone(&db);
     let delete_task = tokio::spawn(async move {
         for i in 0..10 {
-            tokio::task::block_in_place(|| {
-                let mut columnar = db_del.columnar_engine().lock().unwrap();
-                let _ = columnar.delete("products", &Value::Integer(i));
-            });
+            let columnar = db_del.columnar_engine();
+            let _ = columnar.delete("products", &Value::Integer(i));
             tokio::task::yield_now().await;
         }
     });
@@ -69,7 +65,7 @@ async fn concurrent_columnar_scan_and_delete() {
     let db_scan = Arc::clone(&db);
     let scan_task = tokio::spawn(async move {
         // Scan should see a consistent snapshot — either pre-delete or post-delete.
-        let columnar = db_scan.columnar_engine().lock().unwrap();
+        let columnar = db_scan.columnar_engine();
         let count = columnar.row_count("products");
         // Count should be between 40 (all deletes done) and 50 (no deletes yet).
         assert!((40..=50).contains(&count), "unexpected count: {count}");
@@ -105,16 +101,11 @@ async fn concurrent_scan_and_compaction() {
         .unwrap();
     }
 
-    tokio::task::block_in_place(|| {
-        let mut columnar = db.columnar_engine().lock().unwrap();
-        tokio::runtime::Handle::current()
-            .block_on(columnar.flush_collection("logs"))
-            .unwrap();
-    });
+    db.columnar_engine().flush_collection("logs").await.unwrap();
 
     // Delete enough rows to trigger compaction (>20%).
     {
-        let mut columnar = db.columnar_engine().lock().unwrap();
+        let columnar = db.columnar_engine();
         for i in 0..10 {
             columnar.delete("logs", &Value::Integer(i)).unwrap();
         }
@@ -123,18 +114,15 @@ async fn concurrent_scan_and_compaction() {
     // Compact and scan concurrently.
     let db_compact = Arc::clone(&db);
     let compact_task = tokio::spawn(async move {
-        tokio::task::block_in_place(|| {
-            let mut columnar = db_compact.columnar_engine().lock().unwrap();
-            let handle = tokio::runtime::Handle::current();
-            let _ = handle.block_on(columnar.try_compact_collection("logs"));
-        });
+        let columnar = db_compact.columnar_engine();
+        let _ = columnar.try_compact_collection("logs").await;
     });
 
     let db_scan = Arc::clone(&db);
     let scan_task = tokio::spawn(async move {
         // Yield to let compaction start.
         tokio::task::yield_now().await;
-        let columnar = db_scan.columnar_engine().lock().unwrap();
+        let columnar = db_scan.columnar_engine();
         let count = columnar.row_count("logs");
         // After compaction: 20 rows. Before: 30 (with 10 deleted).
         assert!((20..=30).contains(&count), "unexpected count: {count}");
@@ -174,13 +162,11 @@ async fn concurrent_insert_and_flush() {
     // Spawn flush and insert concurrently.
     let db_flush = Arc::clone(&db);
     let flush_task = tokio::spawn(async move {
-        tokio::task::block_in_place(|| {
-            let mut columnar = db_flush.columnar_engine().lock().unwrap();
-            let handle = tokio::runtime::Handle::current();
-            handle
-                .block_on(columnar.flush_collection("events"))
-                .unwrap();
-        });
+        db_flush
+            .columnar_engine()
+            .flush_collection("events")
+            .await
+            .unwrap();
     });
 
     let db_insert = Arc::clone(&db);
@@ -200,7 +186,7 @@ async fn concurrent_insert_and_flush() {
     insert_task.await.unwrap();
 
     // Total should be 20 (flushed) + up to 10 (post-flush inserts).
-    let columnar = db.columnar_engine().lock().unwrap();
+    let columnar = db.columnar_engine();
     let count = columnar.row_count("events");
     assert!(count >= 20, "at least flushed rows: {count}");
 }
@@ -259,11 +245,10 @@ async fn concurrent_strict_reads_and_writes() {
     let read_task = tokio::spawn(async move {
         // Read existing rows while writes are happening.
         for i in 0..20 {
-            let row = tokio::task::block_in_place(|| {
-                let strict = db_read.strict_engine().lock().unwrap();
-                tokio::runtime::Handle::current()
-                    .block_on(strict.get("accounts", &Value::Integer(i)))
-            });
+            let row = db_read
+                .strict_engine()
+                .get("accounts", &Value::Integer(i))
+                .await;
             // Row should always exist — redb MVCC ensures consistent reads.
             assert!(row.is_ok());
             if let Ok(Some(vals)) = row {
@@ -276,10 +261,6 @@ async fn concurrent_strict_reads_and_writes() {
     read_task.await.unwrap();
 
     // All rows should be accessible after both tasks complete.
-    let count = tokio::task::block_in_place(|| {
-        let strict = db.strict_engine().lock().unwrap();
-        tokio::runtime::Handle::current().block_on(strict.count("accounts"))
-    })
-    .unwrap();
+    let count = db.strict_engine().count("accounts").await.unwrap();
     assert_eq!(count, 30);
 }

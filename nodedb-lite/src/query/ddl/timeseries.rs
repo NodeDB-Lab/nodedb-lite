@@ -39,16 +39,9 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             interval: interval.clone(),
         };
 
-        {
-            let mut columnar = match self.columnar.lock() {
-                Ok(c) => c,
-                Err(p) => p.into_inner(),
-            };
-            tokio::task::block_in_place(|| {
-                let handle = tokio::runtime::Handle::current();
-                handle.block_on(columnar.create_collection(&name, schema, profile))
-            })?;
-        }
+        self.columnar
+            .create_collection(&name, schema, profile)
+            .await?;
 
         self.register_columnar_collection(&name);
 

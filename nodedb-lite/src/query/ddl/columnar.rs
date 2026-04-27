@@ -54,16 +54,9 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             nodedb_types::columnar::ColumnarProfile::Plain
         };
 
-        {
-            let mut columnar = match self.columnar.lock() {
-                Ok(c) => c,
-                Err(p) => p.into_inner(),
-            };
-            tokio::task::block_in_place(|| {
-                let handle = tokio::runtime::Handle::current();
-                handle.block_on(columnar.create_collection(&name, columnar_schema, profile))
-            })?;
-        }
+        self.columnar
+            .create_collection(&name, columnar_schema, profile)
+            .await?;
 
         self.register_columnar_collection(&name);
 
@@ -81,16 +74,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         &self,
         name: &str,
     ) -> Result<QueryResult, LiteError> {
-        {
-            let mut columnar = match self.columnar.lock() {
-                Ok(c) => c,
-                Err(p) => p.into_inner(),
-            };
-            tokio::task::block_in_place(|| {
-                let handle = tokio::runtime::Handle::current();
-                handle.block_on(columnar.drop_collection(name))
-            })?;
-        }
+        self.columnar.drop_collection(name).await?;
 
         Ok(QueryResult {
             columns: vec!["result".into()],

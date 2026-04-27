@@ -14,15 +14,15 @@ use crate::storage::engine::StorageEngine;
 /// Catalog adapter for Lite that resolves collections from local engines.
 pub struct LiteCatalog<S: StorageEngine> {
     crdt: Arc<Mutex<CrdtEngine>>,
-    strict: Arc<Mutex<StrictEngine<S>>>,
-    columnar: Arc<Mutex<ColumnarEngine<S>>>,
+    strict: Arc<StrictEngine<S>>,
+    columnar: Arc<ColumnarEngine<S>>,
 }
 
 impl<S: StorageEngine> LiteCatalog<S> {
     pub fn new(
         crdt: Arc<Mutex<CrdtEngine>>,
-        strict: Arc<Mutex<StrictEngine<S>>>,
-        columnar: Arc<Mutex<ColumnarEngine<S>>>,
+        strict: Arc<StrictEngine<S>>,
+        columnar: Arc<ColumnarEngine<S>>,
     ) -> Self {
         Self {
             crdt,
@@ -38,9 +38,7 @@ impl<S: StorageEngine> SqlCatalog for LiteCatalog<S> {
         name: &str,
     ) -> Result<Option<CollectionInfo>, nodedb_sql::catalog::SqlCatalogError> {
         // Check strict collections first.
-        if let Ok(strict) = self.strict.lock()
-            && let Some(schema) = strict.schema(name)
-        {
+        if let Some(schema) = self.strict.schema(name) {
             let columns = schema
                 .columns
                 .iter()
@@ -69,9 +67,7 @@ impl<S: StorageEngine> SqlCatalog for LiteCatalog<S> {
         }
 
         // Check columnar collections.
-        if let Ok(columnar) = self.columnar.lock()
-            && columnar.schema(name).is_some()
-        {
+        if self.columnar.schema(name).is_some() {
             return Ok(Some(CollectionInfo {
                 name: name.into(),
                 engine: EngineType::Columnar,

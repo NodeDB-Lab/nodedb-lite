@@ -20,45 +20,22 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         let (target, source) = parse_materialized_view_sql(sql)?;
 
         // Get the source strict schema.
-        let source_schema = {
-            let strict = match self.strict.lock() {
-                Ok(s) => s,
-                Err(p) => p.into_inner(),
-            };
-            strict.schema(&source).cloned().ok_or_else(|| {
-                LiteError::Query(format!(
-                    "source collection '{source}' not found (must be a strict collection)"
-                ))
-            })?
-        };
+        let source_schema = self.strict.schema(&source).ok_or_else(|| {
+            LiteError::Query(format!(
+                "source collection '{source}' not found (must be a strict collection)"
+            ))
+        })?;
 
         // Create the target columnar collection with the same schema.
         let columnar_schema = ColumnarSchema::new(source_schema.columns)
             .map_err(|e| LiteError::Query(e.to_string()))?;
 
-        {
-            let mut columnar = match self.columnar.lock() {
-                Ok(c) => c,
-                Err(p) => p.into_inner(),
-            };
-            tokio::task::block_in_place(|| {
-                let handle = tokio::runtime::Handle::current();
-                handle.block_on(columnar.create_collection(
-                    &target,
-                    columnar_schema,
-                    ColumnarProfile::Plain,
-                ))
-            })?;
-        }
+        self.columnar
+            .create_collection(&target, columnar_schema, ColumnarProfile::Plain)
+            .await?;
 
         // Register the CDC bridge.
-        {
-            let mut htap = match self.htap.lock() {
-                Ok(h) => h,
-                Err(p) => p.into_inner(),
-            };
-            htap.register_view(&source, &target);
-        }
+        self.htap.register_view(&source, &target);
 
         // Register the target as a queryable table.
         self.register_columnar_collection(&target);
@@ -84,25 +61,10 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             .to_lowercase();
 
         // Remove the CDC bridge.
-        {
-            let mut htap = match self.htap.lock() {
-                Ok(h) => h,
-                Err(p) => p.into_inner(),
-            };
-            htap.remove_view(&target);
-        }
+        self.htap.remove_view(&target);
 
         // Drop the underlying columnar collection.
-        {
-            let mut columnar = match self.columnar.lock() {
-                Ok(c) => c,
-                Err(p) => p.into_inner(),
-            };
-            tokio::task::block_in_place(|| {
-                let handle = tokio::runtime::Handle::current();
-                handle.block_on(columnar.drop_collection(&target))
-            })?;
-        }
+        self.columnar.drop_collection(&target).await?;
 
         Ok(QueryResult {
             columns: vec!["result".into()],

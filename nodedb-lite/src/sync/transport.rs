@@ -19,6 +19,16 @@ use crate::error::LiteError;
 
 /// Callback interface for the sync runner to read/write pending deltas
 /// from the owning `NodeDbLite`. This avoids the runner owning the database.
+///
+/// **Runtime contract:** All methods are called from inside a Tokio runtime
+/// (via `run_sync_loop`). Implementations MUST NOT use
+/// `tokio::task::block_in_place` to call `&self` async methods — that
+/// pattern panics on `current_thread` runtimes and is exactly what this
+/// trait was redesigned to avoid. Async work (e.g. persisting a synced
+/// function definition to storage) belongs on `import_definition`, which
+/// is `async fn` for that reason. Sync methods that touch only in-memory
+/// state may stay sync.
+#[async_trait::async_trait]
 pub trait SyncDelegate: Send + Sync + 'static {
     /// Get all pending CRDT deltas to push to Origin.
     fn pending_deltas(&self) -> Vec<PendingDelta>;
@@ -36,7 +46,9 @@ pub trait SyncDelegate: Send + Sync + 'static {
     /// Import remote deltas from Origin into local CRDT state.
     fn import_remote(&self, data: &[u8]);
     /// Import a definition sync message (function/trigger/procedure) from Origin.
-    fn import_definition(&self, msg: &nodedb_types::sync::wire::DefinitionSyncMsg);
+    /// Async because persisting the definition to storage involves
+    /// `redb::Database` writes through `spawn_blocking`.
+    async fn import_definition(&self, msg: &nodedb_types::sync::wire::DefinitionSyncMsg);
 }
 
 /// Run the sync loop — connects, handshakes, pushes/receives, reconnects.
@@ -300,7 +312,7 @@ async fn dispatch_frame(
         }
         SyncMessageType::DefinitionSync => {
             if let Some(msg) = frame.decode_body::<nodedb_types::sync::wire::DefinitionSyncMsg>() {
-                delegate.import_definition(&msg);
+                delegate.import_definition(&msg).await;
             }
         }
         SyncMessageType::PingPong => {
@@ -470,6 +482,7 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl SyncDelegate for MockDelegate {
         fn pending_deltas(&self) -> Vec<PendingDelta> {
             Vec::new()
@@ -496,7 +509,7 @@ mod tests {
             self.imported.lock().unwrap().push(data.to_vec());
         }
 
-        fn import_definition(&self, _msg: &nodedb_types::sync::wire::DefinitionSyncMsg) {
+        async fn import_definition(&self, _msg: &nodedb_types::sync::wire::DefinitionSyncMsg) {
             // No-op in test mock.
         }
     }

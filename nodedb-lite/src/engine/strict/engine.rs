@@ -7,7 +7,7 @@
 //! Uses the `nodedb-strict` crate for encoding/decoding and Arrow extraction.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use nodedb_strict::{StrictError, TupleDecoder, TupleEncoder};
 use nodedb_types::Namespace;
@@ -27,13 +27,21 @@ pub(super) const META_STRICT_COLLECTIONS: &[u8] = b"meta:strict_collections";
 ///
 /// Holds per-collection schemas, encoders, and decoders. Delegates storage
 /// to the shared `StorageEngine` under `Namespace::Strict`.
+///
+/// All public methods take `&self`. Mutable schema state lives behind an
+/// `RwLock<HashMap<String, Arc<CollectionState>>>`. CRUD readers clone the
+/// inner `Arc<CollectionState>` and drop the lock before any `.await`,
+/// so the engine is `Send + Sync` and can be stored in
+/// `Arc<StrictEngine<S>>` (no outer `Mutex` needed). DDL operations
+/// (`create_collection`, `drop_collection`, `alter_add_column`) take the
+/// write lock only to swap the map entry; storage I/O happens with the
+/// lock dropped.
 pub struct StrictEngine<S: StorageEngine> {
     pub(super) storage: Arc<S>,
-    /// Per-collection schema + encoder + decoder.
-    pub(super) collections: HashMap<String, CollectionState>,
+    pub(super) collections: RwLock<HashMap<String, Arc<CollectionState>>>,
 }
 
-pub(super) struct CollectionState {
+pub struct CollectionState {
     pub(super) schema: StrictSchema,
     pub(super) encoder: TupleEncoder,
     pub(super) decoder: TupleDecoder,
@@ -127,13 +135,13 @@ impl<S: StorageEngine> StrictEngine<S> {
     pub fn new(storage: Arc<S>) -> Self {
         Self {
             storage,
-            collections: HashMap::new(),
+            collections: RwLock::new(HashMap::new()),
         }
     }
 
     /// Restore strict collections from storage on startup.
     pub async fn restore(storage: Arc<S>) -> Result<Self, LiteError> {
-        let mut engine = Self::new(Arc::clone(&storage));
+        let engine = Self::new(Arc::clone(&storage));
 
         // Load collection list from meta.
         let list_bytes = storage
@@ -146,28 +154,37 @@ impl<S: StorageEngine> StrictEngine<S> {
             None => Vec::new(),
         };
 
-        // Load each schema.
+        // Load each schema, accumulating into a local map first to avoid
+        // holding the write lock across `.await`.
+        let mut loaded: HashMap<String, Arc<CollectionState>> = HashMap::new();
         for name in names {
             let meta_key = format!("{META_STRICT_SCHEMA_PREFIX}{name}");
             if let Some(schema_bytes) = storage.get(Namespace::Meta, meta_key.as_bytes()).await?
                 && let Ok(schema) = zerompk::from_msgpack::<StrictSchema>(&schema_bytes)
             {
-                engine
-                    .collections
-                    .insert(name, CollectionState::new(schema));
+                loaded.insert(name, Arc::new(CollectionState::new(schema)));
             }
         }
+
+        *engine
+            .collections
+            .write()
+            .map_err(|_| LiteError::LockPoisoned)? = loaded;
 
         Ok(engine)
     }
 
     // -- Internal helpers --
 
-    pub(super) fn get_state(&self, collection: &str) -> Result<&CollectionState, LiteError> {
-        self.collections
-            .get(collection)
-            .ok_or(LiteError::BadRequest {
-                detail: format!("strict collection '{collection}' does not exist"),
-            })
+    /// Look up a collection's state, returning a cloned `Arc` so callers can
+    /// drop the read lock before any `.await`.
+    pub(super) fn get_state(&self, collection: &str) -> Result<Arc<CollectionState>, LiteError> {
+        let guard = self
+            .collections
+            .read()
+            .map_err(|_| LiteError::LockPoisoned)?;
+        guard.get(collection).cloned().ok_or(LiteError::BadRequest {
+            detail: format!("strict collection '{collection}' does not exist"),
+        })
     }
 }

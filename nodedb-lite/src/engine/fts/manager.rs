@@ -15,8 +15,16 @@ use tracing;
 
 use nodedb_fts::FtsIndex;
 use nodedb_fts::backend::memory::MemoryBackend;
-use nodedb_fts::posting::{QueryMode as FtsQueryMode, TextSearchResult};
+use nodedb_fts::posting::QueryMode as FtsQueryMode;
+use nodedb_types::Surrogate;
 use nodedb_types::text_search::{QueryMode, TextSearchParams};
+
+/// A resolved FTS result with the original string doc_id restored.
+pub struct FtsResult {
+    pub doc_id: String,
+    pub score: f32,
+    pub fuzzy: bool,
+}
 
 /// Manages per-collection (and per-field) in-memory full-text search indexes.
 ///
@@ -27,13 +35,53 @@ pub struct FtsCollectionManager {
     /// Key: `"{collection}:{field}"` → FTS index.
     /// Whole-document index uses key `"{collection}:_doc"`.
     indices: HashMap<String, FtsIndex<MemoryBackend>>,
+    /// Forward map: original string doc_id → dense u32 surrogate.
+    ///
+    /// Surrogates **must** be dense (0, 1, 2, …) because `nodedb_fts::Memtable`
+    /// uses them as direct indices into a `Vec<u8>` fieldnorm array
+    /// (`record_doc` calls `vec.resize(surrogate + 1, 0)`). Hashing strings
+    /// into the u32 space produced sparse surrogates near `u32::MAX`, which
+    /// allocated multi-gigabyte zero-filled vectors per insert and made
+    /// indexing effectively hang.
+    id_to_surrogate: HashMap<String, u32>,
+    /// Reverse map: surrogate u32 → original string doc_id.
+    surrogate_to_id: HashMap<u32, String>,
+    /// Next surrogate to assign on first sighting of a doc_id.
+    next_surrogate: u32,
 }
 
 impl FtsCollectionManager {
     pub fn new() -> Self {
         Self {
             indices: HashMap::new(),
+            id_to_surrogate: HashMap::new(),
+            surrogate_to_id: HashMap::new(),
+            next_surrogate: 0,
         }
+    }
+
+    /// Look up or allocate a dense surrogate for a string `doc_id`.
+    ///
+    /// Returns the existing surrogate if `doc_id` has been indexed before,
+    /// otherwise assigns the next sequential u32 and records the mapping
+    /// in both directions.
+    fn surrogate_for(&mut self, doc_id: &str) -> Surrogate {
+        if let Some(&s) = self.id_to_surrogate.get(doc_id) {
+            return Surrogate(s);
+        }
+        let s = self.next_surrogate;
+        self.next_surrogate = self
+            .next_surrogate
+            .checked_add(1)
+            .expect("FTS surrogate counter overflowed u32");
+        self.id_to_surrogate.insert(doc_id.to_owned(), s);
+        self.surrogate_to_id.insert(s, doc_id.to_owned());
+        Surrogate(s)
+    }
+
+    /// Look up an existing surrogate without allocating one.
+    fn lookup_surrogate(&self, doc_id: &str) -> Option<Surrogate> {
+        self.id_to_surrogate.get(doc_id).copied().map(Surrogate)
     }
 
     /// Returns true if no collections are indexed.
@@ -51,21 +99,25 @@ impl FtsCollectionManager {
         if text.is_empty() {
             return;
         }
+        let surrogate = self.surrogate_for(doc_id);
         let key = format!("{collection}:_doc");
         let idx = self
             .indices
             .entry(key.clone())
             .or_insert_with(|| FtsIndex::new(MemoryBackend::new()));
         // Remove old entry first (upsert semantics).
-        let _ = idx.remove_document(0, &key, doc_id);
-        let _ = idx.index_document(0, &key, doc_id, text);
+        let _ = idx.remove_document(0, &key, surrogate);
+        let _ = idx.index_document(0, &key, surrogate, text);
     }
 
     /// Remove a document from the whole-document index.
     pub fn remove_document(&mut self, collection: &str, doc_id: &str) {
+        let Some(surrogate) = self.lookup_surrogate(doc_id) else {
+            return;
+        };
         let key = format!("{collection}:_doc");
         if let Some(idx) = self.indices.get_mut(&key) {
-            let _ = idx.remove_document(0, &key, doc_id);
+            let _ = idx.remove_document(0, &key, surrogate);
         }
     }
 
@@ -79,7 +131,7 @@ impl FtsCollectionManager {
         query: &str,
         top_k: usize,
         params: &TextSearchParams,
-    ) -> Vec<TextSearchResult> {
+    ) -> Vec<FtsResult> {
         let key = format!("{collection}:_doc");
         let Some(idx) = self.indices.get(&key) else {
             return Vec::new();
@@ -88,9 +140,20 @@ impl FtsCollectionManager {
             QueryMode::Or => FtsQueryMode::Or,
             QueryMode::And => FtsQueryMode::And,
         };
-        idx.search_with_mode(0, &key, query, top_k, params.fuzzy, mode)
+        let raw = idx
+            .search_with_mode(0, &key, query, top_k, params.fuzzy, mode, None)
             .inspect_err(|e| tracing::warn!(collection, error = %e, "fts search failed"))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        raw.into_iter()
+            .filter_map(|r| {
+                let doc_id = self.surrogate_to_id.get(&r.doc_id.0)?.clone();
+                Some(FtsResult {
+                    doc_id,
+                    score: r.score,
+                    fuzzy: r.fuzzy,
+                })
+            })
+            .collect()
     }
 
     // ── Per-field indexing (used by strict collections via index_integration) ─
@@ -103,20 +166,24 @@ impl FtsCollectionManager {
         if text.is_empty() {
             return;
         }
+        let surrogate = self.surrogate_for(doc_id);
         let key = format!("{collection}:{field}");
         let idx = self
             .indices
             .entry(key.clone())
             .or_insert_with(|| FtsIndex::new(MemoryBackend::new()));
-        let _ = idx.remove_document(0, &key, doc_id);
-        let _ = idx.index_document(0, &key, doc_id, text);
+        let _ = idx.remove_document(0, &key, surrogate);
+        let _ = idx.index_document(0, &key, surrogate, text);
     }
 
     /// Remove all field entries for a document across all fields in a collection.
     pub fn remove_field(&mut self, collection: &str, field: &str, doc_id: &str) {
+        let Some(surrogate) = self.lookup_surrogate(doc_id) else {
+            return;
+        };
         let key = format!("{collection}:{field}");
         if let Some(idx) = self.indices.get_mut(&key) {
-            let _ = idx.remove_document(0, &key, doc_id);
+            let _ = idx.remove_document(0, &key, surrogate);
         }
     }
 

@@ -21,9 +21,9 @@ use super::catalog::LiteCatalog;
 /// Lite-side query engine.
 pub struct LiteQueryEngine<S: StorageEngine> {
     pub(in crate::query) crdt: Arc<Mutex<CrdtEngine>>,
-    pub(in crate::query) strict: Arc<Mutex<StrictEngine<S>>>,
-    pub(in crate::query) columnar: Arc<Mutex<ColumnarEngine<S>>>,
-    pub(in crate::query) htap: Arc<Mutex<HtapBridge>>,
+    pub(in crate::query) strict: Arc<StrictEngine<S>>,
+    pub(in crate::query) columnar: Arc<ColumnarEngine<S>>,
+    pub(in crate::query) htap: Arc<HtapBridge>,
     pub(in crate::query) storage: Arc<S>,
     pub(in crate::query) timeseries:
         Arc<Mutex<crate::engine::timeseries::engine::TimeseriesEngine>>,
@@ -32,9 +32,9 @@ pub struct LiteQueryEngine<S: StorageEngine> {
 impl<S: StorageEngine> LiteQueryEngine<S> {
     pub fn new(
         crdt: Arc<Mutex<CrdtEngine>>,
-        strict: Arc<Mutex<StrictEngine<S>>>,
-        columnar: Arc<Mutex<ColumnarEngine<S>>>,
-        htap: Arc<Mutex<HtapBridge>>,
+        strict: Arc<StrictEngine<S>>,
+        columnar: Arc<ColumnarEngine<S>>,
+        htap: Arc<HtapBridge>,
         storage: Arc<S>,
         timeseries: Arc<Mutex<crate::engine::timeseries::engine::TimeseriesEngine>>,
     ) -> Self {
@@ -148,8 +148,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 })
             }
             EngineType::DocumentStrict => {
-                let strict = self.strict.lock().map_err(|_| LiteError::LockPoisoned)?;
-                let schema = strict.schema(collection);
+                let schema = self.strict.schema(collection);
                 let columns = schema
                     .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
                     .unwrap_or_else(|| vec!["id".into(), "data".into()]);

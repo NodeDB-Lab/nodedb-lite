@@ -172,6 +172,7 @@ async fn run_client(
             peer_id: 1000 + id as u64,
             mutation_id: 1,
             checksum: 0,
+            device_valid_time_ms: None,
         };
         if ws
             .send(Message::Binary(

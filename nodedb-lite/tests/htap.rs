@@ -18,7 +18,7 @@ async fn open_db() -> Arc<NodeDbLite<RedbStorage>> {
 // CDC correctness
 // ═══════════════════════════════════════════════════════════════════════
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn cdc_replicates_inserts_to_materialized_view() {
     let db = open_db().await;
 
@@ -66,7 +66,7 @@ async fn cdc_replicates_inserts_to_materialized_view() {
     .unwrap();
 
     // Verify: columnar materialized view received the rows.
-    let columnar = db.columnar_engine().lock().unwrap();
+    let columnar = db.columnar_engine();
     assert_eq!(columnar.row_count("customer_analytics"), 2);
 }
 
@@ -74,7 +74,7 @@ async fn cdc_replicates_inserts_to_materialized_view() {
 // CDC lag
 // ═══════════════════════════════════════════════════════════════════════
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn cdc_lag_is_bounded() {
     let db = open_db().await;
 
@@ -104,7 +104,7 @@ async fn cdc_lag_is_bounded() {
 
     // In Lite, CDC is synchronous — lag should be minimal.
     // The HTAP bridge tracks last_replicated_ms.
-    let htap = db.htap_bridge().lock().unwrap();
+    let htap = db.htap_bridge();
     let lag = htap.lag_ms("order_analytics");
     // Synchronous CDC: lag should be < 1 second.
     assert!(lag < 1000, "CDC lag too high: {lag}ms");
@@ -114,7 +114,7 @@ async fn cdc_lag_is_bounded() {
 // Default routing safety
 // ═══════════════════════════════════════════════════════════════════════
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn default_routing_goes_to_source() {
     let db = open_db().await;
 
@@ -157,7 +157,7 @@ async fn default_routing_goes_to_source() {
 // Auto routing correctness
 // ═══════════════════════════════════════════════════════════════════════
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn auto_routing_for_analytical_queries() {
     let db = open_db().await;
 
@@ -191,17 +191,15 @@ async fn auto_routing_for_analytical_queries() {
     }
 
     // Flush the columnar materialized view so it has segments to scan.
-    tokio::task::block_in_place(|| {
-        let mut columnar = db.columnar_engine().lock().unwrap();
-        tokio::runtime::Handle::current()
-            .block_on(columnar.flush_collection("sales_analytics"))
-            .unwrap();
-    });
+    db.columnar_engine()
+        .flush_collection("sales_analytics")
+        .await
+        .unwrap();
 
     // An analytical query (GROUP BY) should work.
     // The HTAP routing detects GROUP BY and routes to the columnar view.
     // Note: the columnar table provider needs flushed segments to scan.
-    let columnar = db.columnar_engine().lock().unwrap();
+    let columnar = db.columnar_engine();
     let count = columnar.row_count("sales_analytics");
     assert_eq!(count, 10, "materialized view should have 10 rows");
 }
@@ -210,7 +208,7 @@ async fn auto_routing_for_analytical_queries() {
 // Strong materialized consistency
 // ═══════════════════════════════════════════════════════════════════════
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn strong_consistency_flushes_before_read() {
     let db = open_db().await;
 
@@ -239,7 +237,7 @@ async fn strong_consistency_flushes_before_read() {
     }
 
     // The materialized view should have the data immediately (synchronous CDC).
-    let columnar = db.columnar_engine().lock().unwrap();
+    let columnar = db.columnar_engine();
     assert_eq!(columnar.row_count("inventory_report"), 5);
     // In Lite, "strong consistency" is the default because CDC is synchronous.
     // There's no lag between source writes and materialized view updates.
@@ -249,7 +247,7 @@ async fn strong_consistency_flushes_before_read() {
 // Staleness annotation
 // ═══════════════════════════════════════════════════════════════════════
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn staleness_tracking() {
     let db = open_db().await;
 
@@ -276,7 +274,7 @@ async fn staleness_tracking() {
         .unwrap();
 
     // Check staleness annotation via HTAP bridge.
-    let htap = db.htap_bridge().lock().unwrap();
+    let htap = db.htap_bridge();
     let view = htap.view_by_target("telemetry_report");
     assert!(view.is_some());
 

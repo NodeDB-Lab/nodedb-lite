@@ -59,16 +59,18 @@ pub struct NodeDbLite<S: StorageEngine> {
         Mutex<HashMap<String, crate::engine::strict::secondary_index::SecondaryIndex>>,
     /// Strict document engine (Binary Tuple collections).
     /// Arc-wrapped for sharing with the query engine's StrictTableProvider.
-    pub(crate) strict: Arc<Mutex<StrictEngine<S>>>,
+    pub(crate) strict: Arc<StrictEngine<S>>,
     /// Columnar engine (compressed segment collections).
     /// Arc-wrapped for sharing with the query engine's ColumnarTableProvider.
-    pub(crate) columnar: Arc<Mutex<ColumnarEngine<S>>>,
+    pub(crate) columnar: Arc<ColumnarEngine<S>>,
     /// HTAP bridge: CDC from strict → columnar materialized views.
     /// Arc-wrapped for sharing with the query engine's DDL handlers.
-    pub(crate) htap: Arc<Mutex<HtapBridge>>,
+    pub(crate) htap: Arc<HtapBridge>,
     /// Lite timeseries engine.
     /// Arc-wrapped for sharing with the query engine's DDL handlers.
     pub(crate) timeseries: Arc<Mutex<crate::engine::timeseries::engine::TimeseriesEngine>>,
+    /// Array engine in-memory state (storage-agnostic; calls via NodeDbLite methods).
+    pub(crate) array_state: std::sync::Mutex<crate::engine::array::engine::ArrayEngineState>,
     /// When `false`, KV operations go directly to redb, bypassing Loro.
     /// Other engines (vector, graph, document) are unaffected.
     pub(crate) sync_enabled: bool,
@@ -101,7 +103,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// Memory budget and per-engine percentages are resolved from environment
     /// variables via [`LiteConfig::from_env()`], falling back to defaults when
     /// variables are absent or malformed.
-    pub async fn open(storage: S, peer_id: u64) -> NodeDbResult<Self> {
+    pub async fn open(storage: S, peer_id: u64) -> NodeDbResult<Self>
+    where
+        S: crate::storage::engine::StorageEngineSync,
+    {
         Self::open_with_config(storage, peer_id, crate::config::LiteConfig::from_env()).await
     }
 
@@ -113,7 +118,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
         storage: S,
         peer_id: u64,
         config: crate::config::LiteConfig,
-    ) -> NodeDbResult<Self> {
+    ) -> NodeDbResult<Self>
+    where
+        S: crate::storage::engine::StorageEngineSync,
+    {
         let governor = crate::memory::MemoryGovernor::from_config(&config);
         let sync_enabled = config.sync_enabled;
         Self::open_inner(storage, peer_id, governor, sync_enabled).await
@@ -126,7 +134,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
         storage: S,
         peer_id: u64,
         memory_budget: usize,
-    ) -> NodeDbResult<Self> {
+    ) -> NodeDbResult<Self>
+    where
+        S: crate::storage::engine::StorageEngineSync,
+    {
         let governor = crate::memory::MemoryGovernor::new(memory_budget);
         Self::open_inner(storage, peer_id, governor, true).await
     }
@@ -136,7 +147,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
         peer_id: u64,
         governor: crate::memory::MemoryGovernor,
         sync_enabled: bool,
-    ) -> NodeDbResult<Self> {
+    ) -> NodeDbResult<Self>
+    where
+        S: crate::storage::engine::StorageEngineSync,
+    {
         let storage = Arc::new(storage);
 
         // ── Restore CRDT state (with CRC32C validation) ──
@@ -240,9 +254,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .map_err(NodeDbError::storage)?;
 
         let crdt = Arc::new(Mutex::new(crdt));
-        let strict = Arc::new(Mutex::new(strict));
-        let columnar = Arc::new(Mutex::new(columnar));
-        let htap = Arc::new(Mutex::new(HtapBridge::new()));
+        let strict = Arc::new(strict);
+        let columnar = Arc::new(columnar);
+        let htap = Arc::new(HtapBridge::new());
         let timeseries = Arc::new(Mutex::new(
             crate::engine::timeseries::engine::TimeseriesEngine::new(),
         ));
@@ -254,6 +268,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
             Arc::clone(&storage),
             Arc::clone(&timeseries),
         );
+
+        let array_engine =
+            crate::engine::array::ArrayEngineState::open(&storage).map_err(NodeDbError::storage)?;
 
         let db = Self {
             storage,
@@ -271,6 +288,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             columnar,
             htap,
             timeseries,
+            array_state: Mutex::new(array_engine),
             sync_enabled,
             kv_write_buf: Mutex::new(KvWriteBuffer {
                 ops: Vec::with_capacity(1024),
@@ -628,17 +646,22 @@ impl<S: StorageEngine> NodeDbLite<S> {
     }
 
     /// Access the strict document engine (for direct Binary Tuple CRUD).
-    pub fn strict_engine(&self) -> &Arc<Mutex<StrictEngine<S>>> {
+    ///
+    /// `StrictEngine` is natively `Send + Sync` and methods take `&self`,
+    /// so no outer `Mutex` is needed. Public-API note: this signature
+    /// changed from `&Arc<Mutex<StrictEngine<S>>>` — external callers must
+    /// drop their `.lock()` calls and call methods directly.
+    pub fn strict_engine(&self) -> &Arc<StrictEngine<S>> {
         &self.strict
     }
 
     /// Access the columnar analytics engine (for direct segment operations).
-    pub fn columnar_engine(&self) -> &Arc<Mutex<crate::engine::columnar::ColumnarEngine<S>>> {
+    pub fn columnar_engine(&self) -> &Arc<crate::engine::columnar::ColumnarEngine<S>> {
         &self.columnar
     }
 
     /// Access the HTAP bridge (for materialized view inspection).
-    pub fn htap_bridge(&self) -> &Arc<Mutex<crate::engine::htap::HtapBridge>> {
+    pub fn htap_bridge(&self) -> &Arc<crate::engine::htap::HtapBridge> {
         &self.htap
     }
 
@@ -660,22 +683,15 @@ impl<S: StorageEngine> NodeDbLite<S> {
         collection: &str,
         values: &[nodedb_types::value::Value],
     ) -> NodeDbResult<()> {
-        let schema = {
-            let strict = self.strict.lock_or_recover();
-            strict
-                .schema(collection)
-                .ok_or_else(|| {
-                    NodeDbError::storage(format!("strict collection '{collection}' not found"))
-                })?
-                .clone()
-        };
+        let schema = self.strict.schema(collection).ok_or_else(|| {
+            NodeDbError::storage(format!("strict collection '{collection}' not found"))
+        })?;
 
-        // Insert into storage (drop guard before await).
-        tokio::task::block_in_place(|| {
-            let strict = self.strict.lock_or_recover();
-            tokio::runtime::Handle::current().block_on(strict.insert(collection, values))
-        })
-        .map_err(NodeDbError::storage)?;
+        // Insert into storage. `StrictEngine` is interior-mutable; await directly.
+        self.strict
+            .insert(collection, values)
+            .await
+            .map_err(NodeDbError::storage)?;
 
         // Build a row_id string from the PK value for index keying.
         let row_id = pk_to_string(&schema.columns, values);
@@ -707,10 +723,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
         }
 
         // Replicate to materialized columnar views (HTAP CDC).
-        {
-            let mut htap = self.htap.lock_or_recover();
-            htap.replicate_insert(collection, values, &self.columnar);
-        }
+        self.htap
+            .replicate_insert(collection, values, &self.columnar);
 
         Ok(())
     }
@@ -721,15 +735,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
         collection: &str,
         pk: &nodedb_types::value::Value,
     ) -> NodeDbResult<bool> {
-        let schema = {
-            let strict = self.strict.lock_or_recover();
-            strict
-                .schema(collection)
-                .ok_or_else(|| {
-                    NodeDbError::storage(format!("strict collection '{collection}' not found"))
-                })?
-                .clone()
-        };
+        let schema = self.strict.schema(collection).ok_or_else(|| {
+            NodeDbError::storage(format!("strict collection '{collection}' not found"))
+        })?;
 
         let row_id = format!("{pk:?}");
 
@@ -748,16 +756,12 @@ impl<S: StorageEngine> NodeDbLite<S> {
         );
 
         // Replicate delete to materialized columnar views (HTAP CDC).
-        {
-            let mut htap = self.htap.lock_or_recover();
-            htap.replicate_delete(collection, pk, &self.columnar);
-        }
+        self.htap.replicate_delete(collection, pk, &self.columnar);
 
-        tokio::task::block_in_place(|| {
-            let strict = self.strict.lock_or_recover();
-            tokio::runtime::Handle::current().block_on(strict.delete(collection, pk))
-        })
-        .map_err(NodeDbError::storage)
+        self.strict
+            .delete(collection, pk)
+            .await
+            .map_err(NodeDbError::storage)
     }
 
     /// Insert a row into a columnar collection and update secondary indexes.
@@ -766,23 +770,13 @@ impl<S: StorageEngine> NodeDbLite<S> {
         collection: &str,
         values: &[nodedb_types::value::Value],
     ) -> NodeDbResult<()> {
-        let schema = {
-            let columnar = self.columnar.lock_or_recover();
-            columnar
-                .schema(collection)
-                .ok_or_else(|| {
-                    NodeDbError::storage(format!("columnar collection '{collection}' not found"))
-                })?
-                .clone()
-        };
+        let schema = self.columnar.schema(collection).ok_or_else(|| {
+            NodeDbError::storage(format!("columnar collection '{collection}' not found"))
+        })?;
 
-        // Insert into memtable.
-        {
-            let mut columnar = self.columnar.lock_or_recover();
-            columnar
-                .insert(collection, values)
-                .map_err(NodeDbError::storage)?;
-        }
+        self.columnar
+            .insert(collection, values)
+            .map_err(NodeDbError::storage)?;
 
         let row_id = pk_to_string(&schema.columns, values);
 
@@ -798,18 +792,16 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         // Spatial profile: compute geohash for Point geometries and store
         // in the text index for prefix-based proximity queries.
-        let columnar = self.columnar.lock_or_recover();
-        if let Some(profile) = columnar.profile(collection)
-            && let Some((_idx, geom)) =
-                crate::engine::columnar::spatial_profile::extract_geometry(&schema, profile, values)
+        if let Some(profile) = self.columnar.profile(collection)
+            && let Some((_idx, geom)) = crate::engine::columnar::spatial_profile::extract_geometry(
+                &schema, &profile, values,
+            )
             && let Some(hash) = crate::engine::columnar::spatial_profile::compute_geohash(&geom)
         {
-            drop(columnar);
             self.fts
                 .lock_or_recover()
                 .index_field(collection, "_geohash", &row_id, &hash);
         }
-
         Ok(())
     }
 
@@ -823,23 +815,17 @@ impl<S: StorageEngine> NodeDbLite<S> {
         pk: &nodedb_types::value::Value,
         field_updates: &std::collections::HashMap<String, nodedb_types::value::Value>,
     ) -> NodeDbResult<()> {
-        let schema = {
-            let strict = self.strict.lock_or_recover();
-            strict
-                .schema(collection)
-                .ok_or_else(|| {
-                    NodeDbError::storage(format!("strict collection '{collection}' not found"))
-                })?
-                .clone()
-        };
+        let schema = self.strict.schema(collection).ok_or_else(|| {
+            NodeDbError::storage(format!("strict collection '{collection}' not found"))
+        })?;
 
         // Read existing tuple.
-        let existing = tokio::task::block_in_place(|| {
-            let strict = self.strict.lock_or_recover();
-            tokio::runtime::Handle::current().block_on(strict.get(collection, pk))
-        })
-        .map_err(NodeDbError::storage)?
-        .ok_or_else(|| NodeDbError::storage("row not found for CRDT patch"))?;
+        let existing = self
+            .strict
+            .get(collection, pk)
+            .await
+            .map_err(NodeDbError::storage)?
+            .ok_or_else(|| NodeDbError::storage("row not found for CRDT patch"))?;
 
         // Re-encode as tuple bytes for the adapter.
         let encoder = nodedb_strict::TupleEncoder::new(&schema);
@@ -862,15 +848,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .map_err(|e| NodeDbError::storage(e.to_string()))?;
 
         // Write back via the standard update path.
-        tokio::task::block_in_place(|| {
-            let strict = self.strict.lock_or_recover();
-            tokio::runtime::Handle::current().block_on(strict.update_by_values(
-                collection,
-                pk,
-                &new_values,
-            ))
-        })
-        .map_err(NodeDbError::storage)?;
+        self.strict
+            .update_by_values(collection, pk, &new_values)
+            .await
+            .map_err(NodeDbError::storage)?;
 
         Ok(())
     }

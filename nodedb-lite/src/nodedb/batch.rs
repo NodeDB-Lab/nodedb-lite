@@ -72,7 +72,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         {
             let mut csr = self.csr.lock_or_recover();
             for &(src, dst, label) in edges {
-                csr.add_edge(src, label, dst);
+                let _ = csr.add_edge(src, label, dst);
             }
         }
 

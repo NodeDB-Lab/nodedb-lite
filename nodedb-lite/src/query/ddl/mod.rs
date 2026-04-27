@@ -94,26 +94,11 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             {
                 let name = &parts[2];
                 let name_lower = name.to_lowercase();
-                let is_strict = {
-                    let strict = match self.strict.lock() {
-                        Ok(s) => s,
-                        Err(p) => p.into_inner(),
-                    };
-                    strict.schema(&name_lower).is_some()
-                }; // Guard dropped here, before await.
-                if is_strict {
+                if self.strict.schema(&name_lower).is_some() {
                     return Some(self.handle_drop_strict(&name_lower).await);
                 }
 
-                // Check if it's a columnar collection.
-                let is_columnar = {
-                    let columnar = match self.columnar.lock() {
-                        Ok(c) => c,
-                        Err(p) => p.into_inner(),
-                    };
-                    columnar.schema(&name_lower).is_some()
-                };
-                if is_columnar {
+                if self.columnar.schema(&name_lower).is_some() {
                     return Some(self.handle_drop_columnar(&name_lower).await);
                 }
             }
@@ -124,14 +109,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             let parts: Vec<&str> = sql.split_whitespace().collect();
             if let Some(name) = parts.get(1) {
                 let name_lower = name.to_lowercase();
-                let schema_clone = {
-                    let strict = match self.strict.lock() {
-                        Ok(s) => s,
-                        Err(p) => p.into_inner(),
-                    };
-                    strict.schema(&name_lower).cloned()
-                }; // Guard dropped here.
-                if let Some(schema) = schema_clone {
+                if let Some(schema) = self.strict.schema(&name_lower) {
                     return Some(Ok(describe_strict_collection(&name_lower, &schema)));
                 }
             }

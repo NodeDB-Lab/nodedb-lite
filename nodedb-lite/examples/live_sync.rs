@@ -147,6 +147,7 @@ async fn test_delta_push() -> Result<(), String> {
         peer_id: 42,
         mutation_id: 1,
         checksum: 0,
+        device_valid_time_ms: None,
     };
     ws.send(Message::Binary(
         SyncFrame::encode_or_empty(SyncMessageType::DeltaPush, &delta)
@@ -321,6 +322,7 @@ async fn test_real_loro_delta() -> Result<(), String> {
         peer_id: 100,
         mutation_id: 1,
         checksum: 0,
+        device_valid_time_ms: None,
     };
     ws.send(Message::Binary(
         SyncFrame::encode_or_empty(SyncMessageType::DeltaPush, &delta_msg)
@@ -384,6 +386,7 @@ async fn test_concurrent_deltas() -> Result<(), String> {
             peer_id: 200 + i as u64 + 1,
             mutation_id: i as u64 + 1,
             checksum: 0,
+            device_valid_time_ms: None,
         };
         ws.send(Message::Binary(
             SyncFrame::encode_or_empty(SyncMessageType::DeltaPush, &msg)
@@ -433,6 +436,7 @@ async fn test_rls_violation() -> Result<(), String> {
         peer_id: 500,
         mutation_id: 99,
         checksum: 0,
+        device_valid_time_ms: None,
     };
     ws.send(Message::Binary(
         SyncFrame::encode_or_empty(SyncMessageType::DeltaPush, &msg)
@@ -481,6 +485,7 @@ async fn test_shape_snapshot_lsn() -> Result<(), String> {
             peer_id: 300,
             mutation_id: 1,
             checksum: 0,
+            device_valid_time_ms: None,
         };
         ws.send(Message::Binary(
             SyncFrame::encode_or_empty(SyncMessageType::DeltaPush, &msg)

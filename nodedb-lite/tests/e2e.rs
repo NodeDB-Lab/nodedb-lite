@@ -2,8 +2,6 @@
 //!
 //! CRDT convergence works across instances, and the compensation flow is correct.
 
-use std::time::Instant;
-
 use nodedb_client::NodeDb;
 use nodedb_lite::{NodeDbLite, RedbStorage};
 use nodedb_types::document::Document;
@@ -19,13 +17,16 @@ async fn open_db() -> NodeDbLite<RedbStorage> {
 // 6.1 Standalone Lite (No Origin)
 // ═══════════════════════════════════════════════════════════════════════
 
+/// Correctness-only counterpart of the 1k×384d HNSW workload.
+/// The full-scale build/search is a benchmark — see
+/// `nodedb-bench/benches/micro/lite_vector.rs`.
 #[tokio::test]
-async fn e2e_1k_vectors_384d_search_recall() {
+async fn e2e_vector_search_returns_sorted_top_k() {
     let db = open_db().await;
-    let dim = 384;
+    let dim = 32;
+    let n = 50;
 
-    // Insert 1K vectors at 384 dimensions.
-    let vectors: Vec<(String, Vec<f32>)> = (0..1000)
+    let vectors: Vec<(String, Vec<f32>)> = (0..n)
         .map(|i| {
             let emb: Vec<f32> = (0..dim).map(|d| ((i * dim + d) as f32).sin()).collect();
             (format!("v{i}"), emb)
@@ -37,16 +38,13 @@ async fn e2e_1k_vectors_384d_search_recall() {
         .collect();
     db.batch_vector_insert("kb", &refs).unwrap();
 
-    // Search for v500.
-    let query: Vec<f32> = (0..dim).map(|d| ((500 * dim + d) as f32).sin()).collect();
+    let query: Vec<f32> = (0..dim).map(|d| ((25 * dim + d) as f32).sin()).collect();
     let results = db.vector_search("kb", &query, 5, None).await.unwrap();
 
     assert_eq!(results.len(), 5);
-    // Results sorted by distance.
     for w in results.windows(2) {
         assert!(w[0].distance <= w[1].distance);
     }
-    // Top result should be very close (not necessarily exact due to HNSW approximation).
     assert!(
         results[0].distance < 1.0,
         "top result distance {} too large",
@@ -54,15 +52,18 @@ async fn e2e_1k_vectors_384d_search_recall() {
     );
 }
 
+/// Correctness-only counterpart of the 10k-edge graph workload.
+/// Scale benchmark lives in `nodedb-bench/benches/micro/lite_graph.rs`.
 #[tokio::test]
-async fn e2e_10k_graph_bfs() {
+async fn e2e_graph_bfs_reaches_multiple_hops() {
     let db = open_db().await;
 
-    // Build a graph: 1000 nodes, 10 edges each = 10K edges.
-    let mut edges: Vec<(String, String, &str)> = Vec::with_capacity(10_000);
-    for i in 0..1000 {
-        for j in 1..=10 {
-            let dst = (i + j * 7) % 1000;
+    // Small graph: 50 nodes, 4 edges each = 200 edges. Enough for 3-hop BFS
+    // to visit several nodes; cheap enough for default `cargo nextest run`.
+    let mut edges: Vec<(String, String, &str)> = Vec::with_capacity(200);
+    for i in 0..50 {
+        for j in 1..=4 {
+            let dst = (i + j * 7) % 50;
             edges.push((format!("n{i}"), format!("n{dst}"), "LINK"));
         }
     }
@@ -73,7 +74,6 @@ async fn e2e_10k_graph_bfs() {
     db.batch_graph_insert_edges(&refs).unwrap();
     db.compact_graph().unwrap();
 
-    // BFS 3 hops from n0.
     let sg = db
         .graph_traverse(&NodeId::new("n0"), 3, None)
         .await
@@ -169,66 +169,17 @@ async fn e2e_flush_reopen_all_data_survives() {
     }
 }
 
-#[tokio::test]
-async fn e2e_cold_start_timing() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("coldstart.redb");
-
-    // Write substantial data.
-    {
-        let storage = RedbStorage::open(&path).unwrap();
-        let db = NodeDbLite::open(storage, 1).await.unwrap();
-
-        // 1K vectors at 64d.
-        let vectors: Vec<(String, Vec<f32>)> = (0..1000)
-            .map(|i| {
-                let emb: Vec<f32> = (0..64).map(|d| ((i * 64 + d) as f32) * 0.001).collect();
-                (format!("v{i}"), emb)
-            })
-            .collect();
-        let refs: Vec<(&str, &[f32])> = vectors
-            .iter()
-            .map(|(id, e)| (id.as_str(), e.as_slice()))
-            .collect();
-        db.batch_vector_insert("vecs", &refs).unwrap();
-
-        // 10K graph edges.
-        let mut edges: Vec<(String, String, &str)> = Vec::with_capacity(10_000);
-        for i in 0..1000 {
-            for j in 1..=10 {
-                edges.push((format!("n{i}"), format!("n{}", (i + j) % 1000), "E"));
-            }
-        }
-        let erefs: Vec<(&str, &str, &str)> = edges
-            .iter()
-            .map(|(s, d, l)| (s.as_str(), d.as_str(), *l))
-            .collect();
-        db.batch_graph_insert_edges(&erefs).unwrap();
-
-        db.flush().await.unwrap();
-    }
-
-    // Measure cold start.
-    let start = Instant::now();
-    {
-        let storage = RedbStorage::open(&path).unwrap();
-        let _db = NodeDbLite::open(storage, 1).await.unwrap();
-    }
-    let elapsed = start.elapsed();
-
-    assert!(
-        elapsed.as_millis() < 500,
-        "cold start took {}ms, target < 500ms",
-        elapsed.as_millis()
-    );
-}
+// `e2e_cold_start_timing` was migrated to a benchmark — it asserted only
+// wall-clock time, no correctness. See:
+//   nodedb-bench/benches/workload/lite_cold_start.rs
 
 #[tokio::test]
 async fn e2e_memory_stays_within_budget() {
     let db = open_db().await;
 
-    // Insert data.
-    let vectors: Vec<(String, Vec<f32>)> = (0..500)
+    // Small workload — 50 × 32d. Enough to exercise the budget tracker
+    // without making the test a benchmark.
+    let vectors: Vec<(String, Vec<f32>)> = (0..50)
         .map(|i| {
             let emb: Vec<f32> = (0..32).map(|d| ((i * 32 + d) as f32) * 0.001).collect();
             (format!("v{i}"), emb)

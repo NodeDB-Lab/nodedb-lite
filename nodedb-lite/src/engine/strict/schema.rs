@@ -1,4 +1,12 @@
 //! Schema management for strict collections: create, drop, alter, and accessors.
+//!
+//! All methods take `&self`. Internal state (`StrictEngine::collections`) is
+//! protected by an `RwLock`. DDL methods read from storage with the lock
+//! dropped, then briefly take the write lock to swap the map entry. The
+//! upper layer is expected to serialize concurrent DDL on the same
+//! collection.
+
+use std::sync::Arc;
 
 use nodedb_types::Namespace;
 use nodedb_types::columnar::StrictSchema;
@@ -13,26 +21,31 @@ use super::engine::{
 impl<S: StorageEngine> StrictEngine<S> {
     /// Register a new strict collection with the given schema.
     pub async fn create_collection(
-        &mut self,
+        &self,
         name: &str,
         schema: StrictSchema,
     ) -> Result<(), LiteError> {
-        if self.collections.contains_key(name) {
-            return Err(LiteError::BadRequest {
-                detail: format!("strict collection '{name}' already exists"),
-            });
-        }
+        // Snapshot existing names + duplicate-check under the read lock.
+        let mut names: Vec<String> = {
+            let guard = self
+                .collections
+                .read()
+                .map_err(|_| LiteError::LockPoisoned)?;
+            if guard.contains_key(name) {
+                return Err(LiteError::BadRequest {
+                    detail: format!("strict collection '{name}' already exists"),
+                });
+            }
+            guard.keys().cloned().collect()
+        };
+        names.push(name.to_string());
 
-        // Persist schema to meta.
+        // Persist schema + collection list to meta (lock dropped).
         let meta_key = format!("{META_STRICT_SCHEMA_PREFIX}{name}");
         let schema_bytes =
             zerompk::to_msgpack_vec(&schema).map_err(|e| LiteError::Serialization {
                 detail: e.to_string(),
             })?;
-
-        // Update collection list.
-        let mut names: Vec<String> = self.collections.keys().cloned().collect();
-        names.push(name.to_string());
         let names_bytes =
             zerompk::to_msgpack_vec(&names).map_err(|e| LiteError::Serialization {
                 detail: e.to_string(),
@@ -53,20 +66,39 @@ impl<S: StorageEngine> StrictEngine<S> {
             ])
             .await?;
 
-        self.collections
-            .insert(name.to_string(), CollectionState::new(schema));
+        // Insert into in-memory map.
+        let new_state = Arc::new(CollectionState::new(schema));
+        let mut guard = self
+            .collections
+            .write()
+            .map_err(|_| LiteError::LockPoisoned)?;
+        if guard.contains_key(name) {
+            return Err(LiteError::BadRequest {
+                detail: format!(
+                    "strict collection '{name}' was created concurrently by another writer"
+                ),
+            });
+        }
+        guard.insert(name.to_string(), new_state);
         Ok(())
     }
 
     /// Drop a strict collection and all its data.
-    pub async fn drop_collection(&mut self, name: &str) -> Result<(), LiteError> {
-        if !self.collections.contains_key(name) {
-            return Err(LiteError::BadRequest {
-                detail: format!("strict collection '{name}' does not exist"),
-            });
+    pub async fn drop_collection(&self, name: &str) -> Result<(), LiteError> {
+        // Existence check under read lock.
+        {
+            let guard = self
+                .collections
+                .read()
+                .map_err(|_| LiteError::LockPoisoned)?;
+            if !guard.contains_key(name) {
+                return Err(LiteError::BadRequest {
+                    detail: format!("strict collection '{name}' does not exist"),
+                });
+            }
         }
 
-        // Scan and delete all rows.
+        // Scan and delete all rows (lock dropped).
         let prefix = format!("{name}:");
         let rows = self
             .storage
@@ -87,9 +119,16 @@ impl<S: StorageEngine> StrictEngine<S> {
             key: meta_key.into_bytes(),
         });
 
-        // Update collection list.
-        self.collections.remove(name);
-        let names: Vec<String> = self.collections.keys().cloned().collect();
+        // Take the write lock briefly to remove and snapshot the new name list.
+        let names: Vec<String> = {
+            let mut guard = self
+                .collections
+                .write()
+                .map_err(|_| LiteError::LockPoisoned)?;
+            guard.remove(name);
+            guard.keys().cloned().collect()
+        };
+
         let names_bytes =
             zerompk::to_msgpack_vec(&names).map_err(|e| LiteError::Serialization {
                 detail: e.to_string(),
@@ -110,19 +149,11 @@ impl<S: StorageEngine> StrictEngine<S> {
     /// the decoder checks `schema_version` in the tuple header and returns
     /// null/default for columns added after the tuple was written.
     pub async fn alter_add_column(
-        &mut self,
+        &self,
         name: &str,
         column: nodedb_types::columnar::ColumnDef,
     ) -> Result<(), LiteError> {
-        let state = self
-            .collections
-            .get_mut(name)
-            .ok_or(LiteError::BadRequest {
-                detail: format!("strict collection '{name}' does not exist"),
-            })?;
-
         // Validate: new column must be nullable or have a default.
-        // Non-nullable columns without a default would break existing tuples.
         if !column.nullable && column.default.is_none() {
             return Err(LiteError::BadRequest {
                 detail: format!(
@@ -132,35 +163,53 @@ impl<S: StorageEngine> StrictEngine<S> {
             });
         }
 
+        // Snapshot the current state under the read lock.
+        let old_state = {
+            let guard = self
+                .collections
+                .read()
+                .map_err(|_| LiteError::LockPoisoned)?;
+            guard.get(name).cloned().ok_or(LiteError::BadRequest {
+                detail: format!("strict collection '{name}' does not exist"),
+            })?
+        };
+
         // Check for duplicate column name.
-        if state.schema.columns.iter().any(|c| c.name == column.name) {
+        if old_state
+            .schema
+            .columns
+            .iter()
+            .any(|c| c.name == column.name)
+        {
             return Err(LiteError::BadRequest {
                 detail: format!("column '{}' already exists in '{name}'", column.name),
             });
         }
 
-        // Record old version's column count before bumping.
-        let old_version = state.schema.version;
-        let old_col_count = state.schema.columns.len();
-        state
+        // Build the new schema.
+        let mut new_schema = old_state.schema.clone();
+        let old_version = new_schema.version;
+        let old_col_count = new_schema.columns.len();
+        new_schema.columns.push(column);
+        new_schema.version = new_schema.version.saturating_add(1);
+
+        // Build the new CollectionState with version_column_counts carrying
+        // history forward.
+        let mut new_state = CollectionState::new(new_schema.clone());
+        for (v, c) in &old_state.version_column_counts {
+            new_state.version_column_counts.insert(*v, *c);
+        }
+        new_state
             .version_column_counts
             .insert(old_version, old_col_count);
-
-        // Append column and bump version.
-        state.schema.columns.push(column);
-        state.schema.version = state.schema.version.saturating_add(1);
-        state
+        new_state
             .version_column_counts
-            .insert(state.schema.version, state.schema.columns.len());
+            .insert(new_schema.version, new_schema.columns.len());
 
-        // Rebuild encoder/decoder with new schema.
-        state.encoder = nodedb_strict::TupleEncoder::new(&state.schema);
-        state.decoder = nodedb_strict::TupleDecoder::new(&state.schema);
-
-        // Persist updated schema.
+        // Persist new schema (lock dropped).
         let meta_key = format!("{META_STRICT_SCHEMA_PREFIX}{name}");
         let schema_bytes =
-            zerompk::to_msgpack_vec(&state.schema).map_err(|e| LiteError::Serialization {
+            zerompk::to_msgpack_vec(&new_schema).map_err(|e| LiteError::Serialization {
                 detail: e.to_string(),
             })?;
 
@@ -168,17 +217,30 @@ impl<S: StorageEngine> StrictEngine<S> {
             .put(Namespace::Meta, meta_key.as_bytes(), &schema_bytes)
             .await?;
 
+        // Swap in the new state.
+        let mut guard = self
+            .collections
+            .write()
+            .map_err(|_| LiteError::LockPoisoned)?;
+        guard.insert(name.to_string(), Arc::new(new_state));
+
         Ok(())
     }
 
-    /// Get the schema for a collection.
-    pub fn schema(&self, name: &str) -> Option<&StrictSchema> {
-        self.collections.get(name).map(|c| &c.schema)
+    /// Get the schema for a collection (returns a clone).
+    pub fn schema(&self, name: &str) -> Option<StrictSchema> {
+        self.collections
+            .read()
+            .ok()
+            .and_then(|g| g.get(name).map(|s| s.schema.clone()))
     }
 
     /// List all strict collection names.
-    pub fn collection_names(&self) -> Vec<&str> {
-        self.collections.keys().map(|s| s.as_str()).collect()
+    pub fn collection_names(&self) -> Vec<String> {
+        self.collections
+            .read()
+            .map(|g| g.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Rewrite old-version tuples to the current schema version.
@@ -212,10 +274,9 @@ impl<S: StorageEngine> StrictEngine<S> {
                 .unwrap_or(current_version);
 
             if tuple_version >= current_version {
-                continue; // Already current version.
+                continue;
             }
 
-            // Decode with old schema, pad, re-encode with current schema.
             let old_col_count = state
                 .version_column_counts
                 .get(&tuple_version)

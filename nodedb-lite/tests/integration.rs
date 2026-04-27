@@ -1,10 +1,9 @@
 //! Integration tests for NodeDB-Lite.
 //!
 //! Tests the full stack: StorageEngine → Engines → NodeDbLite → NodeDb trait.
-//! Uses batch methods for bulk setup, measures query latency in benchmarks.
+//! Performance/scale workloads live in `nodedb-bench/benches/`.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use nodedb_client::NodeDb;
 use nodedb_lite::{NodeDbLite, RedbStorage};
@@ -19,13 +18,17 @@ async fn open_test_db() -> NodeDbLite<RedbStorage> {
 
 // ─── 1K Vector Insert + Search ───────────────────────────────────────
 
+/// Correctness-only counterpart of the 1k×32d batch workload.
+/// Scale benchmark: `nodedb-bench/benches/micro/lite_vector.rs`.
 #[tokio::test]
-async fn vector_1k_batch_insert_and_search() {
+async fn vector_batch_insert_and_search_correctness() {
     let db = open_test_db().await;
+    let n = 50;
+    let dim = 32;
 
-    let vectors: Vec<(String, Vec<f32>)> = (0..1000)
+    let vectors: Vec<(String, Vec<f32>)> = (0..n)
         .map(|i| {
-            let emb: Vec<f32> = (0..32).map(|d| ((i * 32 + d) as f32) * 0.001).collect();
+            let emb: Vec<f32> = (0..dim).map(|d| ((i * dim + d) as f32) * 0.001).collect();
             (format!("v{i}"), emb)
         })
         .collect();
@@ -37,20 +40,16 @@ async fn vector_1k_batch_insert_and_search() {
 
     db.batch_vector_insert("vecs", &refs).unwrap();
 
-    // Search for top-5 nearest to vector 500.
-    let query: Vec<f32> = (0..32).map(|d| ((500 * 32 + d) as f32) * 0.001).collect();
+    let query: Vec<f32> = (0..dim).map(|d| ((25 * dim + d) as f32) * 0.001).collect();
     let results = db.vector_search("vecs", &query, 10, None).await.unwrap();
 
     assert_eq!(results.len(), 10);
-    // Results should be sorted by distance (ascending).
     for w in results.windows(2) {
         assert!(
             w[0].distance <= w[1].distance,
             "results not sorted by distance"
         );
     }
-    // The top result should be reasonably close (not a random vector).
-    // HNSW is approximate — we don't require exact match at this scale.
     assert!(
         results[0].distance < 0.5,
         "top result distance {} is too large",
@@ -60,14 +59,17 @@ async fn vector_1k_batch_insert_and_search() {
 
 // ─── 10K Graph Edges + Traverse ──────────────────────────────────────
 
+/// Correctness-only counterpart of the 10k-edge graph workload.
+/// Scale benchmark: `nodedb-bench/benches/micro/lite_graph.rs`.
 #[tokio::test]
-async fn graph_10k_edges_batch_and_traverse() {
+async fn graph_batch_and_traverse_correctness() {
     let db = open_test_db().await;
 
-    let mut edges: Vec<(String, String, &str)> = Vec::with_capacity(10_000);
-    for i in 0..500 {
-        for j in 1..=20 {
-            let dst = (i * 20 + j) % 500;
+    // 50 nodes × 4 edges each = 200 edges. 2-hop BFS visits 10+ nodes.
+    let mut edges: Vec<(String, String, &str)> = Vec::with_capacity(200);
+    for i in 0..50 {
+        for j in 1..=4 {
+            let dst = (i * 4 + j) % 50;
             edges.push((format!("n{i}"), format!("n{dst}"), "LINK"));
         }
     }
@@ -84,7 +86,7 @@ async fn graph_10k_edges_batch_and_traverse() {
         .await
         .unwrap();
 
-    assert!(subgraph.node_count() > 10);
+    assert!(subgraph.node_count() > 5);
     assert!(subgraph.edge_count() > 0);
 }
 
@@ -239,93 +241,8 @@ async fn arc_dyn_nodedb_pattern() {
     assert!(db.document_get("docs", "d1").await.unwrap().is_some());
 }
 
-// ─── Benchmarks ──────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn benchmark_vector_search_1k() {
-    let db = open_test_db().await;
-
-    let vectors: Vec<(String, Vec<f32>)> = (0..1000)
-        .map(|i| {
-            let emb: Vec<f32> = (0..32).map(|d| ((i * 32 + d) as f32) * 0.001).collect();
-            (format!("v{i}"), emb)
-        })
-        .collect();
-    let refs: Vec<(&str, &[f32])> = vectors
-        .iter()
-        .map(|(id, emb)| (id.as_str(), emb.as_slice()))
-        .collect();
-    db.batch_vector_insert("bench", &refs).unwrap();
-
-    let query: Vec<f32> = (0..32).map(|d| (d as f32) * 0.01).collect();
-
-    // Warm up.
-    let _ = db.vector_search("bench", &query, 5, None).await;
-
-    // Measure search latency only (not insert).
-    let start = Instant::now();
-    let iterations = 100;
-    for _ in 0..iterations {
-        let _ = db.vector_search("bench", &query, 5, None).await.unwrap();
-    }
-    let elapsed = start.elapsed();
-    let per_query_us = elapsed.as_micros() / iterations as u128;
-
-    // In debug mode, HNSW search is significantly slower due to unoptimized
-    // distance math. Use a relaxed threshold for CI/debug builds.
-    let threshold = if cfg!(debug_assertions) { 10_000 } else { 1000 };
-    assert!(
-        per_query_us < threshold,
-        "vector search took {per_query_us}us, target < {threshold}us"
-    );
-}
-
-#[tokio::test]
-async fn benchmark_graph_bfs_10k_edges() {
-    let db = open_test_db().await;
-
-    // 10K edges: 2000 nodes × 5 edges each (sparse enough that 2-hop
-    // BFS doesn't visit the entire graph).
-    let mut edges: Vec<(String, String, &str)> = Vec::with_capacity(10_000);
-    for i in 0..2000 {
-        for j in 1..=5 {
-            let dst = (i + j * 7) % 2000; // spread-out targets
-            edges.push((format!("n{i}"), format!("n{dst}"), "E"));
-        }
-    }
-    let refs: Vec<(&str, &str, &str)> = edges
-        .iter()
-        .map(|(s, d, l)| (s.as_str(), d.as_str(), *l))
-        .collect();
-    db.batch_graph_insert_edges(&refs).unwrap();
-
-    // Compact CSR: merge buffer into dense arrays for fast traversal.
-    db.compact_graph().unwrap();
-
-    // Warm up.
-    let _ = db.graph_traverse(&NodeId::new("n0"), 2, None).await;
-
-    // Measure traverse latency only (dense CSR, not buffer).
-    let start = Instant::now();
-    let iterations = 100;
-    for _ in 0..iterations {
-        let _ = db
-            .graph_traverse(&NodeId::new("n0"), 2, None)
-            .await
-            .unwrap();
-    }
-    let elapsed = start.elapsed();
-    let per_query_us = elapsed.as_micros() / iterations as u128;
-
-    // Debug builds are 10-20x slower than release. The 1ms target is for
-    // release mode. In debug, accept 10ms (10000us).
-    let limit = if cfg!(debug_assertions) {
-        10_000
-    } else {
-        1_000
-    };
-    assert!(
-        per_query_us < limit,
-        "graph BFS took {per_query_us}us, target < {limit}us"
-    );
-}
+// `benchmark_vector_search_1k` and `benchmark_graph_bfs_10k_edges` were
+// migrated to fluxbench benchmarks — they asserted only wall-clock budgets
+// and don't belong in the test suite. See:
+//   nodedb-bench/benches/micro/lite_vector.rs (lite_vector_search_1k_32d)
+//   nodedb-bench/benches/micro/lite_graph.rs  (lite_graph_bfs_2hop_10k)

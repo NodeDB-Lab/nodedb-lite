@@ -35,23 +35,8 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         let column = parse_column_def(col_def_str)?;
 
         // Try strict first, then columnar.
-        let is_strict = {
-            let strict = match self.strict.lock() {
-                Ok(s) => s,
-                Err(p) => p.into_inner(),
-            };
-            strict.schema(&table_name).is_some()
-        };
-
-        if is_strict {
-            let mut strict = match self.strict.lock() {
-                Ok(s) => s,
-                Err(p) => p.into_inner(),
-            };
-            tokio::task::block_in_place(|| {
-                let handle = tokio::runtime::Handle::current();
-                handle.block_on(strict.alter_add_column(&table_name, column))
-            })?;
+        if self.strict.schema(&table_name).is_some() {
+            self.strict.alter_add_column(&table_name, column).await?;
             return Ok(QueryResult {
                 columns: vec!["result".into()],
                 rows: vec![vec![Value::String(format!(
@@ -61,23 +46,8 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             });
         }
 
-        let is_columnar = {
-            let columnar = match self.columnar.lock() {
-                Ok(c) => c,
-                Err(p) => p.into_inner(),
-            };
-            columnar.schema(&table_name).is_some()
-        };
-
-        if is_columnar {
-            let mut columnar = match self.columnar.lock() {
-                Ok(c) => c,
-                Err(p) => p.into_inner(),
-            };
-            tokio::task::block_in_place(|| {
-                let handle = tokio::runtime::Handle::current();
-                handle.block_on(columnar.alter_add_column(&table_name, column))
-            })?;
+        if self.columnar.schema(&table_name).is_some() {
+            self.columnar.alter_add_column(&table_name, column).await?;
             return Ok(QueryResult {
                 columns: vec!["result".into()],
                 rows: vec![vec![Value::String(format!(

@@ -16,7 +16,7 @@ async fn open_db() -> NodeDbLite<RedbStorage> {
 // WAL replay for strict INSERT
 // ═══════════════════════════════════════════════════════════════════════
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn strict_insert_survives_restart() {
     let db = open_db().await;
 
@@ -59,11 +59,11 @@ async fn strict_insert_survives_restart() {
     db.flush().await.unwrap();
 
     // Verify data is readable after flush.
-    let row = tokio::task::block_in_place(|| {
-        let strict = db.strict_engine().lock().unwrap();
-        tokio::runtime::Handle::current().block_on(strict.get("customers", &Value::Integer(1)))
-    })
-    .unwrap();
+    let row = db
+        .strict_engine()
+        .get("customers", &Value::Integer(1))
+        .await
+        .unwrap();
     assert!(row.is_some());
     let row = row.unwrap();
     assert_eq!(row[0], Value::Integer(1));
@@ -74,7 +74,7 @@ async fn strict_insert_survives_restart() {
 // WAL replay for columnar INSERT
 // ═══════════════════════════════════════════════════════════════════════
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn columnar_insert_and_flush() {
     let db = open_db().await;
 
@@ -103,15 +103,13 @@ async fn columnar_insert_and_flush() {
     }
 
     // Flush memtable to segment.
-    tokio::task::block_in_place(|| {
-        let mut columnar = db.columnar_engine().lock().unwrap();
-        tokio::runtime::Handle::current()
-            .block_on(columnar.flush_collection("metrics"))
-            .unwrap();
-    });
+    db.columnar_engine()
+        .flush_collection("metrics")
+        .await
+        .unwrap();
 
     // Verify row count after flush.
-    let columnar = db.columnar_engine().lock().unwrap();
+    let columnar = db.columnar_engine();
     assert_eq!(columnar.row_count("metrics"), 10);
 }
 
@@ -119,7 +117,7 @@ async fn columnar_insert_and_flush() {
 // WAL replay for delete bitmap
 // ═══════════════════════════════════════════════════════════════════════
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn columnar_delete_bitmap_persists() {
     let db = open_db().await;
 
@@ -142,22 +140,20 @@ async fn columnar_delete_bitmap_persists() {
         .unwrap();
     }
 
-    tokio::task::block_in_place(|| {
-        let mut columnar = db.columnar_engine().lock().unwrap();
-        tokio::runtime::Handle::current()
-            .block_on(columnar.flush_collection("items"))
-            .unwrap();
-    });
+    db.columnar_engine()
+        .flush_collection("items")
+        .await
+        .unwrap();
 
     // Delete a row — marks in delete bitmap.
     {
-        let mut columnar = db.columnar_engine().lock().unwrap();
+        let columnar = db.columnar_engine();
         let deleted = columnar.delete("items", &Value::Integer(2)).unwrap();
         assert!(deleted);
     }
 
     // Verify the delete was tracked.
-    let columnar = db.columnar_engine().lock().unwrap();
+    let columnar = db.columnar_engine();
     // Row count includes the deleted row in the segment but the bitmap marks it.
     assert_eq!(columnar.row_count("items"), 5); // Segment still has 5 rows.
 }
@@ -166,7 +162,7 @@ async fn columnar_delete_bitmap_persists() {
 // Compaction crash recovery
 // ═══════════════════════════════════════════════════════════════════════
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn compaction_produces_valid_segment() {
     let db = open_db().await;
 
@@ -189,32 +185,29 @@ async fn compaction_produces_valid_segment() {
         .unwrap();
     }
 
-    tokio::task::block_in_place(|| {
-        let mut columnar = db.columnar_engine().lock().unwrap();
-        tokio::runtime::Handle::current()
-            .block_on(columnar.flush_collection("orders"))
-            .unwrap();
-    });
+    db.columnar_engine()
+        .flush_collection("orders")
+        .await
+        .unwrap();
 
     // Delete 50% of rows to trigger compaction threshold.
     {
-        let mut columnar = db.columnar_engine().lock().unwrap();
+        let columnar = db.columnar_engine();
         for i in 0..10 {
             columnar.delete("orders", &Value::Integer(i)).unwrap();
         }
     }
 
     // Run compaction.
-    let compacted = tokio::task::block_in_place(|| {
-        let mut columnar = db.columnar_engine().lock().unwrap();
-        tokio::runtime::Handle::current()
-            .block_on(columnar.try_compact_collection("orders"))
-            .unwrap()
-    });
+    let compacted = db
+        .columnar_engine()
+        .try_compact_collection("orders")
+        .await
+        .unwrap();
     assert!(compacted);
 
     // Verify the compacted segment has the right number of live rows.
-    let columnar = db.columnar_engine().lock().unwrap();
+    let columnar = db.columnar_engine();
     // After compaction, the segment should have 10 live rows.
     assert_eq!(columnar.row_count("orders"), 10);
 }
@@ -223,7 +216,7 @@ async fn compaction_produces_valid_segment() {
 // PK index consistency after crash
 // ═══════════════════════════════════════════════════════════════════════
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn pk_index_consistent_after_operations() {
     let db = open_db().await;
 
@@ -254,19 +247,19 @@ async fn pk_index_consistent_after_operations() {
 
     // Verify: deleted rows are gone, remaining rows are accessible.
     for i in 0..5 {
-        let row = tokio::task::block_in_place(|| {
-            let strict = db.strict_engine().lock().unwrap();
-            tokio::runtime::Handle::current().block_on(strict.get("users", &Value::Integer(i)))
-        })
-        .unwrap();
+        let row = db
+            .strict_engine()
+            .get("users", &Value::Integer(i))
+            .await
+            .unwrap();
         assert!(row.is_none(), "deleted row {i} should not exist");
     }
     for i in 5..10 {
-        let row = tokio::task::block_in_place(|| {
-            let strict = db.strict_engine().lock().unwrap();
-            tokio::runtime::Handle::current().block_on(strict.get("users", &Value::Integer(i)))
-        })
-        .unwrap();
+        let row = db
+            .strict_engine()
+            .get("users", &Value::Integer(i))
+            .await
+            .unwrap();
         assert!(row.is_some(), "row {i} should exist");
     }
     db.strict_insert(
@@ -276,11 +269,11 @@ async fn pk_index_consistent_after_operations() {
     .await
     .unwrap();
 
-    let row = tokio::task::block_in_place(|| {
-        let strict = db.strict_engine().lock().unwrap();
-        tokio::runtime::Handle::current().block_on(strict.get("users", &Value::Integer(0)))
-    })
-    .unwrap();
+    let row = db
+        .strict_engine()
+        .get("users", &Value::Integer(0))
+        .await
+        .unwrap();
     assert!(row.is_some());
     assert_eq!(row.unwrap()[1], Value::String("re-inserted".into()));
 }

@@ -17,24 +17,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
     ) -> Result<QueryResult, LiteError> {
         let (name, schema) = parse_strict_create_sql(sql)?;
 
-        // StrictEngine::create_collection is async (uses storage), so we must
-        // not hold the std::sync::MutexGuard across the await. Instead, clone
-        // the Arc and acquire inside a block_in_place or use a scoped approach.
-        // Since StrictEngine methods take &mut self, we need the guard — but we
-        // can use block_in_place to avoid Send requirements.
-        {
-            let mut strict = match self.strict.lock() {
-                Ok(s) => s,
-                Err(p) => p.into_inner(),
-            };
-            // create_collection calls storage.batch_write which is async.
-            // Use tokio::task::block_in_place + Handle::block_on to call it
-            // while holding the sync MutexGuard.
-            tokio::task::block_in_place(|| {
-                let handle = tokio::runtime::Handle::current();
-                handle.block_on(strict.create_collection(&name, schema))
-            })?;
-        }
+        self.strict.create_collection(&name, schema).await?;
 
         // Register the new collection in the query engine.
         self.register_strict_collection(&name);
@@ -53,16 +36,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         &self,
         name: &str,
     ) -> Result<QueryResult, LiteError> {
-        {
-            let mut strict = match self.strict.lock() {
-                Ok(s) => s,
-                Err(p) => p.into_inner(),
-            };
-            tokio::task::block_in_place(|| {
-                let handle = tokio::runtime::Handle::current();
-                handle.block_on(strict.drop_collection(name))
-            })?;
-        }
+        self.strict.drop_collection(name).await?;
 
         Ok(QueryResult {
             columns: vec!["result".into()],

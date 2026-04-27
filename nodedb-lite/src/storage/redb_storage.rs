@@ -7,7 +7,7 @@
 //! Lite needs. No SQL parsing, no WAL journal mode, no spawn_blocking.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use redb::{Database, TableDefinition};
@@ -24,11 +24,11 @@ const TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("kv");
 
 /// redb-backed KV storage.
 ///
-/// Thread-safe via `Mutex<Database>`. On WASM (single-threaded) the mutex
-/// is uncontended. On native, redb handles internal locking but we serialize
-/// access to avoid holding multiple write transactions.
+/// The inner `Database` lives behind `Arc<Mutex<_>>` so async methods can
+/// `spawn_blocking` with a cheap clone of the handle on native targets and
+/// call the same helpers synchronously on WASM (which has no blocking pool).
 pub struct RedbStorage {
-    db: Mutex<Database>,
+    db: Arc<Mutex<Database>>,
 }
 
 impl RedbStorage {
@@ -41,9 +41,10 @@ impl RedbStorage {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, LiteError> {
         let path = path.as_ref();
         match Database::create(path) {
-            Ok(db) => Ok(Self { db: Mutex::new(db) }),
+            Ok(db) => Ok(Self {
+                db: Arc::new(Mutex::new(db)),
+            }),
             Err(e) => {
-                // Check if the file exists — if it does, it's likely corrupted.
                 if path.exists() {
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -71,14 +72,15 @@ impl RedbStorage {
                         });
                     }
 
-                    // Try creating a fresh database.
                     let db = Database::create(path).map_err(|e2| LiteError::Storage {
                         detail: format!(
                             "redb corrupted, backup saved to {}, fresh create failed: {e2}",
                             corrupt_path.display()
                         ),
                     })?;
-                    Ok(Self { db: Mutex::new(db) })
+                    Ok(Self {
+                        db: Arc::new(Mutex::new(db)),
+                    })
                 } else {
                     Err(LiteError::Storage {
                         detail: format!("redb open failed: {e}"),
@@ -96,14 +98,18 @@ impl RedbStorage {
             .map_err(|e| LiteError::Storage {
                 detail: format!("redb in-memory create failed: {e}"),
             })?;
-        Ok(Self { db: Mutex::new(db) })
+        Ok(Self {
+            db: Arc::new(Mutex::new(db)),
+        })
     }
 
     /// Wrap a pre-built `Database` (e.g., one created with a custom `StorageBackend`).
     ///
     /// Used by the WASM crate to pass in an OPFS-backed database.
     pub fn from_database(db: Database) -> Self {
-        Self { db: Mutex::new(db) }
+        Self {
+            db: Arc::new(Mutex::new(db)),
+        }
     }
 
     /// Build the composite key: `[namespace_u8, ...key_bytes]`.
@@ -123,11 +129,18 @@ impl RedbStorage {
         }
     }
 
-    // ─── Shared sync helpers (called by both async and sync trait impls) ─────
+    // ─── Sync helpers (the only place that touches redb) ──────────────────
+    //
+    // Take `&Mutex<Database>` so async methods can clone the outer `Arc` and
+    // move it into a `spawn_blocking` closure without referencing `self`.
 
-    fn get_inner(&self, ns: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, LiteError> {
+    fn get_inner(
+        db: &Mutex<Database>,
+        ns: Namespace,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, LiteError> {
         let composite = Self::make_key(ns, key);
-        let db = self.db.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let db = db.lock().map_err(|_| LiteError::LockPoisoned)?;
 
         let txn = db.begin_read().map_err(|e| LiteError::Storage {
             detail: format!("read txn failed: {e}"),
@@ -151,9 +164,14 @@ impl RedbStorage {
         }
     }
 
-    fn put_inner(&self, ns: Namespace, key: &[u8], value: &[u8]) -> Result<(), LiteError> {
+    fn put_inner(
+        db: &Mutex<Database>,
+        ns: Namespace,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), LiteError> {
         let composite = Self::make_key(ns, key);
-        let db = self.db.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let db = db.lock().map_err(|_| LiteError::LockPoisoned)?;
 
         let txn = db.begin_write().map_err(|e| LiteError::Storage {
             detail: format!("write txn failed: {e}"),
@@ -174,9 +192,9 @@ impl RedbStorage {
         Ok(())
     }
 
-    fn delete_inner(&self, ns: Namespace, key: &[u8]) -> Result<(), LiteError> {
+    fn delete_inner(db: &Mutex<Database>, ns: Namespace, key: &[u8]) -> Result<(), LiteError> {
         let composite = Self::make_key(ns, key);
-        let db = self.db.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let db = db.lock().map_err(|_| LiteError::LockPoisoned)?;
 
         let txn = db.begin_write().map_err(|e| LiteError::Storage {
             detail: format!("write txn failed: {e}"),
@@ -197,12 +215,12 @@ impl RedbStorage {
         Ok(())
     }
 
-    fn batch_write_inner(&self, ops: &[WriteOp]) -> Result<(), LiteError> {
+    fn batch_write_inner(db: &Mutex<Database>, ops: &[WriteOp]) -> Result<(), LiteError> {
         if ops.is_empty() {
             return Ok(());
         }
 
-        let db = self.db.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let db = db.lock().map_err(|_| LiteError::LockPoisoned)?;
 
         let txn = db.begin_write().map_err(|e| LiteError::Storage {
             detail: format!("write txn failed: {e}"),
@@ -238,25 +256,9 @@ impl RedbStorage {
         })?;
         Ok(())
     }
-}
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl StorageEngine for RedbStorage {
-    async fn get(&self, ns: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, LiteError> {
-        self.get_inner(ns, key)
-    }
-
-    async fn put(&self, ns: Namespace, key: &[u8], value: &[u8]) -> Result<(), LiteError> {
-        self.put_inner(ns, key, value)
-    }
-
-    async fn delete(&self, ns: Namespace, key: &[u8]) -> Result<(), LiteError> {
-        self.delete_inner(ns, key)
-    }
-
-    async fn scan_prefix(
-        &self,
+    fn scan_prefix_inner(
+        db: &Mutex<Database>,
         ns: Namespace,
         prefix: &[u8],
     ) -> Result<Vec<super::engine::KvPair>, LiteError> {
@@ -265,7 +267,7 @@ impl StorageEngine for RedbStorage {
         start_key.push(ns_byte);
         start_key.extend_from_slice(prefix);
 
-        let db = self.db.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let db = db.lock().map_err(|_| LiteError::LockPoisoned)?;
 
         let txn = db.begin_read().map_err(|e| LiteError::Storage {
             detail: format!("read txn failed: {e}"),
@@ -282,7 +284,6 @@ impl StorageEngine for RedbStorage {
 
         let mut results = Vec::new();
 
-        // redb range scan: from start_key to end of namespace.
         let range = table
             .range(start_key.as_slice()..)
             .map_err(|e| LiteError::Storage {
@@ -295,14 +296,12 @@ impl StorageEngine for RedbStorage {
             })?;
             let k = entry.0.value();
 
-            // Stop if we've left this namespace.
             if k[0] != ns_byte {
                 break;
             }
 
             let user_key = Self::strip_ns(k);
 
-            // If prefix is non-empty, check it matches.
             if !prefix.is_empty() && !user_key.starts_with(prefix) {
                 break;
             }
@@ -313,16 +312,12 @@ impl StorageEngine for RedbStorage {
         Ok(results)
     }
 
-    async fn batch_write(&self, ops: &[WriteOp]) -> Result<(), LiteError> {
-        self.batch_write_inner(ops)
-    }
-
-    async fn count(&self, ns: Namespace) -> Result<u64, LiteError> {
+    fn count_inner(db: &Mutex<Database>, ns: Namespace) -> Result<u64, LiteError> {
         let ns_byte = ns as u8;
         let start = vec![ns_byte];
         let end = vec![ns_byte + 1];
 
-        let db = self.db.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let db = db.lock().map_err(|_| LiteError::LockPoisoned)?;
 
         let txn = db.begin_read().map_err(|e| LiteError::Storage {
             detail: format!("read txn failed: {e}"),
@@ -354,27 +349,9 @@ impl StorageEngine for RedbStorage {
 
         Ok(count)
     }
-}
 
-impl crate::storage::engine::StorageEngineSync for RedbStorage {
-    fn batch_write_sync(&self, ops: &[WriteOp]) -> Result<(), LiteError> {
-        self.batch_write_inner(ops)
-    }
-
-    fn get_sync(&self, ns: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, LiteError> {
-        self.get_inner(ns, key)
-    }
-
-    fn put_sync(&self, ns: Namespace, key: &[u8], value: &[u8]) -> Result<(), LiteError> {
-        self.put_inner(ns, key, value)
-    }
-
-    fn delete_sync(&self, ns: Namespace, key: &[u8]) -> Result<(), LiteError> {
-        self.delete_inner(ns, key)
-    }
-
-    fn scan_range_sync(
-        &self,
+    fn scan_range_inner(
+        db: &Mutex<Database>,
         ns: Namespace,
         start: &[u8],
         limit: usize,
@@ -384,7 +361,7 @@ impl crate::storage::engine::StorageEngineSync for RedbStorage {
         start_key.push(ns_byte);
         start_key.extend_from_slice(start);
 
-        let db = self.db.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let db = db.lock().map_err(|_| LiteError::LockPoisoned)?;
         let txn = db.begin_read().map_err(|e| LiteError::Storage {
             detail: format!("read txn failed: {e}"),
         })?;
@@ -423,9 +400,142 @@ impl crate::storage::engine::StorageEngineSync for RedbStorage {
     }
 }
 
+// ─── Native: dispatch every async method through `spawn_blocking` ────────
+//
+// `spawn_blocking` is mandatory. The redb calls are synchronous and can take
+// non-trivial time (especially `begin_write` + `commit`). Calling them on a
+// `current_thread` Tokio runtime would block the only worker; calling them
+// on `multi_thread` would still hog a worker thread. Off-loading to the
+// blocking pool keeps the async runtime responsive on every flavor.
+
+#[cfg(not(target_arch = "wasm32"))]
+fn join_err(e: tokio::task::JoinError) -> LiteError {
+    LiteError::JoinError {
+        detail: e.to_string(),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait]
+impl StorageEngine for RedbStorage {
+    async fn get(&self, ns: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, LiteError> {
+        let db = Arc::clone(&self.db);
+        let key = key.to_vec();
+        tokio::task::spawn_blocking(move || Self::get_inner(&db, ns, &key))
+            .await
+            .map_err(join_err)?
+    }
+
+    async fn put(&self, ns: Namespace, key: &[u8], value: &[u8]) -> Result<(), LiteError> {
+        let db = Arc::clone(&self.db);
+        let key = key.to_vec();
+        let value = value.to_vec();
+        tokio::task::spawn_blocking(move || Self::put_inner(&db, ns, &key, &value))
+            .await
+            .map_err(join_err)?
+    }
+
+    async fn delete(&self, ns: Namespace, key: &[u8]) -> Result<(), LiteError> {
+        let db = Arc::clone(&self.db);
+        let key = key.to_vec();
+        tokio::task::spawn_blocking(move || Self::delete_inner(&db, ns, &key))
+            .await
+            .map_err(join_err)?
+    }
+
+    async fn scan_prefix(
+        &self,
+        ns: Namespace,
+        prefix: &[u8],
+    ) -> Result<Vec<super::engine::KvPair>, LiteError> {
+        let db = Arc::clone(&self.db);
+        let prefix = prefix.to_vec();
+        tokio::task::spawn_blocking(move || Self::scan_prefix_inner(&db, ns, &prefix))
+            .await
+            .map_err(join_err)?
+    }
+
+    async fn batch_write(&self, ops: &[WriteOp]) -> Result<(), LiteError> {
+        let db = Arc::clone(&self.db);
+        let ops = ops.to_vec();
+        tokio::task::spawn_blocking(move || Self::batch_write_inner(&db, &ops))
+            .await
+            .map_err(join_err)?
+    }
+
+    async fn count(&self, ns: Namespace) -> Result<u64, LiteError> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || Self::count_inner(&db, ns))
+            .await
+            .map_err(join_err)?
+    }
+}
+
+// ─── WASM: no blocking pool, call helpers directly ───────────────────────
+
+#[cfg(target_arch = "wasm32")]
+#[async_trait(?Send)]
+impl StorageEngine for RedbStorage {
+    async fn get(&self, ns: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, LiteError> {
+        Self::get_inner(&self.db, ns, key)
+    }
+
+    async fn put(&self, ns: Namespace, key: &[u8], value: &[u8]) -> Result<(), LiteError> {
+        Self::put_inner(&self.db, ns, key, value)
+    }
+
+    async fn delete(&self, ns: Namespace, key: &[u8]) -> Result<(), LiteError> {
+        Self::delete_inner(&self.db, ns, key)
+    }
+
+    async fn scan_prefix(
+        &self,
+        ns: Namespace,
+        prefix: &[u8],
+    ) -> Result<Vec<super::engine::KvPair>, LiteError> {
+        Self::scan_prefix_inner(&self.db, ns, prefix)
+    }
+
+    async fn batch_write(&self, ops: &[WriteOp]) -> Result<(), LiteError> {
+        Self::batch_write_inner(&self.db, ops)
+    }
+
+    async fn count(&self, ns: Namespace) -> Result<u64, LiteError> {
+        Self::count_inner(&self.db, ns)
+    }
+}
+
+impl crate::storage::engine::StorageEngineSync for RedbStorage {
+    fn batch_write_sync(&self, ops: &[WriteOp]) -> Result<(), LiteError> {
+        Self::batch_write_inner(&self.db, ops)
+    }
+
+    fn get_sync(&self, ns: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, LiteError> {
+        Self::get_inner(&self.db, ns, key)
+    }
+
+    fn put_sync(&self, ns: Namespace, key: &[u8], value: &[u8]) -> Result<(), LiteError> {
+        Self::put_inner(&self.db, ns, key, value)
+    }
+
+    fn delete_sync(&self, ns: Namespace, key: &[u8]) -> Result<(), LiteError> {
+        Self::delete_inner(&self.db, ns, key)
+    }
+
+    fn scan_range_sync(
+        &self,
+        ns: Namespace,
+        start: &[u8],
+        limit: usize,
+    ) -> Result<Vec<super::engine::KvPair>, LiteError> {
+        Self::scan_range_inner(&self.db, ns, start, limit)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc as StdArc;
 
     fn make_storage() -> RedbStorage {
         RedbStorage::open_in_memory().unwrap()
@@ -609,5 +719,47 @@ mod tests {
             let val = s.get(Namespace::Meta, b"key").await.unwrap();
             assert_eq!(val.as_deref(), Some(b"persistent".as_slice()));
         }
+    }
+
+    /// 100 concurrent `get` calls from a `current_thread` Tokio runtime must
+    /// complete within 1s. Before the spawn_blocking refactor these would
+    /// serialize on the redb mutex while holding the only worker thread,
+    /// making throughput collapse and the test stall on slower machines.
+    #[test]
+    fn concurrent_gets_on_current_thread_runtime() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+            let s = StdArc::new(make_storage());
+            // Pre-populate.
+            for i in 0..100u32 {
+                let key = format!("k{i}");
+                s.put(Namespace::Vector, key.as_bytes(), b"v")
+                    .await
+                    .unwrap();
+            }
+
+            let start = std::time::Instant::now();
+            let mut handles = Vec::with_capacity(100);
+            for i in 0..100u32 {
+                let s = StdArc::clone(&s);
+                handles.push(tokio::spawn(async move {
+                    let key = format!("k{i}");
+                    s.get(Namespace::Vector, key.as_bytes()).await.unwrap()
+                }));
+            }
+            for h in handles {
+                let val = h.await.unwrap();
+                assert_eq!(val.as_deref(), Some(b"v".as_slice()));
+            }
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_secs(1),
+                "100 concurrent gets took {elapsed:?}, expected < 1s"
+            );
+        });
     }
 }
