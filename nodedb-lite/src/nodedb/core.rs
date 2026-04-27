@@ -14,7 +14,7 @@ use crate::engine::htap::HtapBridge;
 use crate::engine::strict::StrictEngine;
 use crate::engine::vector::graph::{HnswIndex, HnswParams};
 use crate::memory::{EngineId, MemoryGovernor};
-use crate::storage::engine::{StorageEngine, WriteOp};
+use crate::storage::engine::{StorageEngine, StorageEngineSync, WriteOp};
 
 /// Storage key constants.
 pub(crate) const META_HNSW_COLLECTIONS: &[u8] = b"meta:hnsw_collections";
@@ -31,7 +31,7 @@ pub(crate) const META_LAST_FLUSHED_MID: &[u8] = b"meta:last_flushed_mid";
 ///
 /// Fully capable of vector search, graph traversal, and document CRUD
 /// entirely offline. Optional sync to Origin via WebSocket.
-pub struct NodeDbLite<S: StorageEngine> {
+pub struct NodeDbLite<S: StorageEngine + StorageEngineSync> {
     pub(crate) storage: Arc<S>,
     /// Per-collection HNSW indices.
     pub(crate) hnsw_indices: Mutex<HashMap<String, HnswIndex>>,
@@ -70,7 +70,25 @@ pub struct NodeDbLite<S: StorageEngine> {
     /// Arc-wrapped for sharing with the query engine's DDL handlers.
     pub(crate) timeseries: Arc<Mutex<crate::engine::timeseries::engine::TimeseriesEngine>>,
     /// Array engine in-memory state (storage-agnostic; calls via NodeDbLite methods).
-    pub(crate) array_state: std::sync::Mutex<crate::engine::array::engine::ArrayEngineState>,
+    ///
+    /// `Arc`-wrapped so it can be shared with [`crate::sync::array::LiteApplyEngine`]
+    /// for the inbound receive path without borrowing `NodeDbLite`.
+    pub(crate) array_state: Arc<std::sync::Mutex<crate::engine::array::engine::ArrayEngineState>>,
+    /// Stable per-replica identity + HLC generator for array CRDT sync.
+    /// Used by the transport-layer wiring (Phase F+); held here so that
+    /// the `NodeDbLite` constructor owns the lifetime.
+    #[allow(dead_code)]
+    pub(crate) array_replica: Arc<crate::sync::array::ReplicaState>,
+    /// Per-array [`SchemaDoc`] registry (persisted Loro snapshots).
+    pub(crate) array_schemas: Arc<crate::sync::array::SchemaRegistry<S>>,
+    /// Array CRDT send path: op-log + pending queue emitters.
+    pub(crate) array_outbound: Arc<crate::sync::array::ArrayOutbound<S>>,
+    /// Array CRDT receive path: applies inbound wire messages from Origin.
+    #[allow(dead_code)]
+    pub(crate) array_inbound: Arc<crate::sync::array::ArrayInbound<S>>,
+    /// Per-array last-seen HLC tracker for catch-up requests.
+    #[allow(dead_code)]
+    pub(crate) array_catchup: Arc<crate::sync::array::CatchupTracker<S>>,
     /// When `false`, KV operations go directly to redb, bypassing Loro.
     /// Other engines (vector, graph, document) are unaffected.
     pub(crate) sync_enabled: bool,
@@ -97,7 +115,7 @@ pub(crate) struct KvWriteBuffer {
     pub overlay: HashMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
-impl<S: StorageEngine> NodeDbLite<S> {
+impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     /// Open or create a Lite database backed by the given storage engine.
     ///
     /// Memory budget and per-engine percentages are resolved from environment
@@ -271,6 +289,47 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         let array_engine =
             crate::engine::array::ArrayEngineState::open(&storage).map_err(NodeDbError::storage)?;
+        let array_state = Arc::new(Mutex::new(array_engine));
+
+        // ── Array CRDT sync state ──────────────────────────────────────────────
+        let array_replica = Arc::new(
+            crate::sync::array::ReplicaState::load_or_init(&*storage)
+                .map_err(NodeDbError::storage)?,
+        );
+        let array_schemas = Arc::new(
+            crate::sync::array::SchemaRegistry::load(
+                Arc::clone(&storage),
+                Arc::clone(&array_replica),
+            )
+            .map_err(NodeDbError::storage)?,
+        );
+        let array_op_log = Arc::new(crate::sync::array::RedbOpLog::new(Arc::clone(&storage)));
+        let array_pending = Arc::new(crate::sync::array::PendingQueue::new(Arc::clone(&storage)));
+        let array_outbound = Arc::new(crate::sync::array::ArrayOutbound::new(
+            Arc::clone(&array_op_log),
+            Arc::clone(&array_pending),
+            Arc::clone(&array_schemas),
+            Arc::clone(&array_replica),
+        ));
+
+        // ── Array CRDT inbound receive path ───────────────────────────────────
+        let array_apply_engine = Arc::new(crate::sync::array::LiteApplyEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&array_state),
+            Arc::clone(&array_schemas),
+            Arc::clone(array_outbound.op_log()),
+        ));
+        let array_inbound = Arc::new(crate::sync::array::ArrayInbound::new(
+            array_apply_engine,
+            Arc::clone(&array_schemas),
+            Arc::clone(&array_replica),
+            Arc::clone(array_outbound.pending()),
+            Arc::clone(array_outbound.op_log()),
+        ));
+        let array_catchup = Arc::new(
+            crate::sync::array::CatchupTracker::load(Arc::clone(&storage))
+                .map_err(NodeDbError::storage)?,
+        );
 
         let db = Self {
             storage,
@@ -288,7 +347,12 @@ impl<S: StorageEngine> NodeDbLite<S> {
             columnar,
             htap,
             timeseries,
-            array_state: Mutex::new(array_engine),
+            array_state,
+            array_replica,
+            array_schemas,
+            array_outbound,
+            array_inbound,
+            array_catchup,
             sync_enabled,
             kv_write_buf: Mutex::new(KvWriteBuffer {
                 ops: Vec::with_capacity(1024),
