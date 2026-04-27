@@ -1,0 +1,54 @@
+# nextest configuration for nodedb-lite. Mirrors the pattern in nodedb's
+# `.config/nextest.toml`: cheap unit tests get full parallelism, heavy
+# integration tests are serialized and claim every test slot so they
+# can't be starved by the rest of the suite.
+#
+# Run with: cargo nextest run -p nodedb-lite
+
+[profile.default]
+# Hard ceiling per test. Anything above this is a bug, not a slow test.
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# Default to all cores; the `heavy` test-group below evicts everything
+# else when a heavy test is running, so this doesn't cause contention
+# on the workloads that actually matter.
+test-threads = "num-cpus"
+
+# Heavy integration tests:
+#
+#   * Multi-thread tokio runtimes (`flavor = "multi_thread"`) in
+#     concurrency.rs, htap.rs, crash_recovery.rs each spawn 2–4 worker
+#     threads. With nextest scheduling 24 of these in parallel on a
+#     24-core box, total tokio worker thread count balloons past 80
+#     and the kernel scheduler starts stuttering.
+#
+#   * File-backed redb tests (`tempdir().join("...")`) in e2e.rs and
+#     integration.rs do real disk I/O — many in parallel hammer
+#     /tmp's fsync queue.
+#
+# `test-group = "heavy"` with `max-threads = 1` and
+# `threads-required = "num-test-threads"` ensures these run STRICTLY
+# ONE AT A TIME and claim every test slot while running, so the rest
+# of the suite isn't trying to schedule alongside them. In-memory
+# unit tests still get full parallelism between heavy runs.
+[[profile.default.overrides]]
+filter = '''
+binary(/concurrency/)
+| binary(/htap/)
+| binary(/crash_recovery/)
+| binary(/e2e/)
+| binary(/integration/)
+| binary(/compensation/)
+'''
+test-group = 'heavy'
+threads-required = 'num-test-threads'
+
+[test-groups]
+heavy = { max-threads = 1 }
+
+[profile.ci]
+retries = { backoff = "fixed", count = 2, delay = "2s" }
+fail-fast = false
+
+[profile.ci.junit]
+path = "junit.xml"
