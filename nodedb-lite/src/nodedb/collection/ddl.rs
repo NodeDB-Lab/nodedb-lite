@@ -3,7 +3,7 @@
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 
 use super::super::{LockExt, NodeDbLite};
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
 /// Collection metadata stored in redb.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -18,7 +18,7 @@ pub struct CollectionMeta {
     pub config_json: Option<String>,
 }
 
-impl<S: StorageEngine> NodeDbLite<S> {
+impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     /// Create a collection with optional schema.
     ///
     /// If the collection already exists, returns Ok (idempotent).

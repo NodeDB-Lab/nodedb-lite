@@ -12,7 +12,7 @@
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 
 use super::NodeDbLite;
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
 /// A stored function definition (mirrors Origin's StoredFunction).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -69,7 +69,7 @@ pub struct LiteProcedureParam {
 
 // ── Generic CRUD helpers ────────────────────────────────────────────────
 
-impl<S: StorageEngine> NodeDbLite<S> {
+impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     /// Store a definition in the local catalog under `{prefix}:{name}`.
     async fn put_definition(
         &self,
@@ -137,7 +137,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
 // ── Type-specific convenience methods ───────────────────────────────────
 
-impl<S: StorageEngine> NodeDbLite<S> {
+impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     /// Store a function definition in the local catalog.
     pub async fn put_function(&self, func: &LiteStoredFunction) -> NodeDbResult<()> {
         self.put_definition("function", &func.name, func).await

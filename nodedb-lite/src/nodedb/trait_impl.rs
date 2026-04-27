@@ -21,13 +21,13 @@ use super::NodeDbLite;
 use super::convert::{loro_value_to_document, value_to_loro};
 use crate::engine::graph::index::Direction;
 use crate::engine::graph::traversal::DEFAULT_MAX_VISITED;
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
 /// Internal fields to exclude from metadata by index type.
 const INTERNAL_FIELDS_BASE: &[&str] = &["embedding_dim"];
 const INTERNAL_FIELDS_NAMED: &[&str] = &["embedding_dim", "__field"];
 
-impl<S: StorageEngine> NodeDbLite<S> {
+impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     /// Shared vector search implementation used by both `vector_search` and `vector_search_field`.
     async fn vector_search_internal(
         &self,
@@ -149,8 +149,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
     }
 }
 
-#[async_trait]
-impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S: StorageEngine + StorageEngineSync> NodeDb for NodeDbLite<S> {
     async fn vector_search(
         &self,
         collection: &str,

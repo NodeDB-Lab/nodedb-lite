@@ -1,12 +1,12 @@
 //! `SyncDelegate` implementation — bridges the sync transport to NodeDbLite's engines.
 
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
 use super::core::NodeDbLite;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
-impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
+impl<S: StorageEngine + StorageEngineSync> crate::sync::SyncDelegate for NodeDbLite<S> {
     fn pending_deltas(&self) -> Vec<crate::engine::crdt::engine::PendingDelta> {
         self.pending_crdt_deltas().unwrap_or_default()
     }

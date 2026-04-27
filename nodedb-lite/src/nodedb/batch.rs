@@ -4,9 +4,9 @@ use nodedb_types::Namespace;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 
 use super::{LockExt, NodeDbLite};
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
-impl<S: StorageEngine> NodeDbLite<S> {
+impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     /// Batch insert vectors — O(1) CRDT delta export instead of O(N).
     ///
     /// Use this for bulk loading (cold-start hydration, benchmark setup, imports).

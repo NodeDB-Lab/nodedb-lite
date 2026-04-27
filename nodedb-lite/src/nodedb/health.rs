@@ -11,7 +11,7 @@
 use serde::Serialize;
 
 use crate::memory::{EngineId, PressureLevel};
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
 use super::core::NodeDbLite;
 use super::lock_ext::LockExt;
@@ -115,7 +115,15 @@ fn engine_memory(gov: &crate::memory::MemoryGovernor, id: EngineId) -> EngineMem
     }
 }
 
-impl<S: StorageEngine> NodeDbLite<S> {
+impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
+    /// Borrow the underlying storage engine.
+    ///
+    /// Public so benchmark code can call backend-specific methods like
+    /// `RedbStorage::db_size_bytes()` for compression-ratio measurement.
+    pub fn storage(&self) -> &S {
+        &self.storage
+    }
+
     /// Get a structured health report.
     ///
     /// This is a cheap, non-blocking call — reads atomic counters and lock-free state.

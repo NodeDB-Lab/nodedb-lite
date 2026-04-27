@@ -13,7 +13,7 @@
 
 use serde::Serialize;
 
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
 use super::core::NodeDbLite;
 use super::health::HealthStatus;
@@ -67,7 +67,7 @@ pub struct BuildInfo {
     pub profile: &'static str,
 }
 
-impl<S: StorageEngine> NodeDbLite<S> {
+impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     /// Generate a diagnostic dump suitable for bug reports.
     ///
     /// Contains NO user data, NO document contents, NO embeddings.

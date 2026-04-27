@@ -13,7 +13,7 @@ use nodedb_types::value::Value;
 use super::super::convert::value_to_loro;
 use super::super::{LockExt, NodeDbLite};
 use crate::engine::crdt::engine::{CrdtBatchOp, CrdtField};
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
 /// A single operation in a transaction batch.
 #[derive(Debug, Clone)]
@@ -29,7 +29,7 @@ pub enum TransactionOp {
     },
 }
 
-impl<S: StorageEngine> NodeDbLite<S> {
+impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     /// Execute a batch of operations atomically.
     ///
     /// **Atomicity model**: all operations are validated upfront. If any

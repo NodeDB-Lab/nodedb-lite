@@ -13,7 +13,7 @@ use nodedb_types::id::NodeId;
 use nodedb_types::result::SearchResult;
 
 use super::{LockExt, NodeDbLite};
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
 /// GraphRAG fusion parameters.
 pub struct GraphRagParams<'a> {
@@ -47,7 +47,7 @@ impl Default for GraphRagParams<'_> {
     }
 }
 
-impl<S: StorageEngine> NodeDbLite<S> {
+impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     /// GraphRAG fusion: vector search → graph expansion → RRF merge.
     ///
     /// 1. Vector search returns `vector_k` candidates by embedding similarity.
@@ -189,7 +189,7 @@ fn search_results_to_ranked(
         .collect()
 }
 
-impl<S: StorageEngine> NodeDbLite<S> {
+impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     /// Hybrid search: vector similarity + BM25 text relevance fused via RRF.
     ///
     /// 1. Vector search returns `vector_k` candidates by embedding similarity.

@@ -10,9 +10,9 @@ use nodedb_types::value::Value;
 
 use super::super::convert::value_to_loro;
 use super::super::{LockExt, NodeDbLite};
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
-impl<S: StorageEngine> NodeDbLite<S> {
+impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     /// Bulk update documents matching a predicate.
     ///
     /// Scans all documents, evaluates `ScanFilter` predicates, and applies
