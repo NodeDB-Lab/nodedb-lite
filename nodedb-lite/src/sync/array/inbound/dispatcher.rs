@@ -14,6 +14,7 @@ use nodedb_array::sync::snapshot::{SnapshotChunk, SnapshotHeader};
 
 use crate::error::LiteError;
 use crate::storage::engine::StorageEngineSync;
+use crate::sync::array::catchup::CatchupTracker;
 use crate::sync::array::op_log_redb::RedbOpLog;
 use crate::sync::array::pending::PendingQueue;
 use crate::sync::array::replica_state::ReplicaState;
@@ -52,6 +53,8 @@ pub struct ArrayInbound<S: StorageEngineSync> {
     pub(super) pending: Arc<PendingQueue<S>>,
     #[allow(dead_code)]
     pub(super) op_log: Arc<RedbOpLog<S>>,
+    /// Catchup tracker — updated when Origin sends `RetentionFloor` rejects.
+    pub(super) catchup: Arc<CatchupTracker<S>>,
     /// In-flight snapshot chunk buffers.
     /// Key: `(array_name, snapshot_hlc_bytes)`.
     pub(super) snapshots: Mutex<HashMap<(String, [u8; 18]), SnapshotAssembly>>,
@@ -65,6 +68,7 @@ impl<S: StorageEngineSync> ArrayInbound<S> {
         replica: Arc<ReplicaState>,
         pending: Arc<PendingQueue<S>>,
         op_log: Arc<RedbOpLog<S>>,
+        catchup: Arc<CatchupTracker<S>>,
     ) -> Self {
         Self {
             engine,
@@ -72,6 +76,7 @@ impl<S: StorageEngineSync> ArrayInbound<S> {
             replica,
             pending,
             op_log,
+            catchup,
             snapshots: Mutex::new(HashMap::new()),
         }
     }

@@ -186,6 +186,15 @@ impl<S: StorageEngineSync> SchemaRegistry<S> {
         self.persist(name, schema_hlc, snapshot)
     }
 
+    /// Return all array names currently registered in this registry.
+    pub fn list_arrays(&self) -> Vec<String> {
+        self.docs
+            .lock()
+            .ok()
+            .map(|docs| docs.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// Export the current Loro snapshot bytes for `name`.
     ///
     /// Returns `None` if `name` is not registered.

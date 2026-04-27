@@ -313,6 +313,10 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         ));
 
         // ── Array CRDT inbound receive path ───────────────────────────────────
+        let array_catchup = Arc::new(
+            crate::sync::array::CatchupTracker::load(Arc::clone(&storage))
+                .map_err(NodeDbError::storage)?,
+        );
         let array_apply_engine = Arc::new(crate::sync::array::LiteApplyEngine::new(
             Arc::clone(&storage),
             Arc::clone(&array_state),
@@ -325,11 +329,8 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             Arc::clone(&array_replica),
             Arc::clone(array_outbound.pending()),
             Arc::clone(array_outbound.op_log()),
+            Arc::clone(&array_catchup),
         ));
-        let array_catchup = Arc::new(
-            crate::sync::array::CatchupTracker::load(Arc::clone(&storage))
-                .map_err(NodeDbError::storage)?,
-        );
 
         let db = Self {
             storage,

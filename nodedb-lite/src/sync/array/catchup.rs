@@ -21,21 +21,31 @@ use crate::storage::engine::StorageEngineSync;
 /// Storage key prefix for per-array last-seen HLC entries.
 const LAST_SEEN_PREFIX: &str = "array.last_seen_hlc:";
 
+/// Storage key prefix for per-array catchup-needed flags.
+const CATCHUP_NEEDED_PREFIX: &str = "array.catchup_needed:";
+
 /// Storage key for a named array's last-seen HLC.
 fn last_seen_key(array: &str) -> Vec<u8> {
     format!("{LAST_SEEN_PREFIX}{array}").into_bytes()
 }
 
+/// Storage key for a named array's catchup-needed flag.
+fn catchup_needed_key(array: &str) -> Vec<u8> {
+    format!("{CATCHUP_NEEDED_PREFIX}{array}").into_bytes()
+}
+
 /// Tracks the last successfully applied inbound HLC per array.
 ///
-/// Used by the transport layer (future phases) to populate catchup-request
-/// messages after reconnect or when Origin's log GC horizon advances past the
-/// local log.
+/// Used by the transport layer to populate catchup-request messages after
+/// reconnect or when Origin's log GC horizon advances past the local log.
 ///
 /// Thread-safe via an internal [`Mutex`].
 pub struct CatchupTracker<S: StorageEngineSync> {
     storage: Arc<S>,
     state: Mutex<HashMap<String, Hlc>>,
+    /// Arrays that need a full catchup on next connect.
+    /// Set when Origin sends `ArrayRejectMsg::RetentionFloor`.
+    catchup_needed: Mutex<std::collections::HashSet<String>>,
 }
 
 impl<S: StorageEngineSync> CatchupTracker<S> {
@@ -67,9 +77,24 @@ impl<S: StorageEngineSync> CatchupTracker<S> {
             state.insert(name.to_owned(), Hlc::from_bytes(&hlc_arr));
         }
 
+        // Load catchup-needed flags.
+        let needed_prefix = CATCHUP_NEEDED_PREFIX.as_bytes();
+        let needed_pairs = storage.scan_range_sync(Namespace::Meta, needed_prefix, usize::MAX)?;
+        let mut catchup_needed = std::collections::HashSet::new();
+        for (key, _) in needed_pairs {
+            if !key.starts_with(needed_prefix) {
+                break;
+            }
+            let name_bytes = &key[needed_prefix.len()..];
+            if let Ok(name) = std::str::from_utf8(name_bytes) {
+                catchup_needed.insert(name.to_owned());
+            }
+        }
+
         Ok(Self {
             storage,
             state: Mutex::new(state),
+            catchup_needed: Mutex::new(catchup_needed),
         })
     }
 
@@ -109,6 +134,60 @@ impl<S: StorageEngineSync> CatchupTracker<S> {
             array: array.to_owned(),
             from_hlc_bytes: self.last_seen(array).to_bytes(),
         }
+    }
+
+    /// Returns `true` if `array` should request a full catch-up on connect.
+    ///
+    /// True when:
+    /// - No `last_seen_hlc` is recorded (first connect), OR
+    /// - `record_reject_retention_floor` was called (Origin GC advanced past our log).
+    pub fn should_request_catchup(&self, array: &str, _current_local_hlc: Hlc) -> bool {
+        let needs_catchup = self
+            .catchup_needed
+            .lock()
+            .ok()
+            .map(|s| s.contains(array))
+            .unwrap_or(false);
+        if needs_catchup {
+            return true;
+        }
+        // First connect: no last-seen HLC recorded.
+        let state = self.state.lock().ok();
+        state.map(|s| !s.contains_key(array)).unwrap_or(false)
+    }
+
+    /// Mark `array` as needing a full catch-up on the next connect.
+    ///
+    /// Called when Origin sends `ArrayRejectMsg::RetentionFloor`.
+    /// Persisted under `Namespace::Meta` `"array.catchup_needed:{array}"`.
+    pub fn record_reject_retention_floor(&self, array: &str) -> Result<(), LiteError> {
+        if let Ok(mut needed) = self.catchup_needed.lock() {
+            needed.insert(array.to_owned());
+        }
+        // Persist flag (value = 1 byte sentinel).
+        self.storage
+            .put_sync(Namespace::Meta, &catchup_needed_key(array), &[1u8])
+    }
+
+    /// Clear the catchup-needed flag for `array` after a successful catch-up.
+    ///
+    /// Called after the snapshot stream has been fully applied.
+    pub fn clear_catchup_needed(&self, array: &str) -> Result<(), LiteError> {
+        if let Ok(mut needed) = self.catchup_needed.lock() {
+            needed.remove(array);
+        }
+        // Remove the persisted flag.
+        self.storage
+            .delete_sync(Namespace::Meta, &catchup_needed_key(array))
+    }
+
+    /// Return all arrays that are marked as needing catch-up.
+    pub fn arrays_needing_catchup(&self) -> Vec<String> {
+        self.catchup_needed
+            .lock()
+            .ok()
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default()
     }
 }
 

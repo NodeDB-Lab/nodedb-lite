@@ -2,6 +2,7 @@
 //! [`ApplyEngine`] trait so [`nodedb_array::sync::apply::apply_op`] can drive
 //! local state from inbound wire messages.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use nodedb_array::error::ArrayError;
@@ -10,11 +11,15 @@ use nodedb_array::sync::hlc::Hlc;
 use nodedb_array::sync::op::ArrayOp;
 use nodedb_array::sync::op_log::OpLog;
 use nodedb_array::types::coord::value::CoordValue;
+use nodedb_types::Namespace;
 
 use crate::engine::array::engine::ArrayEngineState;
 use crate::storage::engine::StorageEngineSync;
 use crate::sync::array::op_log_redb::RedbOpLog;
 use crate::sync::array::schema_registry::SchemaRegistry;
+
+/// Key prefix for `last_applied_hlc` entries persisted under `Namespace::Meta`.
+const LAST_APPLIED_PREFIX: &str = "array.last_applied:";
 
 /// Adapts NodeDB-Lite's array engine state to the [`ApplyEngine`] trait.
 ///
@@ -35,6 +40,9 @@ pub struct LiteApplyEngine<S: StorageEngineSync> {
     pub(super) array_state: Arc<Mutex<ArrayEngineState>>,
     pub(super) schemas: Arc<SchemaRegistry<S>>,
     pub(super) op_log: Arc<RedbOpLog<S>>,
+    /// In-memory cache of the last applied HLC per array.
+    /// Persisted under `Namespace::Meta` `"array.last_applied:{name}"`.
+    last_applied: Mutex<HashMap<String, Hlc>>,
 }
 
 impl<S: StorageEngineSync> LiteApplyEngine<S> {
@@ -45,11 +53,69 @@ impl<S: StorageEngineSync> LiteApplyEngine<S> {
         schemas: Arc<SchemaRegistry<S>>,
         op_log: Arc<RedbOpLog<S>>,
     ) -> Self {
+        // Restore any persisted last-applied HLCs from storage on startup.
+        let last_applied = Self::load_last_applied(&storage);
         Self {
             storage,
             array_state,
             schemas,
             op_log,
+            last_applied: Mutex::new(last_applied),
+        }
+    }
+
+    fn load_last_applied(storage: &Arc<S>) -> HashMap<String, Hlc> {
+        let prefix = LAST_APPLIED_PREFIX.as_bytes();
+        let Ok(pairs) = storage.scan_range_sync(Namespace::Meta, prefix, usize::MAX) else {
+            return HashMap::new();
+        };
+        let mut map = HashMap::new();
+        for (key, value) in pairs {
+            if !key.starts_with(prefix) {
+                break;
+            }
+            let name_bytes = &key[prefix.len()..];
+            let Ok(name) = std::str::from_utf8(name_bytes) else {
+                continue;
+            };
+            if value.len() == 18 {
+                let bytes: [u8; 18] = match value.try_into() {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                map.insert(name.to_owned(), Hlc::from_bytes(&bytes));
+            }
+        }
+        map
+    }
+
+    /// Return the highest HLC applied for `array`, or `None` if no ops applied.
+    pub fn last_applied_hlc(&self, array: &str) -> Option<Hlc> {
+        self.last_applied.lock().ok()?.get(array).copied()
+    }
+
+    /// Record that `hlc` has been successfully applied for `array`.
+    ///
+    /// Advances the in-memory record and persists under `Namespace::Meta`.
+    fn record_applied_hlc(&self, array: &str, hlc: Hlc) {
+        let should_persist = {
+            let mut map = match self.last_applied.lock() {
+                Ok(m) => m,
+                Err(_) => return,
+            };
+            let current = map.get(array).copied().unwrap_or(Hlc::ZERO);
+            if hlc > current {
+                map.insert(array.to_owned(), hlc);
+                true
+            } else {
+                false
+            }
+        };
+        if should_persist {
+            let key = format!("{LAST_APPLIED_PREFIX}{array}").into_bytes();
+            let _ = self
+                .storage
+                .put_sync(Namespace::Meta, &key, &hlc.to_bytes());
         }
     }
 }
@@ -92,7 +158,9 @@ impl<S: StorageEngineSync> ApplyEngine for &LiteApplyEngine<S> {
             })?;
         // Record in op-log so that subsequent `already_seen` returns true.
         // `append` is idempotent on duplicate (array, hlc) pairs.
-        self.op_log.append(op)
+        self.op_log.append(op)?;
+        self.record_applied_hlc(&op.header.array, op.header.hlc);
+        Ok(())
     }
 
     fn apply_delete(&mut self, op: &ArrayOp) -> nodedb_array::error::ArrayResult<()> {
@@ -105,7 +173,9 @@ impl<S: StorageEngineSync> ApplyEngine for &LiteApplyEngine<S> {
             .map_err(|e| ArrayError::SegmentCorruption {
                 detail: format!("apply_delete: {e}"),
             })?;
-        self.op_log.append(op)
+        self.op_log.append(op)?;
+        self.record_applied_hlc(&op.header.array, op.header.hlc);
+        Ok(())
     }
 
     fn apply_erase(&mut self, op: &ArrayOp) -> nodedb_array::error::ArrayResult<()> {
@@ -123,7 +193,9 @@ impl<S: StorageEngineSync> ApplyEngine for &LiteApplyEngine<S> {
             .map_err(|e| ArrayError::SegmentCorruption {
                 detail: format!("apply_erase: {e}"),
             })?;
-        self.op_log.append(op)
+        self.op_log.append(op)?;
+        self.record_applied_hlc(&op.header.array, op.header.hlc);
+        Ok(())
     }
 
     /// No-op: the Lite array engine reads from the durable memtable + segments

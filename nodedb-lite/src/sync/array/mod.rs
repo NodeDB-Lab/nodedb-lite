@@ -30,6 +30,7 @@
 //! `PendingQueue`) is handled by a separate layer; this module is transport-
 //! agnostic and exercised in tests by hand-constructed wire messages.
 
+pub mod ack_sender;
 pub mod catchup;
 pub mod inbound;
 pub mod op_log_redb;
@@ -38,6 +39,7 @@ pub mod pending;
 pub mod replica_state;
 pub mod schema_registry;
 
+pub use ack_sender::spawn as spawn_ack_sender;
 pub use catchup::CatchupTracker;
 pub use inbound::{ArrayInbound, InboundOutcome, LiteApplyEngine};
 pub use op_log_redb::RedbOpLog;

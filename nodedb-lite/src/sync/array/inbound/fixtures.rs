@@ -21,6 +21,7 @@ use nodedb_array::types::domain::{Domain, DomainBound};
 
 use crate::engine::array::engine::ArrayEngineState;
 use crate::storage::redb_storage::RedbStorage;
+use crate::sync::array::catchup::CatchupTracker;
 use crate::sync::array::op_log_redb::RedbOpLog;
 use crate::sync::array::pending::PendingQueue;
 use crate::sync::array::replica_state::ReplicaState;
@@ -93,12 +94,14 @@ pub(crate) fn make_inbound() -> InboundFixture {
         Arc::clone(&schemas),
         Arc::clone(&op_log),
     ));
+    let catchup = Arc::new(CatchupTracker::load(Arc::clone(&storage)).unwrap());
     let inbound = ArrayInbound::new(
         engine,
         Arc::clone(&schemas),
         Arc::clone(&replica),
         Arc::clone(&pending),
         op_log,
+        catchup,
     );
     (inbound, schemas, pending, storage)
 }
