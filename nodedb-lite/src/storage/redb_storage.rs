@@ -112,6 +112,29 @@ impl RedbStorage {
         }
     }
 
+    /// Total user-data bytes resident in the database (sum of key + value
+    /// lengths across all tables). Excludes B-tree metadata and free pages.
+    ///
+    /// Works for both file-backed and in-memory databases. Used by the
+    /// benchmark suite to compute compression ratios — both the array
+    /// engine and the document engine push their encoded payloads through
+    /// the same redb mutator, so this number is the apples-to-apples
+    /// "bytes the engine actually wrote" measurement.
+    pub fn db_size_bytes(&self) -> Result<u64, LiteError> {
+        let db = self.db.lock().map_err(|_| LiteError::LockPoisoned)?;
+        // `stats()` lives on `WriteTransaction` in redb 2.x. We never commit
+        // — the transaction is dropped (rolled back) immediately after the
+        // read.
+        let txn = db.begin_write().map_err(|e| LiteError::Storage {
+            detail: format!("size write txn failed: {e}"),
+        })?;
+        let stats = txn.stats().map_err(|e| LiteError::Storage {
+            detail: format!("stats failed: {e}"),
+        })?;
+        drop(txn);
+        Ok(stats.stored_bytes())
+    }
+
     /// Build the composite key: `[namespace_u8, ...key_bytes]`.
     fn make_key(ns: Namespace, key: &[u8]) -> Vec<u8> {
         let mut k = Vec::with_capacity(1 + key.len());
@@ -375,7 +398,9 @@ impl RedbStorage {
             }
         };
 
-        let mut results = Vec::with_capacity(limit);
+        // Cap pre-allocation at 1024 entries to avoid unbounded buffer growth
+        // when callers pass a very large `limit` for an open-ended scan.
+        let mut results = Vec::with_capacity(limit.min(1024));
         let range = table
             .range(start_key.as_slice()..)
             .map_err(|e| LiteError::Storage {
@@ -529,6 +554,10 @@ impl crate::storage::engine::StorageEngineSync for RedbStorage {
         limit: usize,
     ) -> Result<Vec<super::engine::KvPair>, LiteError> {
         Self::scan_range_inner(&self.db, ns, start, limit)
+    }
+
+    fn count_sync(&self, ns: Namespace) -> Result<u64, LiteError> {
+        Self::count_inner(&self.db, ns)
     }
 }
 

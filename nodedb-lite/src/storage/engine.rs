@@ -97,6 +97,9 @@ pub trait StorageEngineSync: StorageEngine {
         start: &[u8],
         limit: usize,
     ) -> Result<Vec<KvPair>, LiteError>;
+
+    /// Sync count: return the number of entries in a namespace.
+    fn count_sync(&self, ns: Namespace) -> Result<u64, LiteError>;
 }
 
 #[cfg(test)]

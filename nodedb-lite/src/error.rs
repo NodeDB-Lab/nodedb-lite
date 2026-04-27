@@ -29,6 +29,9 @@ pub enum LiteError {
 
     #[error("Arrow type conversion: expected {expected}, got {got}")]
     ArrowTypeConversion { expected: String, got: String },
+
+    #[error("backpressure: {detail}")]
+    Backpressure { detail: String },
 }
 
 impl From<redb::Error> for LiteError {
