@@ -30,6 +30,7 @@ nodedb-fts = { version = "0.0.6" }
 nodedb-strict = { version = "0.0.6" }
 nodedb-columnar = { version = "0.0.6" }
 nodedb-sql = { version = "0.0.6" }
+nodedb-array = { version = "0.0.6" }
 
 # Async
 tokio = { version = "1" }

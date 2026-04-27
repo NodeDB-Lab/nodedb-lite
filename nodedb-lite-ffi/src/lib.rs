@@ -9,11 +9,13 @@
 //! - Returned strings/buffers are Rust-allocated — caller must free via `nodedb_free_*`.
 //! - Error codes: 0 = success, -1 = null pointer, -2 = invalid UTF-8, -3 = operation failed.
 
+pub mod ffi_array;
 pub mod ffi_document;
 pub mod ffi_graph;
 pub mod ffi_vector;
 pub mod jni_bridge;
 
+pub use ffi_array::*;
 pub use ffi_document::*;
 pub use ffi_graph::*;
 pub use ffi_vector::*;
@@ -269,6 +271,19 @@ pub unsafe extern "C" fn nodedb_generate_id_typed(
 pub unsafe extern "C" fn nodedb_free_string(ptr: *mut c_char) {
     if !ptr.is_null() {
         drop(unsafe { CString::from_raw(ptr) });
+    }
+}
+
+/// Free a byte buffer returned by nodedb_* functions (e.g. `ndb_array_slice`).
+///
+/// `len` must be the exact length originally written to `*out_len`.
+///
+/// # Safety
+/// `ptr` must be a buffer previously returned by a nodedb function, or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nodedb_free_buf(ptr: *mut u8, len: usize) {
+    if !ptr.is_null() && len > 0 {
+        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)) });
     }
 }
 

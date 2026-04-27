@@ -16,6 +16,8 @@ crate-type = ["lib", "staticlib", "cdylib"]
 nodedb-lite = { workspace = true }
 nodedb-client = { workspace = true }
 nodedb-types = { workspace = true }
+nodedb-array = { workspace = true }
+zerompk = { workspace = true }
 serde_json = { workspace = true }
 sonic-rs = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

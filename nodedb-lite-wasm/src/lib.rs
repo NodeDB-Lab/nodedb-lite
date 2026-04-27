@@ -12,6 +12,7 @@
 //! const db = await NodeDbLiteWasm.openPersistent("mydb.redb", 1n);
 //! ```
 
+pub mod array;
 pub mod opfs_backend;
 
 use wasm_bindgen::prelude::*;

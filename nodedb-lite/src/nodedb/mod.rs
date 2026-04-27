@@ -1,3 +1,4 @@
+mod array;
 mod batch;
 pub mod collection;
 pub(crate) mod convert;

@@ -25,6 +25,7 @@ nodedb-fts = { workspace = true }
 roaring = { workspace = true }
 nodedb-strict = { workspace = true }
 nodedb-columnar = { workspace = true }
+nodedb-array = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -33,7 +34,6 @@ zerompk = { workspace = true }
 serde_json = { workspace = true }
 sonic-rs = { workspace = true }
 loro = { workspace = true }
-wasmtime = { workspace = true }
 redb = { workspace = true }
 nodedb-sql = { workspace = true }
 arrow = { workspace = true }
@@ -45,11 +45,16 @@ getrandom = { workspace = true }
 
 # Async runtime (native only — WASM uses wasm-bindgen-futures)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `rt` is sufficient — `spawn_blocking` works on `current_thread` and
+# `multi_thread` flavors alike. Library code no longer requires the
+# `rt-multi-thread` feature now that engines are interior-mutable
+# (Sections A-G of LITE_RUNTIME_REFACTOR_CHECKLIST). Tests that
+# legitimately need a multi-thread runtime opt in via dev-dependencies.
 tokio = { workspace = true, features = ["rt", "sync", "time", "net"] }
 tokio-tungstenite = { workspace = true }
 futures = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 tempfile = { workspace = true }
 rust_decimal = { workspace = true }

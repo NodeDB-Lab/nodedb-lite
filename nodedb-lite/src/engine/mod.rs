@@ -1,3 +1,4 @@
+pub mod array;
 pub mod columnar;
 pub mod crdt;
 pub mod fts;

@@ -108,6 +108,128 @@ int32_t nodedb_generate_id_typed(const char *id_type, char **out);
 void nodedb_free_string(char *ptr);
 
 /**
+ * Free a byte buffer returned by nodedb_* functions (e.g. `ndb_array_slice`).
+ *
+ * `len` must be the exact length originally written to `*out_len`.
+ *
+ * # Safety
+ * `ptr` must be a buffer previously returned by a nodedb function, or NULL.
+ */
+void nodedb_free_buf(uint8_t *ptr, uintptr_t len);
+
+/**
+ * Create a new ND sparse array.
+ *
+ * `schema_msgpack` — zerompk-encoded `ArraySchema`.
+ * `dims_msgpack`   — reserved for future use; pass NULL / 0 today.
+ *
+ * Returns `NODEDB_OK` on success, `NODEDB_ERR_*` on failure.
+ *
+ * # Safety
+ * All pointer parameters must be valid. `name` must be a null-terminated UTF-8 string.
+ */
+int32_t ndb_array_create(struct NodeDbNodeDbHandle *handle,
+                         const char *name,
+                         const uint8_t *schema_msgpack,
+                         uintptr_t schema_len);
+
+/**
+ * Write a cell into array `name` at `coord`.
+ *
+ * `coord_msgpack`   — zerompk-encoded `Vec<CoordValue>`.
+ * `payload_msgpack` — zerompk-encoded `Vec<CellValue>` (attribute values).
+ * `valid_from_ms`   — valid-time lower bound (milliseconds since epoch).
+ * `valid_until_ms`  — valid-time upper bound (`i64::MAX` = open-ended).
+ *
+ * # Safety
+ * All pointer parameters must be valid. `name` must be a null-terminated UTF-8 string.
+ */
+int32_t ndb_array_put_cell(struct NodeDbNodeDbHandle *handle,
+                           const char *name,
+                           const uint8_t *coord_msgpack,
+                           uintptr_t coord_len,
+                           const uint8_t *payload_msgpack,
+                           uintptr_t payload_len,
+                           int64_t valid_from_ms,
+                           int64_t valid_until_ms);
+
+/**
+ * Slice query: return all live cells whose coordinates fall within `ranges`.
+ *
+ * `ranges_msgpack` — zerompk-encoded `Vec<Option<DimRange>>`.
+ * `as_of_system_ms` — system-time AS-OF (ignored when `has_as_of == 0`).
+ * `has_as_of`       — set to 1 to use `as_of_system_ms`, 0 for current live snapshot.
+ *
+ * On success `*out_buf` points to a zerompk-encoded `Vec<CellPayload>`.
+ * Caller must free with `nodedb_free_buf`.
+ *
+ * # Safety
+ * All pointer parameters must be valid. `name` must be a null-terminated UTF-8 string.
+ * `out_buf` and `out_len` must not be null.
+ */
+int32_t ndb_array_slice(struct NodeDbNodeDbHandle *handle,
+                        const char *name,
+                        const uint8_t *ranges_msgpack,
+                        uintptr_t ranges_len,
+                        int64_t as_of_system_ms,
+                        uint8_t has_as_of,
+                        uint8_t **out_buf,
+                        uintptr_t *out_len);
+
+/**
+ * Read the most recent live payload for `coord` at or before `as_of_system_ms`.
+ *
+ * `coord_msgpack`   — zerompk-encoded `Vec<CoordValue>`.
+ * `has_as_of`       — set to 1 to use `as_of_system_ms`, 0 for current live snapshot.
+ *
+ * On success and if a cell exists, `*out_buf` points to a zerompk-encoded
+ * `CellPayload` (length > 0). If the cell does not exist, `*out_len` is 0
+ * and `*out_buf` is NULL.
+ * Caller must free with `nodedb_free_buf` when `*out_len > 0`.
+ *
+ * # Safety
+ * All pointer parameters must be valid. `name` must be a null-terminated UTF-8 string.
+ * `out_buf` and `out_len` must not be null.
+ */
+int32_t ndb_array_read_coord(struct NodeDbNodeDbHandle *handle,
+                             const char *name,
+                             const uint8_t *coord_msgpack,
+                             uintptr_t coord_len,
+                             int64_t as_of_system_ms,
+                             uint8_t has_as_of,
+                             uint8_t **out_buf,
+                             uintptr_t *out_len);
+
+/**
+ * Soft-delete a cell by writing a tombstone at the current system time.
+ *
+ * `coord_msgpack` — zerompk-encoded `Vec<CoordValue>`.
+ *
+ * # Safety
+ * All pointer parameters must be valid. `name` must be a null-terminated UTF-8 string.
+ */
+int32_t ndb_array_delete_cell(struct NodeDbNodeDbHandle *handle,
+                              const char *name,
+                              const uint8_t *coord_msgpack,
+                              uintptr_t coord_len);
+
+/**
+ * GDPR erasure: permanently remove cell content at `coord`.
+ *
+ * `coord_msgpack` — zerompk-encoded `Vec<CoordValue>`.
+ *
+ * After this call `ndb_array_read_coord` returns empty for the coordinate
+ * at any system time >= the erasure system timestamp.
+ *
+ * # Safety
+ * All pointer parameters must be valid. `name` must be a null-terminated UTF-8 string.
+ */
+int32_t ndb_array_gdpr_erase_cell(struct NodeDbNodeDbHandle *handle,
+                                  const char *name,
+                                  const uint8_t *coord_msgpack,
+                                  uintptr_t coord_len);
+
+/**
  * Get a document by ID. Result written as JSON to `out_json`.
  *
  * Returns `NODEDB_ERR_NOT_FOUND` if the document doesn't exist.

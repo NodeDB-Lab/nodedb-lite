@@ -35,6 +35,15 @@ web-sys = { version = "0.3", features = [
     "StorageManager",
 ] }
 redb = { workspace = true }
+nodedb-array = { workspace = true }
+zerompk = { workspace = true }
+
+# `getrandom` 0.3 on wasm32-unknown-unknown requires explicit opt-in to
+# the `wasm_js` JS-backed RNG. Pulling it in as a direct dep here with
+# the right feature unifies the transitive copy used by other crates to
+# a working build on this target.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
