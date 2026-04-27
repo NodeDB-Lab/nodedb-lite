@@ -7,9 +7,9 @@ use jni::objects::JFloatArray;
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jint, jlong, jstring};
 
-use super::{NODEDB_ERR_FAILED, NODEDB_OK, NodeDbHandle};
+use super::super::{NODEDB_ERR_FAILED, NODEDB_OK, NodeDbHandle};
 
-fn get_handle(ptr: jlong) -> Option<&'static NodeDbHandle> {
+pub(super) fn get_handle(ptr: jlong) -> Option<&'static NodeDbHandle> {
     if ptr == 0 {
         return None;
     }
@@ -31,7 +31,7 @@ pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_00024Companion_nativeOpen
         Ok(c) => c,
         Err(_) => return 0,
     };
-    let handle = unsafe { super::nodedb_open(path_c.as_ptr(), peer_id as u64) };
+    let handle = unsafe { super::super::nodedb_open(path_c.as_ptr(), peer_id as u64) };
     handle as jlong
 }
 
@@ -42,7 +42,7 @@ pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_nativeClose(
     handle: jlong,
 ) {
     if handle != 0 {
-        unsafe { super::nodedb_close(handle as *mut NodeDbHandle) };
+        unsafe { super::super::nodedb_close(handle as *mut NodeDbHandle) };
     }
 }
 
