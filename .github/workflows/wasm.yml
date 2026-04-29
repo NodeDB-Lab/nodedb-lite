@@ -1,0 +1,56 @@
+name: WASM
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+concurrency:
+  group: wasm-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  wasm-build:
+    name: WASM Build and Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Restore cargo registry cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: wasm
+          workspaces: nodedb-lite -> nodedb-lite/target
+
+      - name: Restore wasm-pack cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/wasm-pack
+          key: wasm-pack-${{ runner.os }}
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Check workspace for wasm32 target
+        working-directory: nodedb-lite
+        run: cargo check --workspace --target wasm32-unknown-unknown
+
+      - name: Build WASM release
+        working-directory: nodedb-lite
+        run: wasm-pack build --target web --release nodedb-lite-wasm
+
+      - name: Run WASM tests
+        working-directory: nodedb-lite
+        run: wasm-pack test --node nodedb-lite-wasm
