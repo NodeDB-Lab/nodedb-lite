@@ -1,4 +1,5 @@
 //! C FFI bindings for NodeDB-Lite.
+#![cfg(not(target_arch = "wasm32"))]
 //!
 //! Exposes the `NodeDb` trait as C-callable functions for Swift (iOS)
 //! and Kotlin/JNI (Android) interop.
