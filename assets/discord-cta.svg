@@ -1,0 +1,36 @@
+<svg width="340" height="76" viewBox="0 0 340 76" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Join the NodeDB Discord</title>
+  <desc id="desc">Discord call to action button for the NodeDB community.</desc>
+
+  <defs>
+    <linearGradient id="bg" x1="20" y1="10" x2="320" y2="76" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5865F2"/>
+      <stop offset="1" stop-color="#404EED"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="48" y1="14" x2="111" y2="68" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A8B1FF" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#A8B1FF" stop-opacity="0.15"/>
+    </linearGradient>
+    <filter id="shadow" x="0" y="0" width="340" height="76" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#2F3ABD" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#shadow)">
+    <rect x="10" y="8" width="320" height="60" rx="18" fill="url(#bg)"/>
+    <rect x="10.75" y="8.75" width="318.5" height="58.5" rx="17.25" stroke="white" stroke-opacity="0.16" stroke-width="1.5"/>
+    <circle cx="44" cy="38" r="22" fill="url(#glow)"/>
+    <circle cx="44" cy="38" r="18" fill="white" fill-opacity="0.14"/>
+
+    <path d="M34.8 29.2C37.9 27 41 25.9 44 25.9C47.1 25.9 50.1 27 53.2 29.2C55.4 33 56.5 36.6 56.5 40.2C56.5 43.6 55.3 46.8 52.9 49.7C50.1 51.7 47.2 52.8 44 52.8C40.9 52.8 38 51.7 35.1 49.7C32.7 46.8 31.5 43.6 31.5 40.2C31.5 36.6 32.6 33 34.8 29.2Z" fill="white"/>
+    <circle cx="39.6" cy="39.2" r="2.5" fill="#5865F2"/>
+    <circle cx="48.4" cy="39.2" r="2.5" fill="#5865F2"/>
+    <path d="M39 45.6C40.8 46.8 42.5 47.4 44 47.4C45.6 47.4 47.3 46.8 49 45.6" stroke="#5865F2" stroke-width="2.5" stroke-linecap="round"/>
+
+    <text x="76" y="30" fill="white" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="10" font-weight="700" letter-spacing="0.15em">COMMUNITY</text>
+    <text x="76" y="48" fill="white" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="18" font-weight="800">Join NodeDB Discord</text>
+
+    <path d="M297 38H309" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M303 33L309 38L303 43" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

@@ -1,6 +1,66 @@
-# NodeDB-Lite
+<div align="center">
 
-**All seven [NodeDB](https://github.com/NodeDB-Lab/nodedb) engines as an embedded library.** Vector search, graph traversal, documents, full-text search, timeseries, spatial, and key-value -- all in-process with sub-millisecond reads. No server required. CRDT-based offline-first sync to Origin when connectivity returns.
+<img src="assets/wordmark.svg" alt="NodeDB" width="420">
+
+# NodeDB Lite
+
+<h3>The embedded multi-model database for local-first apps, agents, and edge runtimes.</h3>
+
+<p>
+  <a href="https://github.com/NodeDB-Lab/nodedb">NodeDB</a> engines in-process. One API.
+  Zero server requirement. Run vector search, graph traversal, document queries, full-text search,
+  timeseries, and other multi-model workloads on device, then sync to Origin when connectivity returns.
+</p>
+
+<p>
+  <a href="#status"><strong>Status</strong></a>
+  ·
+  <a href="#platforms"><strong>Platforms</strong></a>
+  ·
+  <a href="#crdt-sync"><strong>CRDT Sync</strong></a>
+  ·
+  <a href="#performance"><strong>Performance</strong></a>
+  ·
+  <a href="https://github.com/NodeDB-Lab/nodedb"><strong>NodeDB Origin</strong></a>
+</p>
+
+<p align="center">
+  <a href="https://discord.gg/s54gDMVc7B">
+    <img src="assets/discord-cta.svg" alt="Join the NodeDB Discord" width="340">
+  </a>
+</p>
+
+<p>
+  <a href="https://github.com/NodeDB-Lab/nodedb-lite/actions/workflows/ci.yml">
+    <img src="https://img.shields.io/github/actions/workflow/status/NodeDB-Lab/nodedb-lite/ci.yml?branch=main&label=ci" alt="CI status">
+  </a>
+  <img src="https://img.shields.io/badge/status-in%20development-orange" alt="Status: in development">
+  <a href="https://github.com/NodeDB-Lab/nodedb-lite/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License">
+  </a>
+  <a href="https://github.com/NodeDB-Lab/nodedb-lite/stargazers">
+    <img src="https://img.shields.io/github/stars/NodeDB-Lab/nodedb-lite?style=social" alt="GitHub stars">
+  </a>
+</p>
+
+</div>
+
+NodeDB Lite replaces the usual SQLite + vector sidecar + ad hoc cache + custom sync layer stack with one embedded engine. Local reads stay in-process, writes remain available offline, and the same application code can later sync to NodeDB Origin without a rewrite.
+
+## Status
+
+NodeDB Lite is currently in development and is not released yet.
+
+The immediate focus is NodeDB Origin through `v0.1.0`. Once Origin reaches `v0.1.0`, development focus shifts back to NodeDB Lite for packaging, platform hardening, and release work.
+
+Until then, this repository should be treated as active development, not a published/stable product.
+
+## Why NodeDB Lite
+
+- **One embedded engine, not a stitched-together client stack.** Vectors, graph, documents, full-text, timeseries, key-value, and other NodeDB data models run in one runtime with shared storage and one query surface.
+- **Built for offline-first.** Every write is captured as a CRDT delta locally, then merged to Origin when the network comes back.
+- **Same API as Origin.** The `NodeDb` trait is identical across Lite and server deployments, so moving from on-device to remote is a connection decision, not an architecture rewrite.
+- **Edge-ready.** Linux, macOS, Windows, Android, iOS, and browser/WASM support from the same product line.
 
 ## When to Use
 
@@ -21,17 +81,21 @@
 | iOS      | `nodedb-lite-ffi`  | redb + C FFI (cbindgen) | Native    |
 | Browser  | `nodedb-lite-wasm` | redb (in-memory + OPFS) | ~4.5 MB   |
 
-## Install
+## Planned Packages
+
+NodeDB Lite is not published yet. The package names below reflect the intended release targets:
 
 ```bash
-# Rust
+# Rust (planned)
 cargo add nodedb-lite
 
-# JavaScript / TypeScript (WASM)
+# JavaScript / TypeScript (WASM, planned)
 npm install @nodedb/lite
 ```
 
 ## Quick Start
+
+API shape preview while the project is still in development:
 
 ```rust
 use nodedb_lite::NodeDbLite;
@@ -82,7 +146,7 @@ Converged:  Device and cloud share identical Loro state hash
 
 ## Key Features
 
-- **All engines locally** -- Vector, graph, document, FTS, timeseries, spatial, KV -- all in-process, no network
+- **Multi-model locally** -- Vector, graph, document, full-text, timeseries, key-value, and more, all in-process with no network
 - **Sub-millisecond reads** -- Hot data lives in memory indexes (HNSW, CSR, Loro)
 - **Full SQL** -- Same SQL as Origin. Window functions, CTEs, subqueries, JOINs.
 - **Encryption at rest** -- AES-256-GCM + Argon2id key derivation
