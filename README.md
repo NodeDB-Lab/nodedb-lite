@@ -66,7 +66,7 @@ Until then, this repository should be treated as active development, not a publi
 
 - Mobile apps that need to work offline
 - AI agents that need local memory (vectors + graph + documents)
-- Browser-based apps (WASM, ~4.5 MB)
+- Browser-based apps (WASM, target: < 10 MB)
 - Desktop applications with local-first data
 - IoT gateways with intermittent connectivity
 
@@ -79,7 +79,7 @@ Until then, this repository should be treated as active development, not a publi
 | Windows  | `nodedb-lite`      | redb (file-backed)      | Native    |
 | Android  | `nodedb-lite-ffi`  | redb + C FFI + Kotlin/JNI | Native |
 | iOS      | `nodedb-lite-ffi`  | redb + C FFI (cbindgen) | Native    |
-| Browser  | `nodedb-lite-wasm` | redb (in-memory + OPFS) | ~4.5 MB   |
+| Browser  | `nodedb-lite-wasm` | redb (in-memory + OPFS) | Target: < 10 MB |
 
 ## Planned Packages
 
@@ -161,7 +161,7 @@ Converged:  Device and cloud share identical Loro state hash
 | Document get                          | < 0.1ms       |
 | Cold start (10K vectors + 100K edges) | < 500ms       |
 | Sync round-trip (single delta)        | < 200ms       |
-| WASM bundle                           | ~4.5 MB       |
+| WASM bundle                           | < 10 MB        |
 | Mobile memory                         | < 100 MB      |
 
 ## Workspace
