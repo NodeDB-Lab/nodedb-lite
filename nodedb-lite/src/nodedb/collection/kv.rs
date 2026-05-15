@@ -12,6 +12,15 @@
 //! Writes are buffered in memory and flushed as a single redb transaction
 //! on `kv_flush()` or when the buffer exceeds `KV_FLUSH_THRESHOLD`. An
 //! in-memory overlay lets reads see uncommitted writes without hitting redb.
+//!
+//! ## Value encoding
+//!
+//! Every value stored in redb is prefixed by an 8-byte little-endian u64
+//! representing the expiry deadline in milliseconds since the Unix epoch.
+//! A value of `0` means no expiry. This prefix is transparent to callers —
+//! all public methods encode/decode it automatically.
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use nodedb_types::Namespace;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
@@ -25,37 +34,103 @@ const KV_CRDT_PREFIX: &str = "_kv_";
 /// Flush the write buffer when it reaches this many operations.
 const KV_FLUSH_THRESHOLD: usize = 1024;
 
+/// Size of the deadline prefix in bytes (u64 LE).
+const DEADLINE_PREFIX_LEN: usize = 8;
+
 /// Build the redb composite key: `{collection}\0{key}`.
-fn redb_key(collection: &str, key: &str) -> Vec<u8> {
+fn redb_key(collection: &str, key: &[u8]) -> Vec<u8> {
     let mut k = Vec::with_capacity(collection.len() + 1 + key.len());
     k.extend_from_slice(collection.as_bytes());
     k.push(0);
-    k.extend_from_slice(key.as_bytes());
+    k.extend_from_slice(key);
     k
 }
 
-/// Extract `(collection, key)` from a redb composite key.
-fn split_redb_key(composite: &[u8]) -> Option<(&str, &str)> {
+/// Extract `(collection, key_bytes)` from a redb composite key.
+fn split_redb_key(composite: &[u8]) -> Option<(&str, &[u8])> {
     let sep = composite.iter().position(|&b| b == 0)?;
     let coll = std::str::from_utf8(&composite[..sep]).ok()?;
-    let key = std::str::from_utf8(&composite[sep + 1..]).ok()?;
+    let key = &composite[sep + 1..];
     Some((coll, key))
 }
 
+/// Encode a value with a deadline prefix.
+///
+/// `deadline_ms = 0` encodes as "no expiry".
+fn encode_value(deadline_ms: u64, value: &[u8]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(DEADLINE_PREFIX_LEN + value.len());
+    encoded.extend_from_slice(&deadline_ms.to_le_bytes());
+    encoded.extend_from_slice(value);
+    encoded
+}
+
+/// Decode a stored value into `(deadline_ms, user_bytes)`.
+///
+/// Returns `None` if the stored bytes are too short (corrupt entry).
+fn decode_value(stored: &[u8]) -> Option<(u64, &[u8])> {
+    if stored.len() < DEADLINE_PREFIX_LEN {
+        return None;
+    }
+    let deadline = u64::from_le_bytes(stored[..DEADLINE_PREFIX_LEN].try_into().ok()?);
+    Some((deadline, &stored[DEADLINE_PREFIX_LEN..]))
+}
+
+/// Return the current time in milliseconds since the Unix epoch.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Return `true` if the deadline has passed (key is expired).
+///
+/// A deadline of `0` means no expiry and is never considered expired.
+fn is_expired(deadline_ms: u64) -> bool {
+    deadline_ms != 0 && now_ms() >= deadline_ms
+}
+
 impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
-    /// KV PUT: store a key-value pair.
+    /// KV PUT: store a key-value pair with no expiry.
     ///
     /// Buffered in memory — call `kv_flush()` to commit to redb, or let
     /// the auto-flush threshold handle it.
     pub fn kv_put(&self, collection: &str, key: &str, value: &[u8]) -> NodeDbResult<()> {
-        let rkey = redb_key(collection, key);
+        self.kv_put_with_deadline(collection, key, value, 0)
+    }
+
+    /// KV PUT WITH TTL: store a key-value pair that expires after `ttl_ms` ms.
+    ///
+    /// After `ttl_ms` milliseconds, `kv_get` will return `None` for this key
+    /// and lazy-delete it. The deadline survives a database reopen.
+    pub fn kv_put_with_ttl(
+        &self,
+        collection: &str,
+        key: &str,
+        value: &[u8],
+        ttl_ms: u64,
+    ) -> NodeDbResult<()> {
+        let deadline = now_ms().saturating_add(ttl_ms);
+        self.kv_put_with_deadline(collection, key, value, deadline)
+    }
+
+    /// Internal: write a key with an explicit deadline (0 = no expiry).
+    fn kv_put_with_deadline(
+        &self,
+        collection: &str,
+        key: &str,
+        value: &[u8],
+        deadline_ms: u64,
+    ) -> NodeDbResult<()> {
+        let rkey = redb_key(collection, key.as_bytes());
+        let encoded = encode_value(deadline_ms, value);
 
         let mut buf = self.kv_write_buf.lock_or_recover();
-        buf.overlay.insert(rkey.clone(), Some(value.to_vec()));
+        buf.overlay.insert(rkey.clone(), Some(encoded.clone()));
         buf.ops.push(WriteOp::Put {
             ns: Namespace::Kv,
             key: rkey,
-            value: value.to_vec(),
+            value: encoded,
         });
         let should_flush = buf.ops.len() >= KV_FLUSH_THRESHOLD;
         drop(buf);
@@ -79,27 +154,76 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
 
     /// KV GET: retrieve a value by key.
     ///
+    /// Returns `None` for missing or expired keys. Expired keys are lazily
+    /// deleted from storage on read.
+    ///
     /// Checks the in-memory write buffer first (for uncommitted writes),
     /// then falls through to redb.
     pub fn kv_get(&self, collection: &str, key: &str) -> NodeDbResult<Option<Vec<u8>>> {
-        let rkey = redb_key(collection, key);
+        let rkey = redb_key(collection, key.as_bytes());
 
         // Check write buffer overlay first.
         let buf = self.kv_write_buf.lock_or_recover();
         if let Some(entry) = buf.overlay.get(&rkey) {
-            return Ok(entry.clone());
+            let result = match entry {
+                Some(stored) => decode_value(stored)
+                    .and_then(|(deadline, user_bytes)| {
+                        if is_expired(deadline) {
+                            None
+                        } else {
+                            Some(user_bytes.to_vec())
+                        }
+                    })
+                    .map(Some)
+                    .unwrap_or(None),
+                None => None,
+            };
+            return Ok(result);
         }
         drop(buf);
 
         // Fall through to redb.
-        self.storage
+        let stored = self
+            .storage
             .get_sync(Namespace::Kv, &rkey)
-            .map_err(NodeDbError::storage)
+            .map_err(NodeDbError::storage)?;
+
+        match stored {
+            None => Ok(None),
+            Some(raw) => match decode_value(&raw) {
+                None => Ok(None),
+                Some((deadline, user_bytes)) => {
+                    if is_expired(deadline) {
+                        // Lazy expiration: schedule a delete.
+                        self.kv_lazy_delete(rkey)?;
+                        Ok(None)
+                    } else {
+                        Ok(Some(user_bytes.to_vec()))
+                    }
+                }
+            },
+        }
+    }
+
+    /// Internal: queue a lazy delete for an expired key.
+    fn kv_lazy_delete(&self, rkey: Vec<u8>) -> NodeDbResult<()> {
+        let mut buf = self.kv_write_buf.lock_or_recover();
+        buf.overlay.insert(rkey.clone(), None);
+        buf.ops.push(WriteOp::Delete {
+            ns: Namespace::Kv,
+            key: rkey,
+        });
+        let should_flush = buf.ops.len() >= KV_FLUSH_THRESHOLD;
+        drop(buf);
+        if should_flush {
+            self.kv_flush_inner()?;
+        }
+        Ok(())
     }
 
     /// KV DELETE: remove a key.
     pub fn kv_delete(&self, collection: &str, key: &str) -> NodeDbResult<bool> {
-        let rkey = redb_key(collection, key);
+        let rkey = redb_key(collection, key.as_bytes());
 
         let mut buf = self.kv_write_buf.lock_or_recover();
         buf.overlay.insert(rkey.clone(), None);
@@ -124,6 +248,159 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         Ok(true)
     }
 
+    /// KV RANGE SCAN: ordered key scan with optional bounds and limit.
+    ///
+    /// Returns `(key, value)` pairs where `start <= key < end`, ordered by
+    /// key in lexicographic byte order. Expired keys are skipped and lazily
+    /// deleted.
+    ///
+    /// - `start = None` means scan from the beginning of the collection.
+    /// - `end = None` means scan to the end of the collection.
+    /// - `limit = None` means no cap on results.
+    ///
+    /// Flushes the write buffer before scanning so redb reflects all pending
+    /// writes.
+    pub fn kv_range_scan(
+        &self,
+        collection: &str,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        limit: Option<usize>,
+    ) -> NodeDbResult<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.kv_flush_inner()?;
+
+        let col_prefix_end = {
+            let mut p = collection.as_bytes().to_vec();
+            p.push(0);
+            p
+        };
+
+        // Build absolute start key (collection\0[user_start]).
+        let start_key: Option<Vec<u8>> = Some(match start {
+            Some(s) => {
+                let mut k = col_prefix_end.clone();
+                k.extend_from_slice(s);
+                k
+            }
+            None => col_prefix_end.clone(),
+        });
+
+        // Build absolute end key (collection\0[user_end]).
+        let end_key: Option<Vec<u8>> = end.map(|e| {
+            let mut k = col_prefix_end.clone();
+            k.extend_from_slice(e);
+            k
+        });
+
+        let entries = self
+            .storage
+            .scan_range_bounded_sync(
+                Namespace::Kv,
+                start_key.as_deref(),
+                end_key.as_deref(),
+                limit.map(|l| l + 32), // over-fetch slightly to account for skipped expired keys
+            )
+            .map_err(NodeDbError::storage)?;
+
+        let mut results: Vec<(Vec<u8>, Vec<u8>)> =
+            Vec::with_capacity(limit.unwrap_or(entries.len()).min(entries.len()));
+        let mut expired_keys: Vec<Vec<u8>> = Vec::new();
+
+        for (composite_key, raw_value) in entries {
+            if let Some(limit) = limit
+                && results.len() >= limit
+            {
+                break;
+            }
+            let Some((coll, user_key_bytes)) = split_redb_key(&composite_key) else {
+                continue;
+            };
+            if coll != collection {
+                break;
+            }
+            let Some((deadline, user_bytes)) = decode_value(&raw_value) else {
+                continue;
+            };
+            if is_expired(deadline) {
+                expired_keys.push(redb_key(collection, user_key_bytes));
+                continue;
+            }
+            results.push((user_key_bytes.to_vec(), user_bytes.to_vec()));
+        }
+
+        // Lazy-delete expired keys discovered during scan.
+        if !expired_keys.is_empty() {
+            let mut buf = self.kv_write_buf.lock_or_recover();
+            for rkey in expired_keys {
+                buf.overlay.insert(rkey.clone(), None);
+                buf.ops.push(WriteOp::Delete {
+                    ns: Namespace::Kv,
+                    key: rkey,
+                });
+            }
+            let should_flush = buf.ops.len() >= KV_FLUSH_THRESHOLD;
+            drop(buf);
+            if should_flush {
+                self.kv_flush_inner()?;
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// KV COMPACT EXPIRED: eagerly remove all expired keys in a collection.
+    ///
+    /// Flushes the write buffer, then scans all keys in the collection and
+    /// deletes any whose TTL deadline has passed. Returns the count of keys
+    /// removed.
+    pub fn kv_compact_expired(&self, collection: &str) -> NodeDbResult<usize> {
+        self.kv_flush_inner()?;
+
+        let col_prefix = {
+            let mut p = collection.as_bytes().to_vec();
+            p.push(0);
+            p
+        };
+
+        let entries = self
+            .storage
+            .scan_range_bounded_sync(Namespace::Kv, Some(&col_prefix), None, None)
+            .map_err(NodeDbError::storage)?;
+
+        let now = now_ms();
+        let mut delete_ops: Vec<WriteOp> = Vec::new();
+
+        for (composite_key, raw_value) in entries {
+            let Some((coll, _user_key_bytes)) = split_redb_key(&composite_key) else {
+                continue;
+            };
+            if coll != collection {
+                break;
+            }
+            if let Some((deadline, _)) = decode_value(&raw_value)
+                && deadline != 0
+                && now >= deadline
+            {
+                // composite_key is the redb user-key (namespace byte
+                // already stripped by scan_range_bounded_sync). WriteOp
+                // re-prepends the namespace byte via make_key internally.
+                delete_ops.push(WriteOp::Delete {
+                    ns: Namespace::Kv,
+                    key: composite_key,
+                });
+            }
+        }
+
+        let count = delete_ops.len();
+        if count > 0 {
+            self.storage
+                .batch_write_sync(&delete_ops)
+                .map_err(NodeDbError::storage)?;
+        }
+
+        Ok(count)
+    }
+
     /// KV SCAN: iterate keys in sorted order starting from `cursor`.
     ///
     /// Returns up to `count` key-value pairs where key >= cursor (inclusive).
@@ -140,19 +417,28 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         // Flush pending writes so redb is up to date.
         self.kv_flush_inner()?;
 
-        let start = redb_key(collection, cursor);
+        let start = redb_key(collection, cursor.as_bytes());
         let entries = self
             .storage
             .scan_range_sync(Namespace::Kv, &start, count)
             .map_err(NodeDbError::storage)?;
 
         let mut results = Vec::with_capacity(entries.len());
-        for (composite_key, value) in entries {
-            if let Some((coll, key)) = split_redb_key(&composite_key) {
-                if coll != collection {
-                    break;
-                }
-                results.push((key.to_string(), value));
+        for (composite_key, raw_value) in entries {
+            let Some((coll, key_bytes)) = split_redb_key(&composite_key) else {
+                continue;
+            };
+            if coll != collection {
+                break;
+            }
+            let Some((deadline, user_bytes)) = decode_value(&raw_value) else {
+                continue;
+            };
+            if is_expired(deadline) {
+                continue;
+            }
+            if let Ok(key_str) = std::str::from_utf8(key_bytes) {
+                results.push((key_str.to_string(), user_bytes.to_vec()));
             }
         }
 
@@ -197,19 +483,30 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         // Flush pending writes first.
         self.kv_flush_inner()?;
 
-        let prefix = redb_key(collection, "");
+        let prefix = redb_key(collection, b"");
         let entries = self
             .storage
             .scan_range_sync(Namespace::Kv, &prefix, usize::MAX)
             .map_err(NodeDbError::storage)?;
 
         let mut keys = Vec::with_capacity(entries.len());
-        for (composite_key, _) in entries {
-            if let Some((coll, key)) = split_redb_key(&composite_key) {
-                if coll != collection {
-                    break;
+        for (composite_key, raw_value) in entries {
+            let Some((coll, key_bytes)) = split_redb_key(&composite_key) else {
+                continue;
+            };
+            if coll != collection {
+                break;
+            }
+            // Skip expired keys.
+            if let Some((deadline, _)) = decode_value(&raw_value) {
+                if is_expired(deadline) {
+                    continue;
                 }
-                keys.push(key.to_string());
+            } else {
+                continue;
+            }
+            if let Ok(key_str) = std::str::from_utf8(key_bytes) {
+                keys.push(key_str.to_string());
             }
         }
         Ok(keys)
