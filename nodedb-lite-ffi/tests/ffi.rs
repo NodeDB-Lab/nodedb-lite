@@ -122,6 +122,28 @@ fn document_crud_via_ffi() {
 }
 
 #[test]
+fn sql_execute_returns_json() {
+    let path = CString::new(":memory:").unwrap();
+    unsafe {
+        let handle = nodedb_open(path.as_ptr(), 1);
+        assert!(!handle.is_null());
+
+        // A constant-expression query is always supported.
+        let sql = CString::new("SELECT 1 + 1 AS result").unwrap();
+        let mut out: *mut c_char = std::ptr::null_mut();
+        let rc = nodedb_lite_ffi::nodedb_execute_sql(handle, sql.as_ptr(), &mut out);
+        assert_eq!(rc, NODEDB_OK);
+        assert!(!out.is_null());
+
+        let json = CStr::from_ptr(out).to_str().unwrap();
+        assert!(json.contains("columns") || json.contains("rows"));
+        nodedb_free_string(out);
+
+        nodedb_close(handle);
+    }
+}
+
+#[test]
 fn free_null_string_is_noop() {
     unsafe {
         nodedb_free_string(std::ptr::null_mut());
