@@ -79,6 +79,272 @@ impl<S: StorageEngine + StorageEngineSync> crate::sync::SyncDelegate for NodeDbL
         }
     }
 
+    fn handle_array_delta(
+        &self,
+        msg: &nodedb_types::sync::wire::ArrayDeltaMsg,
+    ) -> Option<nodedb_types::sync::wire::ArrayAckMsg> {
+        use crate::sync::array::inbound::outcome::InboundOutcome;
+        use nodedb_array::sync::op_codec;
+
+        // Decode op to extract HLC for the ack before calling the inbound handler.
+        let op = match op_codec::decode_op(&msg.op_payload) {
+            Ok(op) => op,
+            Err(e) => {
+                tracing::warn!(
+                    array = %msg.array,
+                    error = %e,
+                    "SyncDelegate::handle_array_delta: decode failed"
+                );
+                return None;
+            }
+        };
+        let op_hlc = op.header.hlc;
+        let replica_id = self.array_inbound.replica_id();
+
+        match self.array_inbound.handle_delta(msg) {
+            Ok(InboundOutcome::Applied) => Some(nodedb_types::sync::wire::ArrayAckMsg {
+                array: msg.array.clone(),
+                replica_id,
+                ack_hlc_bytes: op_hlc.to_bytes(),
+            }),
+            Ok(_) => None,
+            Err(e) => {
+                tracing::warn!(
+                    array = %msg.array,
+                    error = %e,
+                    "SyncDelegate::handle_array_delta: apply failed"
+                );
+                None
+            }
+        }
+    }
+
+    fn handle_array_delta_batch(
+        &self,
+        msg: &nodedb_types::sync::wire::ArrayDeltaBatchMsg,
+    ) -> Option<nodedb_types::sync::wire::ArrayAckMsg> {
+        use crate::sync::array::inbound::outcome::InboundOutcome;
+        use nodedb_array::sync::op_codec;
+
+        // Decode all ops upfront to extract HLCs.
+        let ops: Vec<_> = msg
+            .op_payloads
+            .iter()
+            .filter_map(|payload| match op_codec::decode_op(payload) {
+                Ok(op) => Some(op),
+                Err(e) => {
+                    tracing::warn!(
+                        array = %msg.array,
+                        error = %e,
+                        "SyncDelegate::handle_array_delta_batch: decode failed; skipping op"
+                    );
+                    None
+                }
+            })
+            .collect();
+
+        let replica_id = self.array_inbound.replica_id();
+
+        match self.array_inbound.handle_delta_batch(msg) {
+            Ok(outcomes) => {
+                // Find the highest HLC among successfully applied ops.
+                let mut latest_hlc = None;
+                for (outcome, op) in outcomes.iter().zip(ops.iter()) {
+                    if *outcome == InboundOutcome::Applied {
+                        let hlc = op.header.hlc;
+                        match latest_hlc {
+                            None => latest_hlc = Some(hlc),
+                            Some(prev) if hlc > prev => latest_hlc = Some(hlc),
+                            _ => {}
+                        }
+                    }
+                }
+                latest_hlc.map(|hlc| nodedb_types::sync::wire::ArrayAckMsg {
+                    array: msg.array.clone(),
+                    replica_id,
+                    ack_hlc_bytes: hlc.to_bytes(),
+                })
+            }
+            Err(e) => {
+                tracing::warn!(
+                    array = %msg.array,
+                    error = %e,
+                    "SyncDelegate::handle_array_delta_batch: apply failed"
+                );
+                None
+            }
+        }
+    }
+
+    fn handle_array_reject(&self, msg: &nodedb_types::sync::wire::ArrayRejectMsg) {
+        if let Err(e) = self.array_inbound.handle_reject(msg) {
+            tracing::warn!(
+                array = %msg.array,
+                error = %e,
+                "SyncDelegate::handle_array_reject: failed"
+            );
+        }
+    }
+
+    fn pending_columnar_batches(
+        &self,
+    ) -> Vec<crate::sync::outbound::columnar::PendingColumnarBatch> {
+        self.columnar_outbound
+            .as_ref()
+            .map(|q| q.drain_pending())
+            .unwrap_or_default()
+    }
+
+    fn acknowledge_columnar_batch(&self, batch_id: u64) {
+        if let Some(q) = &self.columnar_outbound {
+            q.acknowledge_batch(batch_id);
+        }
+    }
+
+    fn reject_columnar_batch(&self, batch: crate::sync::outbound::columnar::PendingColumnarBatch) {
+        if let Some(q) = &self.columnar_outbound {
+            q.requeue_batch(batch);
+        }
+    }
+
+    fn pending_vector_inserts(&self) -> Vec<crate::sync::outbound::vector::PendingVectorInsert> {
+        self.vector_outbound
+            .as_ref()
+            .map(|q| q.drain_inserts())
+            .unwrap_or_default()
+    }
+
+    fn acknowledge_vector_insert(&self, batch_id: u64) {
+        if let Some(q) = &self.vector_outbound {
+            q.acknowledge_insert(batch_id);
+        }
+    }
+
+    fn reject_vector_insert(&self, entry: crate::sync::outbound::vector::PendingVectorInsert) {
+        if let Some(q) = &self.vector_outbound {
+            q.requeue_insert(entry);
+        }
+    }
+
+    fn pending_vector_deletes(&self) -> Vec<crate::sync::outbound::vector::PendingVectorDelete> {
+        self.vector_outbound
+            .as_ref()
+            .map(|q| q.drain_deletes())
+            .unwrap_or_default()
+    }
+
+    fn acknowledge_vector_delete(&self, batch_id: u64) {
+        if let Some(q) = &self.vector_outbound {
+            q.acknowledge_delete(batch_id);
+        }
+    }
+
+    fn reject_vector_delete(&self, entry: crate::sync::outbound::vector::PendingVectorDelete) {
+        if let Some(q) = &self.vector_outbound {
+            q.requeue_delete(entry);
+        }
+    }
+
+    fn pending_fts_indexes(&self) -> Vec<crate::sync::outbound::fts::PendingFtsIndex> {
+        self.fts_outbound
+            .as_ref()
+            .map(|q| q.drain_indexes())
+            .unwrap_or_default()
+    }
+
+    fn acknowledge_fts_index(&self, batch_id: u64) {
+        if let Some(q) = &self.fts_outbound {
+            q.acknowledge_index(batch_id);
+        }
+    }
+
+    fn reject_fts_index(&self, entry: crate::sync::outbound::fts::PendingFtsIndex) {
+        if let Some(q) = &self.fts_outbound {
+            q.requeue_index(entry);
+        }
+    }
+
+    fn pending_fts_deletes(&self) -> Vec<crate::sync::outbound::fts::PendingFtsDelete> {
+        self.fts_outbound
+            .as_ref()
+            .map(|q| q.drain_deletes())
+            .unwrap_or_default()
+    }
+
+    fn acknowledge_fts_delete(&self, batch_id: u64) {
+        if let Some(q) = &self.fts_outbound {
+            q.acknowledge_delete(batch_id);
+        }
+    }
+
+    fn reject_fts_delete(&self, entry: crate::sync::outbound::fts::PendingFtsDelete) {
+        if let Some(q) = &self.fts_outbound {
+            q.requeue_delete(entry);
+        }
+    }
+
+    fn pending_spatial_inserts(&self) -> Vec<crate::sync::outbound::spatial::PendingSpatialInsert> {
+        self.spatial_outbound
+            .as_ref()
+            .map(|q| q.drain_inserts())
+            .unwrap_or_default()
+    }
+
+    fn acknowledge_spatial_insert(&self, batch_id: u64) {
+        if let Some(q) = &self.spatial_outbound {
+            q.acknowledge_insert(batch_id);
+        }
+    }
+
+    fn reject_spatial_insert(&self, entry: crate::sync::outbound::spatial::PendingSpatialInsert) {
+        if let Some(q) = &self.spatial_outbound {
+            q.requeue_insert(entry);
+        }
+    }
+
+    fn pending_spatial_deletes(&self) -> Vec<crate::sync::outbound::spatial::PendingSpatialDelete> {
+        self.spatial_outbound
+            .as_ref()
+            .map(|q| q.drain_deletes())
+            .unwrap_or_default()
+    }
+
+    fn acknowledge_spatial_delete(&self, batch_id: u64) {
+        if let Some(q) = &self.spatial_outbound {
+            q.acknowledge_delete(batch_id);
+        }
+    }
+
+    fn reject_spatial_delete(&self, entry: crate::sync::outbound::spatial::PendingSpatialDelete) {
+        if let Some(q) = &self.spatial_outbound {
+            q.requeue_delete(entry);
+        }
+    }
+
+    fn pending_timeseries_batches(
+        &self,
+    ) -> Vec<crate::sync::outbound::timeseries::PendingTimeseriesBatch> {
+        self.timeseries_outbound
+            .as_ref()
+            .map(|q| q.drain_pending())
+            .unwrap_or_default()
+    }
+
+    fn acknowledge_timeseries_collection(&self, collection: &str) {
+        if let Some(q) = &self.timeseries_outbound {
+            q.acknowledge_collection(collection);
+        }
+    }
+
+    fn reject_timeseries_batch(
+        &self,
+        batch: crate::sync::outbound::timeseries::PendingTimeseriesBatch,
+    ) {
+        if let Some(q) = &self.timeseries_outbound {
+            q.requeue_batch(batch);
+        }
+    }
+
     async fn import_definition(&self, msg: &nodedb_types::sync::wire::DefinitionSyncMsg) {
         use super::definitions::*;
 

@@ -209,4 +209,13 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             .flush(&self.storage, name)
             .map_err(NodeDbError::storage)
     }
+
+    /// Return the current schema HLC for `name` from the local schema registry.
+    ///
+    /// Used by tests that need to construct `ArrayOpHeader::schema_hlc` values
+    /// matching the locally registered schema.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn array_schema_hlc(&self, name: &str) -> Option<nodedb_array::sync::hlc::Hlc> {
+        self.array_schemas.schema_hlc(name)
+    }
 }

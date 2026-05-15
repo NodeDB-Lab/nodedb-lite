@@ -174,6 +174,11 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
                 .map_err(NodeDbError::storage)?;
         }
 
+        // Enqueue for sync to Origin (no-op when sync is disabled).
+        if let Some(q) = &self.vector_outbound {
+            q.enqueue_insert(collection, id, embedding.to_vec(), embedding.len(), "");
+        }
+
         self.update_memory_stats();
         Ok(())
     }
@@ -200,6 +205,11 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         {
             let mut crdt = self.crdt.lock_or_recover();
             crdt.delete(collection, id).map_err(NodeDbError::storage)?;
+        }
+
+        // Enqueue for sync to Origin (no-op when sync is disabled).
+        if let Some(q) = &self.vector_outbound {
+            q.enqueue_delete(collection, id, "");
         }
 
         Ok(())
@@ -260,6 +270,17 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             }
             crdt.upsert(collection, id, &fields)
                 .map_err(NodeDbError::storage)?;
+        }
+
+        // Enqueue for sync to Origin (no-op when sync is disabled).
+        if let Some(q) = &self.vector_outbound {
+            q.enqueue_insert(
+                collection,
+                id,
+                embedding.to_vec(),
+                embedding.len(),
+                field_name,
+            );
         }
 
         self.update_memory_stats();
