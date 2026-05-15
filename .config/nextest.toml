@@ -39,6 +39,9 @@ binary(/concurrency/)
 | binary(/e2e/)
 | binary(/integration/)
 | binary(/compensation/)
+| binary(/sync_interop/)
+| binary(/sync_load/)
+| binary(/sql_parity/)
 '''
 test-group = 'heavy'
 threads-required = 'num-test-threads'

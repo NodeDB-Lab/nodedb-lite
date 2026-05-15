@@ -58,3 +58,4 @@ futures = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 tempfile = { workspace = true }
 rust_decimal = { workspace = true }
+tokio-postgres = { workspace = true }
