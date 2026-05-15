@@ -35,10 +35,13 @@ async fn vector_insert_and_search() {
 async fn graph_insert_and_traverse() {
     let db = NodeDbLiteWasm::open(2).await.unwrap();
 
-    let edge_id = db.graph_insert_edge("alice", "bob", "KNOWS").await.unwrap();
+    let edge_id = db
+        .graph_insert_edge("social", "alice", "bob", "KNOWS")
+        .await
+        .unwrap();
     assert!(edge_id.contains("alice"));
 
-    let subgraph = db.graph_traverse("alice", 2).await.unwrap();
+    let subgraph = db.graph_traverse("social", "alice", 2).await.unwrap();
     assert!(subgraph.is_object());
 }
 
@@ -69,7 +72,7 @@ async fn multi_modal() {
     db.vector_insert("kb", "concept-ai", &[1.0, 0.0])
         .await
         .unwrap();
-    db.graph_insert_edge("concept-ai", "concept-ml", "RELATES_TO")
+    db.graph_insert_edge("kb", "concept-ai", "concept-ml", "RELATES_TO")
         .await
         .unwrap();
     db.document_put("notes", "n1", r#"{"body":{"String":"AI is great"}}"#)
@@ -79,7 +82,7 @@ async fn multi_modal() {
     let results = db.vector_search("kb", &[1.0, 0.0], 1).await.unwrap();
     assert!(results.is_array());
 
-    let subgraph = db.graph_traverse("concept-ai", 1).await.unwrap();
+    let subgraph = db.graph_traverse("kb", "concept-ai", 1).await.unwrap();
     assert!(subgraph.is_object());
 
     let doc = db.document_get("notes", "n1").await.unwrap();

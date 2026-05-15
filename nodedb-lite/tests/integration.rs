@@ -82,7 +82,7 @@ async fn graph_batch_and_traverse_correctness() {
     db.compact_graph().unwrap();
 
     let subgraph = db
-        .graph_traverse(&NodeId::new("n0"), 2, None)
+        .graph_traverse("graph", &NodeId::from_validated("n0".to_string()), 2, None)
         .await
         .unwrap();
 
@@ -153,8 +153,8 @@ async fn multi_modal_vector_graph_document() {
         .unwrap();
     assert!(!results.is_empty());
 
-    let start = NodeId::new(results[0].id.clone());
-    let subgraph = db.graph_traverse(&start, 2, None).await.unwrap();
+    let start = NodeId::from_validated(results[0].id.clone());
+    let subgraph = db.graph_traverse("kb", &start, 2, None).await.unwrap();
     assert!(subgraph.node_count() >= 1);
 
     let note = db.document_get("notes", "note-1").await.unwrap().unwrap();
@@ -195,7 +195,10 @@ async fn flush_and_reopen_persists_all() {
             .unwrap();
         assert!(!results.is_empty(), "vector should persist across restart");
 
-        let sg = db.graph_traverse(&NodeId::new("a"), 1, None).await.unwrap();
+        let sg = db
+            .graph_traverse("vecs", &NodeId::from_validated("a".to_string()), 1, None)
+            .await
+            .unwrap();
         assert!(sg.node_count() >= 2, "graph should persist across restart");
     }
 }
@@ -207,9 +210,15 @@ async fn all_operations_generate_deltas() {
     let db = open_test_db().await;
 
     db.vector_insert("v", "v1", &[1.0], None).await.unwrap();
-    db.graph_insert_edge(&NodeId::new("a"), &NodeId::new("b"), "L", None)
-        .await
-        .unwrap();
+    db.graph_insert_edge(
+        "test",
+        &NodeId::from_validated("a".to_string()),
+        &NodeId::from_validated("b".to_string()),
+        "L",
+        None,
+    )
+    .await
+    .unwrap();
     db.document_put("d", Document::new("d1")).await.unwrap();
     db.document_delete("d", "d1").await.unwrap();
 

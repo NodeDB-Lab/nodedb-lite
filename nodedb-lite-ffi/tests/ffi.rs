@@ -61,15 +61,22 @@ fn graph_insert_and_traverse() {
     unsafe {
         let handle = nodedb_open(path.as_ptr(), 1);
 
+        let collection = CString::new("social").unwrap();
         let from = CString::new("alice").unwrap();
         let to = CString::new("bob").unwrap();
         let label = CString::new("KNOWS").unwrap();
 
-        let rc = nodedb_graph_insert_edge(handle, from.as_ptr(), to.as_ptr(), label.as_ptr());
+        let rc = nodedb_graph_insert_edge(
+            handle,
+            collection.as_ptr(),
+            from.as_ptr(),
+            to.as_ptr(),
+            label.as_ptr(),
+        );
         assert_eq!(rc, NODEDB_OK);
 
         let mut out: *mut c_char = std::ptr::null_mut();
-        let rc = nodedb_graph_traverse(handle, from.as_ptr(), 2, &mut out);
+        let rc = nodedb_graph_traverse(handle, collection.as_ptr(), from.as_ptr(), 2, &mut out);
         assert_eq!(rc, NODEDB_OK);
         assert!(!out.is_null());
 

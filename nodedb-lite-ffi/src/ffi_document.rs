@@ -120,6 +120,7 @@ pub unsafe extern "C" fn nodedb_document_delete(
 
 /// Full-text search (BM25). Results written as JSON array to `out_json`.
 ///
+/// `field` is the document field to search (e.g. `"body"`).
 /// `*out_json` is only written on success. The caller must free via `nodedb_free_string`.
 ///
 /// # Safety
@@ -128,6 +129,7 @@ pub unsafe extern "C" fn nodedb_document_delete(
 pub unsafe extern "C" fn nodedb_text_search(
     handle: *mut NodeDbHandle,
     collection: *const c_char,
+    field: *const c_char,
     query: *const c_char,
     top_k: usize,
     out_json: *mut *mut c_char,
@@ -136,6 +138,9 @@ pub unsafe extern "C" fn nodedb_text_search(
         return NODEDB_ERR_NULL;
     };
     let Some(collection) = ptr_to_str(collection) else {
+        return NODEDB_ERR_UTF8;
+    };
+    let Some(field_str) = ptr_to_str(field) else {
         return NODEDB_ERR_UTF8;
     };
     let Some(query_str) = ptr_to_str(query) else {
@@ -147,6 +152,7 @@ pub unsafe extern "C" fn nodedb_text_search(
 
     match h.rt.block_on(h.db.text_search(
         collection,
+        field_str,
         query_str,
         top_k,
         nodedb_types::TextSearchParams::default(),

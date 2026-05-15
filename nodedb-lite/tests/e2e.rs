@@ -169,10 +169,19 @@ async fn e2e_native_full_suite_passes() {
         .unwrap();
     assert_eq!(r.len(), 1);
 
-    db.graph_insert_edge(&NodeId::new("a"), &NodeId::new("b"), "L", None)
+    db.graph_insert_edge(
+        "test",
+        &NodeId::from_validated("a".to_string()),
+        &NodeId::from_validated("b".to_string()),
+        "L",
+        None,
+    )
+    .await
+    .unwrap();
+    let sg = db
+        .graph_traverse("test", &NodeId::from_validated("a".to_string()), 1, None)
         .await
         .unwrap();
-    let sg = db.graph_traverse(&NodeId::new("a"), 1, None).await.unwrap();
     assert!(sg.node_count() >= 2);
 
     db.document_put("d", Document::new("d1")).await.unwrap();

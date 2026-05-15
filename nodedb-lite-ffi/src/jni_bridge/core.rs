@@ -181,12 +181,17 @@ pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_nativeGraphInsertEdge(
     mut env: JNIEnv,
     _obj: JObject,
     handle: jlong,
+    collection: JString,
     from: JString,
     to: JString,
     edge_type: JString,
 ) -> jint {
     let Some(h) = get_handle(handle) else {
         return NODEDB_ERR_FAILED;
+    };
+    let collection: String = match env.get_string(&collection) {
+        Ok(s) => s.into(),
+        Err(_) => return NODEDB_ERR_FAILED,
     };
     let from: String = match env.get_string(&from) {
         Ok(s) => s.into(),
@@ -202,11 +207,17 @@ pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_nativeGraphInsertEdge(
     };
 
     use nodedb_client::NodeDb;
-    let from_id = nodedb_types::id::NodeId::new(&from);
-    let to_id = nodedb_types::id::NodeId::new(&to);
+    let from_id = match nodedb_types::id::NodeId::try_new(from) {
+        Ok(id) => id,
+        Err(_) => return NODEDB_ERR_FAILED,
+    };
+    let to_id = match nodedb_types::id::NodeId::try_new(to) {
+        Ok(id) => id,
+        Err(_) => return NODEDB_ERR_FAILED,
+    };
     match h
         .rt
-        .block_on(h.db.graph_insert_edge(&from_id, &to_id, &edge_type, None))
+        .block_on(h.db.graph_insert_edge(&collection, &from_id, &to_id, &edge_type, None))
     {
         Ok(_) => NODEDB_OK,
         Err(_) => NODEDB_ERR_FAILED,
@@ -218,6 +229,7 @@ pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_nativeGraphTraverse(
     mut env: JNIEnv,
     _obj: JObject,
     handle: jlong,
+    collection: JString,
     start: JString,
     depth: jint,
 ) -> jstring {
@@ -225,20 +237,28 @@ pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_nativeGraphTraverse(
         Some(h) => h,
         None => return std::ptr::null_mut(),
     };
+    let collection: String = match env.get_string(&collection) {
+        Ok(s) => s.into(),
+        Err(_) => return std::ptr::null_mut(),
+    };
     let start: String = match env.get_string(&start) {
         Ok(s) => s.into(),
         Err(_) => return std::ptr::null_mut(),
     };
 
     use nodedb_client::NodeDb;
-    let start_id = nodedb_types::id::NodeId::new(&start);
-    let subgraph = match h
-        .rt
-        .block_on(h.db.graph_traverse(&start_id, depth as u8, None))
-    {
-        Ok(sg) => sg,
+    let start_id = match nodedb_types::id::NodeId::try_new(start) {
+        Ok(id) => id,
         Err(_) => return std::ptr::null_mut(),
     };
+    let subgraph =
+        match h
+            .rt
+            .block_on(h.db.graph_traverse(&collection, &start_id, depth as u8, None))
+        {
+            Ok(sg) => sg,
+            Err(_) => return std::ptr::null_mut(),
+        };
 
     let json = serde_json::json!({
         "nodes": subgraph.nodes.iter().map(|n| serde_json::json!({"id": n.id.as_str(), "depth": n.depth})).collect::<Vec<_>>(),

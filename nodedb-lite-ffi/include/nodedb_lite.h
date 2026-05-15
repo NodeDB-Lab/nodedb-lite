@@ -272,6 +272,7 @@ int32_t nodedb_document_delete(struct NodeDbNodeDbHandle *handle,
 /**
  * Full-text search (BM25). Results written as JSON array to `out_json`.
  *
+ * `field` is the document field to search (e.g. `"body"`).
  * `*out_json` is only written on success. The caller must free via `nodedb_free_string`.
  *
  * # Safety
@@ -279,6 +280,7 @@ int32_t nodedb_document_delete(struct NodeDbNodeDbHandle *handle,
  */
 int32_t nodedb_text_search(struct NodeDbNodeDbHandle *handle,
                            const char *collection,
+                           const char *field,
                            const char *query,
                            uintptr_t top_k,
                            char **out_json);
@@ -294,41 +296,46 @@ int32_t nodedb_text_search(struct NodeDbNodeDbHandle *handle,
 int32_t nodedb_execute_sql(struct NodeDbNodeDbHandle *handle, const char *sql, char **out_json);
 
 /**
- * Insert a directed graph edge.
+ * Insert a directed graph edge into `collection`.
  *
  * # Safety
  * All pointer parameters must be valid null-terminated UTF-8.
  */
 int32_t nodedb_graph_insert_edge(struct NodeDbNodeDbHandle *handle,
+                                 const char *collection,
                                  const char *from,
                                  const char *to,
                                  const char *edge_type);
 
 /**
- * Delete a graph edge by ID.
+ * Delete a graph edge by ID from `collection`.
  *
- * Edge ID format: "src--label-->dst" (as returned by graph_insert_edge).
+ * Edge ID format: length-prefixed form as returned by `graph_insert_edge`
+ * Display (`"{src_len}:{src}|{label_len}:{label}|{dst_len}:{dst}|{seq}"`).
  *
  * # Safety
- * `edge_id` must be valid null-terminated UTF-8.
+ * All pointer parameters must be valid null-terminated UTF-8.
  */
-int32_t nodedb_graph_delete_edge(struct NodeDbNodeDbHandle *handle, const char *edge_id);
+int32_t nodedb_graph_delete_edge(struct NodeDbNodeDbHandle *handle,
+                                 const char *collection,
+                                 const char *edge_id);
 
 /**
- * Traverse the graph from a start node. Results written as JSON to `out_json`.
+ * Traverse the graph from a start node in `collection`. Results written as JSON to `out_json`.
  *
  * `*out_json` is only written on success. The caller must free via `nodedb_free_string`.
  *
  * # Safety
- * `start` must be valid UTF-8. `out_json` must not be null.
+ * All pointer parameters must be valid UTF-8. `out_json` must not be null.
  */
 int32_t nodedb_graph_traverse(struct NodeDbNodeDbHandle *handle,
+                              const char *collection,
                               const char *start,
                               uint8_t depth,
                               char **out_json);
 
 /**
- * Find the shortest path between two nodes. Results written as JSON to `out_json`.
+ * Find the shortest path between two nodes in `collection`. Results written as JSON to `out_json`.
  *
  * Returns `NODEDB_OK` with a JSON array of node IDs, or `"null"` if no path exists.
  * `*out_json` is only written on success. The caller must free via `nodedb_free_string`.
@@ -337,6 +344,7 @@ int32_t nodedb_graph_traverse(struct NodeDbNodeDbHandle *handle,
  * All pointer parameters must be valid. `out_json` must not be null.
  */
 int32_t nodedb_graph_shortest_path(struct NodeDbNodeDbHandle *handle,
+                                   const char *collection,
                                    const char *from,
                                    const char *to,
                                    uint8_t max_depth,
