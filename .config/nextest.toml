@@ -42,6 +42,7 @@ binary(/concurrency/)
 | binary(/sync_interop/)
 | binary(/sync_load/)
 | binary(/sql_parity/)
+| binary(/definition_sync_interop/)
 '''
 test-group = 'heavy'
 threads-required = 'num-test-threads'

@@ -193,68 +193,72 @@ the test harness exposes a pgwire/HTTP endpoint so tests can issue
 
 ---
 
-## Definition Sync (EXPERIMENTAL — NOT IN 0.1.0-beta.1)
+## Definition Sync (PREVIEW)
 
 Definition sync carries function, trigger, and procedure definitions from
 Origin to connected Lite clients via `DefinitionSync` (frame opcode `0x70`,
 `SyncMessageType::DefinitionSync`).
 
-### Lite side (wired, receive-only)
+### Lite side (receive path)
 
 Lite's `dispatch_frame` in `nodedb-lite/nodedb-lite/src/sync/transport.rs`
-matches on `SyncMessageType::DefinitionSync` (lines 317–319) and calls
+matches on `SyncMessageType::DefinitionSync` and calls
 `delegate.import_definition(&msg)`.  `import_definition` is implemented in
-`nodedb-lite/nodedb-lite/src/nodedb/sync_delegate.rs` (line 82) and handles
-both `"put"` (create/replace) and `"delete"` (drop) actions with msgpack
-payloads.  The wire type `DefinitionSyncMsg` is defined in
-`nodedb/nodedb-types/src/sync/wire/timeseries.rs:57` with opcode registered at
-`nodedb/nodedb-types/src/sync/wire/frame.rs:42`.
+`nodedb-lite/nodedb-lite/src/nodedb/sync_delegate.rs` and handles both `"put"`
+(create/replace) and `"delete"` (drop) actions.  The wire type
+`DefinitionSyncMsg` is defined in
+`nodedb/nodedb-types/src/sync/wire/timeseries.rs` with opcode registered at
+`nodedb/nodedb-types/src/sync/wire/frame.rs`.
 
-### Origin side (not wired)
+### Origin side (emission path)
 
-No code in `nodedb/nodedb/src/` constructs or sends a `DefinitionSyncMsg`.
-A grep of `nodedb/nodedb/src/control/server/sync/` and every DDL handler
-returns zero hits for `DefinitionSync`, `DefinitionSyncMsg`, or the `0x70`
-opcode.  The sync session handler (`session_handler.rs`), the DDL post-apply
-dispatcher (`async_dispatch.rs`), and the CRDT delivery path (`dlq.rs`,
-`listener.rs`) have no emission path for definition changes.
+Origin emits `DefinitionSync` (0x70) frames after every WAL-durable DDL
+commit that affects executable definitions:
 
-### Placeholder tests
+- `CREATE [OR REPLACE] FUNCTION` / `DROP FUNCTION` — handled by
+  `control/server/pgwire/ddl/function/create/handler.rs` and `drop.rs`
+- `CREATE [OR REPLACE] TRIGGER` / `DROP TRIGGER` — handled by
+  `control/server/pgwire/ddl/trigger/create.rs` and `drop.rs`
+- `CREATE [OR REPLACE] PROCEDURE` / `DROP PROCEDURE` — handled by
+  `control/server/pgwire/ddl/procedure/create/handler.rs` and `drop.rs`
+
+Broadcast is coordinated through `DefinitionSyncFanout`
+(`control/server/sync/definition_fanout.rs`), a per-session bounded mpsc
+registry that mirrors the `ArrayDeliveryRegistry` pattern.  The fanout is held
+on `SharedState` and registered per session from `session_handler.rs` after
+handshake.  The session handler uses `tokio::select!` to await either an
+inbound WebSocket message or a new frame on the definition-sync channel, so
+server-push delivery is not gated on client traffic.
+
+### Tests
 
 `nodedb-lite/nodedb-lite/tests/definition_sync_interop.rs` contains four
-`#[ignore]` tests covering function put, function delete, trigger put, and
-procedure put.
+real-transport tests against a live `OriginServer`:
 
-### Promotion criteria
+- `definition_sync_function_put` — CREATE OR REPLACE FUNCTION → `"put"` frame
+- `definition_sync_function_delete` — DROP FUNCTION → `"delete"` frame
+- `definition_sync_trigger_put` — CREATE OR REPLACE TRIGGER → `"put"` frame
+- `definition_sync_procedure_put` — CREATE OR REPLACE PROCEDURE → `"put"` frame
 
-Definition sync can be promoted from EXPERIMENTAL to PREVIEW when:
-
-1. Origin's DDL commit path for `CREATE FUNCTION`, `CREATE TRIGGER`, and
-   `CREATE PROCEDURE` constructs a `DefinitionSyncMsg` and broadcasts it to
-   all sessions subscribed to the affected namespace.
-2. The corresponding `DROP` paths emit `DefinitionSyncMsg` with
-   `action = "delete"`.
-3. `tests/definition_sync_interop.rs::definition_sync_function_put` passes
-   against `OriginServer::spawn()` without `#[ignore]`.
-4. `docs/lite-support-matrix.md` is updated accordingly.
+All four pass (4/4) in the `heavy` nextest group.
 
 ---
 
-## Array Sync (EXPERIMENTAL — NOT IN 0.1.0-beta.1)
+## Array Sync (BETA)
 
 Array sync uses a dedicated wire sub-protocol layered on top of the standard
 sync session.  The message types involved are:
 
-| Message type            | Direction       | Handled by                          |
-|-------------------------|-----------------|-------------------------------------|
-| `ArraySchema`           | Lite → Origin   | `OriginArrayInbound::handle_schema` |
-| `ArraySnapshot`         | Lite → Origin   | `OriginArrayInbound::handle_snapshot_header` |
-| `ArraySnapshotChunk`    | Lite → Origin   | `OriginArrayInbound::handle_snapshot_chunk` |
-| `ArrayAck`              | Lite → Origin   | `OriginArrayInbound::handle_ack`    |
-| `ArrayCatchupRequest`   | Lite → Origin   | `OriginArrayInbound::handle_catchup_request` |
-| `ArrayDelta`            | Origin → Lite   | **NOT HANDLED** (see below)         |
-| `ArrayDeltaBatch`       | Origin → Lite   | **NOT HANDLED** (see below)         |
-| `ArrayReject`           | Origin → Lite   | Lite inbound — wired in-process only |
+| Message type            | Direction       | Handled by                                             |
+|-------------------------|-----------------|--------------------------------------------------------|
+| `ArraySchema`           | Lite → Origin   | `OriginArrayInbound::handle_schema`                    |
+| `ArraySnapshot`         | Lite → Origin   | `OriginArrayInbound::handle_snapshot_header`           |
+| `ArraySnapshotChunk`    | Lite → Origin   | `OriginArrayInbound::handle_snapshot_chunk`            |
+| `ArrayAck`              | Lite → Origin   | `OriginArrayInbound::handle_ack`                       |
+| `ArrayCatchupRequest`   | Lite → Origin   | `OriginArrayInbound::handle_catchup_request`           |
+| `ArrayDelta`            | Origin → Lite   | `dispatch_frame` → `SyncDelegate::handle_array_delta`  |
+| `ArrayDeltaBatch`       | Origin → Lite   | `dispatch_frame` → `SyncDelegate::handle_array_delta_batch` |
+| `ArrayReject`           | Origin → Lite   | `dispatch_frame` → `SyncDelegate::handle_array_reject` |
 
 ### Origin-side wiring (complete)
 
@@ -274,37 +278,383 @@ Shape subscription for array shapes is handled in
 `ShapeType::Array` arm validates the array name against the schema registry and
 registers a subscriber cursor.
 
-### Missing Lite-side wiring
+### Lite-side receive path (wired)
 
-`nodedb-lite/nodedb-lite/src/sync/client/receive.rs` does not match on
-`SyncMessageType::ArrayDelta` or `SyncMessageType::ArrayDeltaBatch`.  Those
-frame types fall through to the catch-all arm and are logged as unexpected.
-No cell is applied, no ack is sent, and no convergence occurs.
+`sync/transport.rs::dispatch_frame` matches on `SyncMessageType::ArrayDelta`
+(0x90) and `SyncMessageType::ArrayDeltaBatch` (0x91).  Each arm decodes the
+MessagePack body via `SyncFrame::decode_body`, calls the `SyncDelegate` method
+on `NodeDbLite`, and stores the returned `ArrayAckMsg` on `SyncClient` via
+`set_pending_array_ack`.  The push loop drains it and sends it to Origin
+(advancing the GC frontier).
 
-Until this receive path is wired, the full round-trip
-(Lite → Origin → Lite) cannot be asserted over a real transport.
+`SyncMessageType::ArrayReject` (0x96) is also handled: the delegate removes the
+rejected op from the local pending queue via `ArrayInbound::handle_reject`.
 
-### What the simulated tests cover
+### Test coverage
 
-The files `tests/array_sync_basic.rs`, `tests/array_sync_bitemporal.rs`,
-`tests/array_sync_catchup.rs`, `tests/array_sync_concurrent_writers.rs`,
-`tests/array_sync_gdpr_erase.rs`, `tests/array_sync_reject.rs`, and
-`tests/array_sync_schema.rs` exercise Lite's inbound and outbound handlers
-in-process — they never open a WebSocket to a live Origin node.  Each file
-carries a module-level doc comment explicitly stating this scope.
+In-process simulations (`tests/array_sync_*.rs`, 24 tests) exercise all
+inbound handler logic without a live network transport.
 
-### Real-transport placeholder
+`tests/array_sync_interop_real.rs` (5 tests, all passing) proves the full
+dispatch path: hand-crafted `ArrayDeltaMsg` / `ArrayDeltaBatchMsg` frames are
+pushed through `SyncDelegate::handle_array_delta` / `handle_array_delta_batch`
+(the exact methods `dispatch_frame` calls), and the tests assert both the
+returned `ArrayAckMsg` and the engine-visible cell state.
 
-`tests/array_sync_interop.rs` contains two `#[ignore]` tests that document
-what end-to-end validation looks like.  Remove `#[ignore]` once the Lite
-receive path is wired.
+`tests/array_sync_interop.rs` retains two `#[ignore]` tests that document
+the future full end-to-end `OriginServer::spawn()` path for completeness.
 
-### Promotion criteria
+---
 
-Array sync can be promoted from EXPERIMENTAL to PREVIEW when:
+## Columnar Insert Sync (PREVIEW)
 
-1. `nodedb-lite/src/sync/client/receive.rs` handles `ArrayDelta` and
-   `ArrayDeltaBatch` and routes them to the local array engine.
-2. `tests/array_sync_interop.rs::array_interop_put_roundtrip` passes against
-   `OriginServer::spawn()` without `#[ignore]`.
-3. `docs/lite-support-matrix.md` is updated accordingly.
+Columnar insert sync replicates rows inserted into a Lite columnar collection
+to Origin using a dedicated wire frame pair.
+
+| Message type        | Opcode | Direction      | Handled by                                              |
+|---------------------|--------|----------------|---------------------------------------------------------|
+| `ColumnarInsert`    | 0xA0   | Lite → Origin  | `session_handler.rs` → `SyncSession::handle_columnar_insert` |
+| `ColumnarInsertAck` | 0xA1   | Origin → Lite  | `dispatch_frame` → `SyncDelegate::acknowledge_columnar_batch` |
+
+### Wire format
+
+`ColumnarInsertMsg` (defined in `nodedb-types/src/sync/wire/columnar.rs`):
+- `lite_id`: Lite instance identifier.
+- `collection`: target collection name.
+- `rows`: each entry is a MessagePack-serialized `Vec<nodedb_types::value::Value>` in schema column order.
+- `batch_id`: monotonic per-collection ID for ACK correlation.
+- `schema_bytes`: optional MessagePack-serialized `ColumnarSchema` hint for Origin validation.
+
+`ColumnarInsertAckMsg`:
+- `collection`, `batch_id`: echo from the insert.
+- `accepted` / `rejected`: row counts.
+- `reject_reason`: first failure detail, if any.
+
+### Lite outbound path
+
+`ColumnarEngine::insert` (in `src/engine/columnar/store.rs`) enqueues the row
+into `ColumnarOutbound` (`src/sync/columnar_outbound.rs`).  Rows for the same
+collection are coalesced into a single in-flight batch.
+
+`NodeDbLite` holds `Arc<ColumnarOutbound>`.  `SyncDelegate::pending_columnar_batches`
+(implemented in `src/nodedb/sync_delegate.rs`) drains the queue; the Lite
+`delta_push_loop` in `src/sync/transport.rs` encodes each batch as a
+`ColumnarInsert` frame and sends it to Origin.
+
+On `ColumnarInsertAck`, `dispatch_frame` calls
+`delegate.acknowledge_columnar_batch(batch_id)`, which removes the batch from
+the queue.  On send failure the batch is re-queued via
+`delegate.reject_columnar_batch`.
+
+### Origin inbound path
+
+`session_handler.rs` intercepts `SyncMessageType::ColumnarInsert` before the
+generic `process_frame` call.  It decodes the body, calls
+`SyncSession::handle_columnar_insert` with a `ColumnarDispatcher`.
+
+`SharedStateColumnarDispatcher` (in `sync/columnar_handler.rs`) translates the
+decoded rows to a JSON array payload and dispatches
+`PhysicalPlan::Columnar(ColumnarOp::Insert)` to the Data Plane via the SPSC
+bridge using `EventSource::CrdtSync` (suppresses AFTER triggers on synced data).
+The returned row count is reported in the ACK.
+
+### Test coverage
+
+`tests/sync_interop_columnar.rs` contains two live-Origin gate tests:
+- `columnar_inserts_replicate_to_origin` — inserts 3 rows post-connect, waits ≤5 s, asserts 3 rows visible via `SELECT id` pgwire scan (uses columnar scan path, not aggregate).
+- `columnar_pre_connection_inserts_sync_after_connect` — inserts rows before the sync task starts; verifies they replicate once the connection is established.
+
+Unit tests for `ColumnarOutbound` live in `src/sync/columnar_outbound.rs`
+(enqueue/drain/ack/requeue invariants).  `columnar_handler.rs` contains
+`SyncSession` unit tests covering unauthenticated rejection, successful
+dispatch, and dispatch-failure paths.
+
+---
+
+## Timeseries Sync (PREVIEW)
+
+Timeseries collections in Lite are created with `CREATE TIMESERIES COLLECTION`
+DDL, which maps to `ColumnarEngine` with `ColumnarProfile::Timeseries`.
+Because timeseries is backed by the columnar engine, inserts flow through the
+existing `ColumnarOutbound` queue and are transmitted as `ColumnarInsert`
+(0xA0) frames — no dedicated timeseries wire frame is needed.
+
+On Origin, a collection created with `WITH (engine='timeseries')` accepts
+`ColumnarInsert` frames and stores rows through the timeseries-profiled
+columnar engine.  Rows are immediately visible via pgwire `SELECT`.
+
+The wire type used is `ColumnarInsertMsg` (opcode 0xA0), shared with plain
+columnar sync.  See the **Columnar Insert Sync** section above for the full
+message format, ACK flow, and Origin inbound path.
+
+### Test coverage
+
+`tests/sync_interop_timeseries.rs` contains two live-Origin gate tests:
+- `timeseries_inserts_replicate_to_origin` — inserts 3 rows post-connect,
+  waits ≤5 s, asserts 3 rows visible via `SELECT time` pgwire scan.
+- `timeseries_pre_connection_inserts_sync_after_connect` — inserts rows before
+  the sync task starts; verifies they replicate once the connection is
+  established.
+
+---
+
+## Vector Insert/Delete Sync (PREVIEW)
+
+Vector insert and delete sync replicates HNSW vector changes made on a Lite
+collection to Origin using two dedicated wire frame pairs.
+
+| Message type       | Opcode | Direction      | Handled by                                                  |
+|--------------------|--------|----------------|-------------------------------------------------------------|
+| `VectorInsert`     | 0xA2   | Lite → Origin  | `session_handler.rs` → `SyncSession::handle_vector_insert` |
+| `VectorInsertAck`  | 0xA3   | Origin → Lite  | `dispatch_frame` → `SyncDelegate::acknowledge_vector_insert` |
+| `VectorDelete`     | 0xA4   | Lite → Origin  | `session_handler.rs` → `SyncSession::handle_vector_delete` |
+| `VectorDeleteAck`  | 0xA5   | Origin → Lite  | `dispatch_frame` → `SyncDelegate::acknowledge_vector_delete` |
+
+### Wire format
+
+`VectorInsertMsg` (defined in `nodedb-types/src/sync/wire/vector.rs`):
+- `lite_id`: Lite instance identifier.
+- `collection`: target collection name.
+- `id`: document/vector ID string.
+- `vector`: raw FP32 embedding coefficients.
+- `dim`: stated dimensionality (must equal `vector.len()`).
+- `field_name`: field name in multi-field collections (empty string for default).
+- `batch_id`: monotonic per-collection ID for ACK correlation.
+
+`VectorInsertAckMsg`:
+- `collection`, `id`, `batch_id`: echo from the insert.
+- `accepted`: true on success.
+- `reject_reason`: failure detail, if any.
+
+`VectorDeleteMsg`:
+- `lite_id`, `collection`, `id`, `field_name`, `batch_id`.
+
+`VectorDeleteAckMsg`:
+- `collection`, `id`, `batch_id`, `accepted`, `reject_reason`.
+
+### Lite outbound path
+
+`vector_insert_impl` / `vector_delete_impl` (in `src/nodedb/trait_impl/vector.rs`) enqueue
+entries into `VectorOutbound` (`src/sync/vector_outbound.rs`).
+
+`NodeDbLite` holds `Option<Arc<VectorOutbound>>` (present when sync is enabled).
+`SyncDelegate::pending_vector_inserts` / `pending_vector_deletes` drain the queue;
+the `delta_push_loop` in `src/sync/transport.rs` encodes each entry as a
+`VectorInsert` or `VectorDelete` frame and sends it to Origin.
+
+On `VectorInsertAck` / `VectorDeleteAck`, `dispatch_frame` calls
+`delegate.acknowledge_vector_insert(batch_id)` or `acknowledge_vector_delete(batch_id)`,
+removing the entry from the queue.  On send failure the entry is re-queued via
+`delegate.reject_vector_insert` / `reject_vector_delete`.
+
+### Origin inbound path
+
+`session_handler.rs` intercepts `SyncMessageType::VectorInsert` and
+`SyncMessageType::VectorDelete` before the generic `process_frame` call.
+
+For inserts, `SharedStateVectorDispatcher` (in `sync/vector_handler.rs`):
+1. Validates dimension consistency.
+2. Assigns a stable surrogate for `(collection, id)` via `SurrogateAssigner::assign`
+   (WAL-durable, idempotent).
+3. Dispatches `PhysicalPlan::Vector(VectorOp::Insert)` to the Data Plane via the
+   SPSC bridge with `EventSource::CrdtSync` (suppresses AFTER triggers on synced data).
+
+For deletes, the dispatcher dispatches `PhysicalPlan::Vector(VectorOp::DeleteBySurrogate)`,
+which the Data Plane resolves to the internal HNSW node ID via the `surrogate_to_local`
+map.  A delete for an unknown surrogate is a silent no-op (idempotent).
+
+`process_frame` in `session/dispatch.rs` contains explicit `None` arms for all four
+vector message types so the generic `_` branch never silently absorbs them.
+
+### Test coverage
+
+`tests/sync_interop_vector.rs` contains three live-Origin gate tests:
+- `vector_inserts_replicate_to_origin` — inserts 5 vectors post-connect, waits ≤5 s,
+  probes each by point-scan, then asserts nearest-neighbour query returns the expected id.
+- `vector_delete_replicates_to_origin` — inserts a target vector, confirms it appears,
+  deletes it on Lite, waits ≤5 s, asserts it is no longer visible.
+- `vector_pre_connection_inserts_sync_after_connect` — inserts vectors before the sync
+  task starts; verifies they replicate once the connection is established.
+
+Unit tests for `VectorOutbound` live in `src/sync/vector_outbound.rs`
+(enqueue/drain/ack/requeue invariants, batch-ID monotonicity).
+`vector_handler.rs` contains `SyncSession` unit tests covering unauthenticated
+rejection, dimension mismatch, successful dispatch, and dispatch-failure paths.
+
+## FTS Index/Delete Sync (PREVIEW)
+
+FTS index sync replicates BM25 full-text index changes made on a Lite
+collection to Origin using two dedicated wire frame pairs.
+
+| Message type    | Opcode | Direction      | Handled by                                                |
+|-----------------|--------|----------------|-----------------------------------------------------------|
+| `FtsIndex`      | 0xA6   | Lite → Origin  | `session_handler.rs` → `SyncSession::handle_fts_index`   |
+| `FtsIndexAck`   | 0xA7   | Origin → Lite  | `dispatch_frame` → `SyncDelegate::acknowledge_fts_index` |
+| `FtsDelete`     | 0xA8   | Lite → Origin  | `session_handler.rs` → `SyncSession::handle_fts_delete`  |
+| `FtsDeleteAck`  | 0xA9   | Origin → Lite  | `dispatch_frame` → `SyncDelegate::acknowledge_fts_delete`|
+
+### Wire format
+
+`FtsIndexMsg` (defined in `nodedb-types/src/sync/wire/fts.rs`):
+- `lite_id`: Lite instance identifier.
+- `collection`: target collection name.
+- `doc_id`: document ID string.
+- `text`: pre-concatenated text content (Lite concatenates all string-valued
+  fields with spaces before enqueueing; no field name is transmitted).
+- `batch_id`: monotonic per-collection ID for ACK correlation.
+
+`FtsIndexAckMsg`:
+- `collection`, `doc_id`, `batch_id`: echo from the index request.
+- `accepted`: true on success.
+- `reject_reason`: failure detail, if any.
+
+`FtsDeleteMsg`:
+- `lite_id`, `collection`, `doc_id`, `batch_id`.
+
+`FtsDeleteAckMsg`:
+- `collection`, `doc_id`, `batch_id`, `accepted`, `reject_reason`.
+
+### Lite outbound path
+
+`document_put_impl` (in `src/nodedb/trait_impl/document.rs`) calls
+`index_document_text` on the FTS engine, which enqueues a `PendingFtsIndex`
+entry into `FtsOutbound` (`src/sync/fts_outbound.rs`).  Similarly,
+`document_delete_impl` enqueues a `PendingFtsDelete`.
+
+`NodeDbLite` holds `Option<Arc<FtsOutbound>>` (present when sync is enabled).
+`SyncDelegate::pending_fts_indexes` / `pending_fts_deletes` drain the queue;
+the `delta_push_loop` in `src/sync/transport.rs` encodes each entry as an
+`FtsIndex` or `FtsDelete` frame and sends it to Origin.
+
+On `FtsIndexAck` / `FtsDeleteAck`, `dispatch_frame` calls
+`delegate.acknowledge_fts_index(batch_id)` or `acknowledge_fts_delete(batch_id)`,
+removing the entry from the queue.  On send failure the entry is re-queued via
+`delegate.reject_fts_index` / `reject_fts_delete`.
+
+### Origin inbound path
+
+`session_handler.rs` intercepts `SyncMessageType::FtsIndex` and
+`SyncMessageType::FtsDelete` before the generic `process_frame` call.
+
+For index requests, `SharedStateFtsDispatcher` (in `sync/fts_handler.rs`):
+1. Assigns a stable surrogate for `(collection, doc_id)` via `SurrogateAssigner::assign`
+   (WAL-durable, idempotent).
+2. Dispatches `PhysicalPlan::Text(TextOp::FtsIndexDoc)` to the Data Plane via the
+   SPSC bridge with `EventSource::CrdtSync` (suppresses AFTER triggers on synced data).
+3. Returns `FtsIndexAckMsg { accepted: true }` on success.
+
+Empty text (`text.is_empty()`) is acknowledged without dispatching to avoid
+inserting zero-length postings into the inverted index.
+
+For delete requests, the dispatcher dispatches `PhysicalPlan::Text(TextOp::FtsDeleteDoc)`.
+A delete for an unknown surrogate is a silent no-op (idempotent).
+
+`process_frame` in `session/dispatch.rs` contains explicit `None` arms for all four
+FTS message types so the generic `_` branch never silently absorbs them.
+
+### Test coverage
+
+`tests/sync_interop_fts.rs` contains three live-Origin gate tests:
+- `fts_inserts_replicate_to_origin` — inserts 3 documents post-connect, waits ≤5 s,
+  asserts `text_match` on Origin returns all 3.
+- `fts_delete_replicates_to_origin` — inserts 3 documents (2 background + 1 target),
+  confirms target appears, deletes it on Lite, waits ≤5 s, asserts target no longer
+  visible while background documents remain.
+- `fts_pre_connection_inserts_sync_after_connect` — inserts documents before the sync
+  task starts; verifies they replicate once the connection is established.
+
+Unit tests for `FtsOutbound` live in `src/sync/fts_outbound.rs`
+(enqueue/drain/ack/requeue invariants, batch-ID monotonicity).
+`fts_handler.rs` contains `SyncSession` unit tests covering unauthenticated
+rejection, authenticated dispatch, empty-text no-dispatch, dispatch-failure, and
+delete-ack paths.
+
+---
+
+## Spatial Insert/Delete Sync (PREVIEW)
+
+Spatial insert and delete sync replicates R-tree geometry changes made on a Lite
+collection to Origin using two dedicated wire frame pairs.
+
+| Message type          | Opcode | Direction      | Handled by                                                       |
+|-----------------------|--------|----------------|------------------------------------------------------------------|
+| `SpatialInsert`       | 0xAA   | Lite → Origin  | `session_handler.rs` → `SyncSession::handle_spatial_insert`     |
+| `SpatialInsertAck`    | 0xAB   | Origin → Lite  | `dispatch_frame` → `SyncDelegate::acknowledge_spatial_insert`   |
+| `SpatialDelete`       | 0xAC   | Lite → Origin  | `session_handler.rs` → `SyncSession::handle_spatial_delete`     |
+| `SpatialDeleteAck`    | 0xAD   | Origin → Lite  | `dispatch_frame` → `SyncDelegate::acknowledge_spatial_delete`   |
+
+### Wire format
+
+`SpatialInsertMsg` (defined in `nodedb-types/src/sync/wire/spatial.rs`):
+- `lite_id`: Lite instance identifier.
+- `collection`: collection name.
+- `field`: geometry field name.
+- `doc_id`: document identifier string.
+- `geometry_bytes`: MessagePack-serialized `nodedb_types::geometry::Geometry`.
+- `batch_id`: monotonically increasing batch counter for ack correlation.
+
+`SpatialInsertAckMsg`:
+- `collection`, `field`, `doc_id`, `batch_id`: echo of the request fields.
+- `accepted`: `true` on success.
+- `reject_reason`: `Some(String)` on rejection (auth failure, geometry
+  deserialisation error, surrogate allocation failure, Data Plane error).
+
+`SpatialDeleteMsg`:
+- `lite_id`, `collection`, `field`, `doc_id`, `batch_id`.
+
+`SpatialDeleteAckMsg`:
+- `collection`, `field`, `doc_id`, `batch_id`, `accepted`, `reject_reason`.
+
+### Lite-side flow
+
+`NodeDbLite::spatial_insert(collection, field, doc_id, geometry)` writes the
+entry to the local R-tree engine and enqueues an outbound record in
+`SpatialOutbound` (`src/sync/spatial_outbound.rs`).  Similarly,
+`spatial_delete` removes from the local R-tree and enqueues a delete record.
+
+`NodeDbLite` holds `Arc<SpatialOutbound>`.  `SyncDelegate::pending_spatial_inserts`
+and `pending_spatial_deletes` drain the queue.  The sync loop sends a
+`SpatialInsert` or `SpatialDelete` frame for each pending entry and waits for
+the corresponding ack.
+
+On ack, `dispatch_frame` calls `delegate.acknowledge_spatial_insert(batch_id)`
+(or `acknowledge_spatial_delete`), which removes the entry from the outbound
+queue.  On rejection, the entry is re-queued for retry via `requeue_insert` /
+`requeue_delete`.
+
+### Origin-side flow
+
+`session_handler.rs` intercepts `SyncMessageType::SpatialInsert` and
+`SyncMessageType::SpatialDelete` before the generic dispatch path.  It calls
+`SyncSession::handle_spatial_insert` / `handle_spatial_delete` with a
+`SpatialDispatcher`.
+
+`SharedStateSpatialDispatcher` (in `sync/spatial_handler.rs`) translates the
+message into `PhysicalPlan::Spatial(SpatialOp::Insert)` or `SpatialOp::Delete`
+and dispatches to the Data Plane via the SPSC bridge.
+
+`CoreLoop::execute_spatial_insert` (in
+`data/executor/handlers/spatial_sync.rs`) writes a minimal geometry document in
+standard msgpack map format (via `nodedb_types::value_to_msgpack`) to the sparse
+store and inserts a bounding-box entry into the per-field R-tree.  This mirrors
+what a direct SQL `INSERT` does, so `st_dwithin` / `st_contains` queries on
+Origin see the synced geometries.
+
+`CoreLoop::execute_spatial_delete` removes the document from the sparse store
+and removes the R-tree entry.
+
+### Test coverage
+
+`tests/sync_interop_spatial.rs` contains three live-Origin gate tests:
+- `spatial_inserts_replicate_to_origin` — inserts 3 points post-connect, waits
+  ≤5 s, asserts all 3 are returned by an `st_dwithin` query on Origin.
+- `spatial_delete_replicates_to_origin` — inserts 3 points, confirms they
+  appear, deletes the target on Lite, waits ≤5 s, asserts the target is gone
+  while background points remain.
+- `spatial_pre_connection_inserts_sync_after_connect` — inserts points before the
+  sync task starts; verifies they replicate once the connection is established.
+
+Unit tests for `SpatialOutbound` live in `src/sync/spatial_outbound.rs`
+(enqueue/drain/ack/requeue invariants).  `spatial_handler.rs` contains
+`SyncSession` unit tests covering unauthenticated rejection, geometry
+deserialisation failure, successful dispatch, and dispatch-failure paths.
