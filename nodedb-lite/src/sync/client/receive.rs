@@ -1,7 +1,8 @@
 //! Receive-path handlers: shape snapshot/delta, clock sync, sequence gap detection, resync.
 
 use nodedb_types::sync::wire::{
-    ResyncReason, ResyncRequestMsg, ShapeDeltaMsg, ShapeSnapshotMsg, VectorClockSyncMsg,
+    ArrayAckMsg, ResyncReason, ResyncRequestMsg, ShapeDeltaMsg, ShapeSnapshotMsg,
+    VectorClockSyncMsg,
 };
 
 use super::state::SyncClient;
@@ -94,6 +95,19 @@ impl SyncClient {
     /// Take the pending re-sync request (consumed by delta push loop).
     pub async fn take_pending_resync(&self) -> Option<ResyncRequestMsg> {
         self.pending_resync.lock().await.take()
+    }
+
+    /// Store a pending `ArrayAck` (set by the dispatch path on successful apply).
+    ///
+    /// A newer ack overwrites an older one: sending the highest applied HLC is
+    /// sufficient to advance Origin's GC frontier.
+    pub async fn set_pending_array_ack(&self, msg: ArrayAckMsg) {
+        *self.pending_array_ack.lock().await = Some(msg);
+    }
+
+    /// Take the pending `ArrayAck` (consumed by the push loop).
+    pub async fn take_pending_array_ack(&self) -> Option<ArrayAckMsg> {
+        self.pending_array_ack.lock().await.take()
     }
 }
 

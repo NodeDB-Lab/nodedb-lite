@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use nodedb_types::sync::wire::ResyncRequestMsg;
+use nodedb_types::sync::wire::{ArrayAckMsg, ResyncRequestMsg};
 
 use super::config::{SyncConfig, SyncState};
 use crate::sync::clock::VectorClock;
@@ -51,6 +51,12 @@ pub struct SyncClient {
     pub(super) token_refresh_pending: Arc<Mutex<bool>>,
     /// Whether delta push is paused due to auth failure (awaiting refresh).
     pub(super) push_paused_for_auth: Arc<Mutex<bool>>,
+    /// Pending `ArrayAck` to send on the next push-loop tick.
+    ///
+    /// Set by `dispatch_frame` when an `ArrayDelta` or `ArrayDeltaBatch` is
+    /// successfully applied. The push loop drains it and transmits it to Origin
+    /// to advance the GC frontier.
+    pub(super) pending_array_ack: Arc<Mutex<Option<ArrayAckMsg>>>,
 }
 
 impl SyncClient {
@@ -83,6 +89,7 @@ impl SyncClient {
             token_set_at_ms: Arc::new(Mutex::new(crate::runtime::now_millis())),
             token_refresh_pending: Arc::new(Mutex::new(false)),
             push_paused_for_auth: Arc::new(Mutex::new(false)),
+            pending_array_ack: Arc::new(Mutex::new(None)),
         }
     }
 

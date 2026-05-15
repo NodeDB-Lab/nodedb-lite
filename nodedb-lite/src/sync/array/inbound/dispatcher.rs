@@ -81,6 +81,13 @@ impl<S: StorageEngineSync> ArrayInbound<S> {
         }
     }
 
+    /// The stable replica identity for this Lite peer.
+    ///
+    /// Used by the transport layer to construct `ArrayAckMsg` bodies.
+    pub fn replica_id(&self) -> u64 {
+        self.replica.replica_id().as_u64()
+    }
+
     /// Drive [`nodedb_array::sync::apply::apply_op`] on a borrowed
     /// [`LiteApplyEngine`].
     pub(super) fn apply_single_op(&self, op: &ArrayOp) -> Result<ApplyOutcome, LiteError> {
