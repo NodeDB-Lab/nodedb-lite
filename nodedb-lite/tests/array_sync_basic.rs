@@ -1,6 +1,14 @@
-// Note: bypasses WebSocket transport; exercises wire-message handlers directly.
-// Phases F-I (Origin receive/send/catch-up/distributed) are not yet wired,
-// so "Origin" in this file is an in-process Lite inbound + engine state.
+//! Edge-side simulation — does NOT exercise real Origin transport.
+//! All tests here call Lite's inbound/outbound handlers directly, bypassing
+//! the WebSocket connection to a live Origin node.
+//!
+//! The real-transport round-trip (Lite → Origin WebSocket → Lite) is not covered
+//! by any test in this file.  See §13 of the release checklist for the decision
+//! record and the placeholder real-transport test in `tests/array_sync_interop.rs`.
+//!
+//! Original note: Phases F-I (Origin receive/send/catch-up/distributed) are not
+//! yet validated end-to-end, so "Origin" in this file is an in-process Lite
+//! inbound + engine state.
 
 mod common;
 
