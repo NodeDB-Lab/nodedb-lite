@@ -335,6 +335,76 @@ impl RedbStorage {
         Ok(results)
     }
 
+    fn scan_range_bounded_inner(
+        db: &Mutex<Database>,
+        ns: Namespace,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        limit: Option<usize>,
+    ) -> Result<Vec<super::engine::KvPair>, LiteError> {
+        let ns_byte = ns as u8;
+
+        let start_key: Vec<u8> = match start {
+            Some(s) => {
+                let mut k = Vec::with_capacity(1 + s.len());
+                k.push(ns_byte);
+                k.extend_from_slice(s);
+                k
+            }
+            None => vec![ns_byte],
+        };
+
+        // Build end key. None means the next namespace byte (open end for this ns).
+        let end_key: Vec<u8> = match end {
+            Some(e) => {
+                let mut k = Vec::with_capacity(1 + e.len());
+                k.push(ns_byte);
+                k.extend_from_slice(e);
+                k
+            }
+            None => vec![ns_byte + 1],
+        };
+
+        let cap = limit.unwrap_or(usize::MAX).min(1024);
+        let db = db.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let txn = db.begin_read().map_err(|e| LiteError::Storage {
+            detail: format!("read txn failed: {e}"),
+        })?;
+        let table = match txn.open_table(TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(LiteError::Storage {
+                    detail: format!("open table failed: {e}"),
+                });
+            }
+        };
+
+        let range = table
+            .range(start_key.as_slice()..end_key.as_slice())
+            .map_err(|e| LiteError::Storage {
+                detail: format!("bounded range scan failed: {e}"),
+            })?;
+
+        let effective_limit = limit.unwrap_or(usize::MAX);
+        let mut results = Vec::with_capacity(cap);
+        for entry in range {
+            if results.len() >= effective_limit {
+                break;
+            }
+            let entry = entry.map_err(|e| LiteError::Storage {
+                detail: format!("range iteration failed: {e}"),
+            })?;
+            let k = entry.0.value();
+            if k[0] != ns_byte {
+                break;
+            }
+            results.push((Self::strip_ns(k).to_vec(), entry.1.value().to_vec()));
+        }
+
+        Ok(results)
+    }
+
     fn count_inner(db: &Mutex<Database>, ns: Namespace) -> Result<u64, LiteError> {
         let ns_byte = ns as u8;
         let start = vec![ns_byte];
@@ -554,6 +624,16 @@ impl crate::storage::engine::StorageEngineSync for RedbStorage {
         limit: usize,
     ) -> Result<Vec<super::engine::KvPair>, LiteError> {
         Self::scan_range_inner(&self.db, ns, start, limit)
+    }
+
+    fn scan_range_bounded_sync(
+        &self,
+        ns: Namespace,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        limit: Option<usize>,
+    ) -> Result<Vec<super::engine::KvPair>, LiteError> {
+        Self::scan_range_bounded_inner(&self.db, ns, start, end, limit)
     }
 
     fn count_sync(&self, ns: Namespace) -> Result<u64, LiteError> {

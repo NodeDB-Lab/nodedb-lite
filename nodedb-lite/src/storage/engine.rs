@@ -98,6 +98,21 @@ pub trait StorageEngineSync: StorageEngine {
         limit: usize,
     ) -> Result<Vec<KvPair>, LiteError>;
 
+    /// Sync bounded range scan: return entries where `start <= key < end`.
+    ///
+    /// - `start = None` means the beginning of the namespace.
+    /// - `end = None` means the end of the namespace.
+    /// - `limit = None` means no cap.
+    ///
+    /// Results are ordered by key (lexicographic byte order).
+    fn scan_range_bounded_sync(
+        &self,
+        ns: Namespace,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        limit: Option<usize>,
+    ) -> Result<Vec<KvPair>, LiteError>;
+
     /// Sync count: return the number of entries in a namespace.
     fn count_sync(&self, ns: Namespace) -> Result<u64, LiteError>;
 }
