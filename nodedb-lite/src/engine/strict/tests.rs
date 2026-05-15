@@ -97,7 +97,13 @@ fn crm_schema() -> nodedb_types::columnar::StrictSchema {
         ColumnDef::required("id", ColumnType::Int64).with_primary_key(),
         ColumnDef::required("name", ColumnType::String),
         ColumnDef::nullable("email", ColumnType::String),
-        ColumnDef::required("balance", ColumnType::Decimal),
+        ColumnDef::required(
+            "balance",
+            ColumnType::Decimal {
+                precision: 18,
+                scale: 4,
+            },
+        ),
         ColumnDef::nullable("active", ColumnType::Bool),
     ])
     .expect("valid schema")

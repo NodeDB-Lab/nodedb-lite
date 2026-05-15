@@ -36,7 +36,7 @@ pub fn write_segment<S: StorageEngineSync>(
                 detail: format!("append_sparse: {e}"),
             })?;
     }
-    let bytes = writer.finish().map_err(|e| LiteError::Storage {
+    let bytes = writer.finish(None).map_err(|e| LiteError::Storage {
         detail: format!("segment finish: {e}"),
     })?;
 

@@ -477,7 +477,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
 
             let writer = SegmentWriter::new(profile_tag);
             let segment_bytes = writer
-                .write_segment(&schema, &columns, row_count)
+                .write_segment(&schema, &columns, row_count, None)
                 .map_err(columnar_err_to_lite)?;
 
             let seg_key = format!("{collection}:seg:{segment_id}");
@@ -491,7 +491,11 @@ impl<S: StorageEngine> ColumnarEngine<S> {
                     detail: e.to_string(),
                 })?;
 
-            s.mutation.on_memtable_flushed(segment_id);
+            s.mutation
+                .on_memtable_flushed(segment_id as u64)
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("on_memtable_flushed: {e}"),
+                })?;
 
             let mut del_ops: Vec<(String, Vec<u8>)> = Vec::new();
             for (&seg_id, bitmap) in s.mutation.delete_bitmaps() {
@@ -571,7 +575,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
             let s = Self::lock_state(&state_arc)?;
             let mut to_compact = Vec::new();
             for seg_meta in &s.segments {
-                if let Some(bitmap) = s.mutation.delete_bitmap(seg_meta.segment_id)
+                if let Some(bitmap) = s.mutation.delete_bitmap(seg_meta.segment_id as u64)
                     && bitmap.should_compact(seg_meta.row_count, 0.2)
                 {
                     to_compact.push(seg_meta.segment_id);
@@ -588,7 +592,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
             };
             let mut bitmaps = HashMap::new();
             for &seg_id in &to_compact {
-                if let Some(b) = s.mutation.delete_bitmap(seg_id) {
+                if let Some(b) = s.mutation.delete_bitmap(seg_id as u64) {
                     bitmaps.insert(seg_id, b.clone());
                 }
             }
@@ -619,6 +623,8 @@ impl<S: StorageEngine> ColumnarEngine<S> {
                 bitmap,
                 &snap.schema,
                 snap.profile_tag,
+                None,
+                None,
             )
             .map_err(columnar_err_to_lite)?;
 
@@ -702,7 +708,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         let guard = self.collections.read().ok()?;
         let state_arc = guard.get(collection)?;
         let s = state_arc.lock().ok()?;
-        s.mutation.delete_bitmap(segment_id).cloned()
+        s.mutation.delete_bitmap(segment_id as u64).cloned()
     }
 
     /// Row count across all segments + memtable for a collection.
@@ -738,7 +744,7 @@ fn rebuild_pk_from_column(
                     mutation.pk_index_mut().upsert(
                         pk_bytes,
                         RowLocation {
-                            segment_id,
+                            segment_id: segment_id as u64,
                             row_index: row_idx as u32,
                         },
                     );
@@ -758,7 +764,7 @@ fn rebuild_pk_from_column(
                     mutation.pk_index_mut().upsert(
                         pk_bytes,
                         RowLocation {
-                            segment_id,
+                            segment_id: segment_id as u64,
                             row_index: row_idx as u32,
                         },
                     );

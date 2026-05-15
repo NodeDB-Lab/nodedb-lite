@@ -35,6 +35,7 @@ impl<S: StorageEngine> LiteCatalog<S> {
 impl<S: StorageEngine> SqlCatalog for LiteCatalog<S> {
     fn get_collection(
         &self,
+        _database_id: nodedb_types::id::DatabaseId,
         name: &str,
     ) -> Result<Option<CollectionInfo>, nodedb_sql::catalog::SqlCatalogError> {
         // Check strict collections first.
@@ -48,6 +49,7 @@ impl<S: StorageEngine> SqlCatalog for LiteCatalog<S> {
                     nullable: c.nullable,
                     is_primary_key: c.primary_key,
                     default: c.default.clone(),
+                    raw_type: Some(format!("{:?}", c.column_type)),
                 })
                 .collect();
             let pk = schema
@@ -63,6 +65,8 @@ impl<S: StorageEngine> SqlCatalog for LiteCatalog<S> {
                 has_auto_tier: false,
                 indexes: Vec::new(),
                 bitemporal: false,
+                primary: nodedb_types::PrimaryEngine::Document,
+                vector_primary: None,
             }));
         }
 
@@ -76,6 +80,8 @@ impl<S: StorageEngine> SqlCatalog for LiteCatalog<S> {
                 has_auto_tier: false,
                 indexes: Vec::new(),
                 bitemporal: false,
+                primary: nodedb_types::PrimaryEngine::Document,
+                vector_primary: None,
             }));
         }
 
@@ -92,11 +98,14 @@ impl<S: StorageEngine> SqlCatalog for LiteCatalog<S> {
                     nullable: false,
                     is_primary_key: true,
                     default: None,
+                    raw_type: None,
                 }],
                 primary_key: Some("id".into()),
                 has_auto_tier: false,
                 indexes: Vec::new(),
                 bitemporal: false,
+                primary: nodedb_types::PrimaryEngine::Document,
+                vector_primary: None,
             }));
         }
 
@@ -113,7 +122,7 @@ fn convert_column_type(ct: &nodedb_types::columnar::ColumnType) -> SqlDataType {
         ColumnType::Bool => SqlDataType::Bool,
         ColumnType::Bytes | ColumnType::Geometry | ColumnType::Json => SqlDataType::Bytes,
         ColumnType::Timestamp | ColumnType::SystemTimestamp => SqlDataType::Timestamp,
-        ColumnType::Decimal | ColumnType::Uuid | ColumnType::Ulid | ColumnType::Regex => {
+        ColumnType::Decimal { .. } | ColumnType::Uuid | ColumnType::Ulid | ColumnType::Regex => {
             SqlDataType::String
         }
         ColumnType::Duration => SqlDataType::Int64,
@@ -121,5 +130,6 @@ fn convert_column_type(ct: &nodedb_types::columnar::ColumnType) -> SqlDataType {
             SqlDataType::Bytes
         }
         ColumnType::Vector(dim) => SqlDataType::Vector(*dim as usize),
+        _ => SqlDataType::Bytes,
     }
 }

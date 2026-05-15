@@ -65,7 +65,7 @@ impl CollectionState {
         let decoder = TupleDecoder::new(&schema);
         // Initial version maps to current column count.
         let mut version_column_counts = HashMap::new();
-        version_column_counts.insert(schema.version, schema.columns.len());
+        version_column_counts.insert(schema.version as u16, schema.columns.len());
         Self {
             schema,
             encoder,

@@ -177,7 +177,7 @@ mod tests {
 
         // Empty segment.
         let writer = nodedb_array::SegmentWriter::new(hash);
-        let seg_bytes = writer.finish().unwrap();
+        let seg_bytes = writer.finish(None).unwrap();
         let seg_id = manifest.push_segment(seg_bytes.len() as u64);
         storage
             .put_sync(

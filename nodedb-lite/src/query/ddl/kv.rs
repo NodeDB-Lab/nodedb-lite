@@ -87,6 +87,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 format!(" (ttl: {field} + {offset_ms}ms)")
             }
             None => String::new(),
+            Some(_) => String::new(),
         };
 
         Ok(QueryResult {

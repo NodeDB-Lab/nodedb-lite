@@ -197,7 +197,7 @@ impl<S: StorageEngine> StrictEngine<S> {
                     // pad with Null for columns added after that version.
                     let old_col_count = state
                         .version_column_counts
-                        .get(&tuple_version)
+                        .get(&(tuple_version as u16))
                         .copied()
                         .unwrap_or(state.schema.columns.len());
 

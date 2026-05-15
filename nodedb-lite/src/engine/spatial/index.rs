@@ -122,7 +122,7 @@ impl SpatialIndexManager {
     pub fn checkpoint_all(&self) -> Vec<(String, String, Vec<u8>)> {
         let mut results = Vec::new();
         for ((collection, field), tree) in &self.indices {
-            match tree.checkpoint_to_bytes() {
+            match tree.checkpoint_to_bytes(None) {
                 Ok(bytes) => results.push((collection.clone(), field.clone(), bytes)),
                 Err(e) => {
                     tracing::error!(
@@ -143,7 +143,7 @@ impl SpatialIndexManager {
     pub fn restore_all(checkpoints: &[(String, String, Vec<u8>)]) -> Self {
         let mut manager = Self::new();
         for (collection, field, bytes) in checkpoints {
-            match RTree::from_checkpoint(bytes) {
+            match RTree::from_checkpoint(bytes, None) {
                 Ok(tree) => {
                     // Rebuild doc_to_entry from restored entries.
                     // Entry IDs are opaque u64s; we reconstruct the mapping

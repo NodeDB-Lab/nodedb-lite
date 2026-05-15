@@ -139,6 +139,7 @@ impl FtsCollectionManager {
         let mode = match params.mode {
             QueryMode::Or => FtsQueryMode::Or,
             QueryMode::And => FtsQueryMode::And,
+            _ => FtsQueryMode::Or,
         };
         let raw = idx
             .search_with_mode(0, &key, query, top_k, params.fuzzy, mode, None)

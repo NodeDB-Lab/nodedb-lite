@@ -201,10 +201,10 @@ impl<S: StorageEngine> StrictEngine<S> {
         }
         new_state
             .version_column_counts
-            .insert(old_version, old_col_count);
+            .insert(old_version as u16, old_col_count);
         new_state
             .version_column_counts
-            .insert(new_schema.version, new_schema.columns.len());
+            .insert(new_schema.version as u16, new_schema.columns.len());
 
         // Persist new schema (lock dropped).
         let meta_key = format!("{META_STRICT_SCHEMA_PREFIX}{name}");
@@ -279,7 +279,7 @@ impl<S: StorageEngine> StrictEngine<S> {
 
             let old_col_count = state
                 .version_column_counts
-                .get(&tuple_version)
+                .get(&(tuple_version as u16))
                 .copied()
                 .unwrap_or(state.schema.columns.len());
 
