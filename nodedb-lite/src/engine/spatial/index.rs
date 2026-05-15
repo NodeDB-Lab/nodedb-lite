@@ -8,6 +8,12 @@
 
 use std::collections::HashMap;
 
+type CheckpointData = (
+    Vec<(String, String, Vec<u8>)>,
+    HashMap<(String, String), u64>,
+    u64,
+);
+
 use nodedb_spatial::rtree::{RTree, RTreeEntry};
 use nodedb_types::BoundingBox;
 use nodedb_types::geometry::Geometry;
@@ -137,33 +143,63 @@ impl SpatialIndexManager {
         results
     }
 
-    /// Restore R-trees from checkpoint data.
+    /// Return the data needed by the checkpoint module to persist full state.
     ///
-    /// Takes a vec of `(collection, field, rtree_bytes)`.
+    /// Returns `(rtree_checkpoints, doc_to_entry, next_id)`.
+    pub fn checkpoint_data(&self) -> CheckpointData {
+        (
+            self.checkpoint_all(),
+            self.doc_to_entry.clone(),
+            self.next_id,
+        )
+    }
+
+    /// Load a fully-restored checkpoint.
+    ///
+    /// Replaces the current in-memory state with the provided R-tree
+    /// checkpoints and the exact `doc_id → entry_id` mapping that was
+    /// serialised at flush time.
+    pub fn load_checkpoint(
+        &mut self,
+        checkpoints: &[(String, String, Vec<u8>)],
+        doc_to_entry: HashMap<(String, String), u64>,
+        next_id: u64,
+    ) {
+        self.doc_to_entry = doc_to_entry;
+        self.next_id = next_id;
+        for (collection, field, bytes) in checkpoints {
+            match RTree::from_checkpoint(bytes, None) {
+                Ok(tree) => {
+                    self.indices
+                        .insert((collection.clone(), field.clone()), tree);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        collection = %collection,
+                        field = %field,
+                        error = %e,
+                        "spatial R-tree restore failed; collection will be empty until rebuilt"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Restore R-trees from raw checkpoint bytes only (no doc_to_entry).
+    ///
+    /// Used as a fallback when no docmap is available (e.g. legacy checkpoints
+    /// written before this field was introduced). After restoration, upserts
+    /// and deletes of already-indexed docs may not evict stale entries; a full
+    /// rebuild from documents is the reliable recovery path in that case.
     pub fn restore_all(checkpoints: &[(String, String, Vec<u8>)]) -> Self {
         let mut manager = Self::new();
         for (collection, field, bytes) in checkpoints {
             match RTree::from_checkpoint(bytes, None) {
                 Ok(tree) => {
-                    // Rebuild doc_to_entry from restored entries.
-                    // Entry IDs are opaque u64s; we reconstruct the mapping
-                    // assuming entry.id was originally assigned to collection:doc_id.
-                    // Since the R-tree doesn't store doc_ids, we record the
-                    // entry_id → (collection, entry_id_as_string) mapping so that
-                    // subsequent upserts can remove stale entries.
                     let max_id = tree.entries().iter().map(|e| e.id).max().unwrap_or(0);
                     if max_id >= manager.next_id {
                         manager.next_id = max_id + 1;
                     }
-
-                    // Rebuild doc_to_entry: entry IDs map back to themselves
-                    // as synthetic doc keys. The real doc_id mapping is rebuilt
-                    // when rebuild_from_documents() is called on cold start.
-                    for entry in tree.entries() {
-                        let doc_key = (collection.clone(), format!("__entry_{}", entry.id));
-                        manager.doc_to_entry.insert(doc_key, entry.id);
-                    }
-
                     manager
                         .indices
                         .insert((collection.clone(), field.clone()), tree);

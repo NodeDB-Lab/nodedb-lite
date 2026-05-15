@@ -1,3 +1,4 @@
+pub mod checkpoint;
 pub mod manager;
 
 pub use manager::FtsCollectionManager;
@@ -8,5 +9,5 @@ pub use nodedb_fts::backend::FtsBackend;
 pub use nodedb_fts::backend::memory::MemoryBackend;
 pub use nodedb_fts::posting::{MatchOffset, Posting, QueryMode, TextSearchResult};
 
-/// Type alias for Lite's in-memory FTS index (no persistence, rebuilt on restart).
+/// Type alias for Lite's persistent FTS index (serialized to redb on flush).
 pub type LiteFtsIndex = FtsIndex<MemoryBackend>;

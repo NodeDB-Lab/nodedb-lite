@@ -1,10 +1,11 @@
-//! Per-collection in-memory FTS manager for Lite.
+//! Per-collection FTS manager for Lite.
 //!
 //! Wraps `nodedb_fts::FtsIndex<MemoryBackend>` with per-collection management:
 //! - Incremental insert/remove on document put/delete
 //! - Multi-field per-collection keying (`collection:field`)
 //! - BM25 search delegated directly to nodedb-fts (BMW, analyzers, fuzzy)
-//! - Rebuilt from CRDT state on cold start (no persistence — in-RAM only)
+//! - Persistent: checkpoint serialized to `Namespace::Fts` on `flush()`,
+//!   restored on `NodeDbLite::open` without re-tokenizing source documents.
 //!
 //! This is the canonical FTS implementation for Lite. Origin uses
 //! `FtsIndex<RedbBackend>` in `engine/sparse/fts_redb/` for persistence.
@@ -201,6 +202,35 @@ impl FtsCollectionManager {
     pub fn drop_collection(&mut self, collection: &str) {
         let prefix = format!("{collection}:");
         self.indices.retain(|k, _| !k.starts_with(&prefix));
+    }
+
+    // ── Checkpoint helpers (used by core.rs flush/restore) ────────────────────
+
+    /// Borrow the index map, surrogate map, and next-surrogate counter for
+    /// serialization.  Called by `checkpoint::flush_fts`.
+    pub(crate) fn checkpoint_data(
+        &self,
+    ) -> (
+        &HashMap<String, FtsIndex<MemoryBackend>>,
+        &HashMap<String, u32>,
+        u32,
+    ) {
+        (&self.indices, &self.id_to_surrogate, self.next_surrogate)
+    }
+
+    /// Replace internal state from a restored checkpoint.  Called by
+    /// `restore_fts_indices` in `core.rs` when a valid checkpoint is found.
+    pub(crate) fn load_checkpoint(
+        &mut self,
+        indices: HashMap<String, FtsIndex<MemoryBackend>>,
+        id_to_surrogate: HashMap<String, u32>,
+        surrogate_to_id: HashMap<u32, String>,
+        next_surrogate: u32,
+    ) {
+        self.indices = indices;
+        self.id_to_surrogate = id_to_surrogate;
+        self.surrogate_to_id = surrogate_to_id;
+        self.next_surrogate = next_surrogate;
     }
 }
 
