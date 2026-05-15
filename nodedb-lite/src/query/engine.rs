@@ -91,8 +91,48 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             }
 
             SqlPlan::Scan {
-                collection, engine, ..
-            } => self.execute_scan(collection, engine),
+                collection,
+                engine,
+                sort_keys,
+                limit,
+                window_functions,
+                filters,
+                ..
+            } => {
+                // Guard unsupported scan modifiers. Silently ignoring these
+                // would produce wrong results (ORDER BY/LIMIT stripped,
+                // WHERE clause not applied).
+                if !sort_keys.is_empty() {
+                    return Err(LiteError::Unsupported {
+                        detail: "ORDER BY on collections is not supported in Lite 0.1.0"
+                            .to_string(),
+                    });
+                }
+                if limit.is_some() {
+                    return Err(LiteError::Unsupported {
+                        detail: "LIMIT on collections is not supported in Lite 0.1.0".to_string(),
+                    });
+                }
+                if !window_functions.is_empty() {
+                    return Err(LiteError::Unsupported {
+                        detail: "window functions (OVER) are not supported in Lite 0.1.0"
+                            .to_string(),
+                    });
+                }
+                // Guard complex WHERE filters that Lite cannot evaluate.
+                // A WHERE id = '<key>' is handled via PointGet (not Scan),
+                // so any filter reaching Scan is a predicate Lite cannot apply.
+                if !filters.is_empty() {
+                    return Err(LiteError::Unsupported {
+                        detail: format!(
+                            "WHERE predicates on collections are not supported in Lite 0.1.0 \
+                             (got {} filter(s)); use point-get by primary key instead",
+                            filters.len()
+                        ),
+                    });
+                }
+                self.execute_scan(collection, engine)
+            }
             SqlPlan::PointGet {
                 collection,
                 engine,
@@ -120,7 +160,9 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             SqlPlan::Upsert {
                 collection, rows, ..
             } => self.execute_upsert(collection, rows),
-            _ => Err(LiteError::Query(format!("unsupported plan: {plan:?}"))),
+            _ => Err(LiteError::Unsupported {
+                detail: format!("plan variant not supported in Lite 0.1.0: {plan:?}"),
+            }),
         }
     }
 

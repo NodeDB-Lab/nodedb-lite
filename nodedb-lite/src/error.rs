@@ -32,6 +32,10 @@ pub enum LiteError {
 
     #[error("backpressure: {detail}")]
     Backpressure { detail: String },
+
+    /// Feature or SQL construct not supported in this Lite beta release.
+    #[error("unsupported: {detail}")]
+    Unsupported { detail: String },
 }
 
 impl From<redb::Error> for LiteError {
