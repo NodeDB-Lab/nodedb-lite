@@ -18,8 +18,10 @@ use crate::storage::engine::{StorageEngine, StorageEngineSync, WriteOp};
 
 /// Storage key constants.
 pub(crate) const META_HNSW_COLLECTIONS: &[u8] = b"meta:hnsw_collections";
-pub(crate) const META_CSR: &[u8] = b"meta:csr_checkpoint";
-pub(crate) const META_SPATIAL_INDEXES: &[u8] = b"meta:spatial_indexes";
+/// Legacy single-CSR checkpoint key (pre-0.1.0). Ignored on open; deleted if present.
+pub(crate) const META_CSR_LEGACY: &[u8] = b"meta:csr_checkpoint";
+/// List of collection names that have a CSR checkpoint (MessagePack Vec<String>).
+pub(crate) const META_CSR_COLLECTIONS: &[u8] = b"meta:csr_collections";
 pub(crate) const META_CRDT_SNAPSHOT: &[u8] = b"crdt:snapshot";
 pub(crate) const META_CRDT_DELTAS: &[u8] = b"crdt:pending_deltas";
 /// Last flushed mutation_id — used for partial flush safety.
@@ -35,8 +37,8 @@ pub struct NodeDbLite<S: StorageEngine + StorageEngineSync> {
     pub(crate) storage: Arc<S>,
     /// Per-collection HNSW indices.
     pub(crate) hnsw_indices: Mutex<HashMap<String, HnswIndex>>,
-    /// Single CSR graph index (covers all collections).
-    pub(crate) csr: Mutex<CsrIndex>,
+    /// Per-collection CSR graph indices, keyed by collection name.
+    pub(crate) csr: Mutex<HashMap<String, CsrIndex>>,
     /// CRDT engine for delta generation and sync.
     /// Arc-wrapped for sharing with the query engine's TableProvider.
     pub(crate) crdt: Arc<Mutex<CrdtEngine>>,
@@ -88,12 +90,36 @@ pub struct NodeDbLite<S: StorageEngine + StorageEngineSync> {
     pub(crate) array_outbound: Arc<crate::sync::array::ArrayOutbound<S>>,
     /// Array CRDT receive path: applies inbound wire messages from Origin.
     #[cfg(not(target_arch = "wasm32"))]
-    #[allow(dead_code)]
     pub(crate) array_inbound: Arc<crate::sync::array::ArrayInbound<S>>,
     /// Per-array last-seen HLC tracker for catch-up requests.
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)]
     pub(crate) array_catchup: Arc<crate::sync::array::CatchupTracker<S>>,
+    /// Outbound queue for columnar insert sync.
+    ///
+    /// Shared with `ColumnarEngine` so inserts are automatically enqueued.
+    /// `None` when sync is disabled.
+    pub(crate) columnar_outbound: Option<Arc<crate::sync::ColumnarOutbound>>,
+    /// Outbound queue for vector insert/delete sync.
+    ///
+    /// Populated by `vector_insert_impl` / `vector_delete_impl` when sync is
+    /// enabled. `None` when sync is disabled.
+    pub(crate) vector_outbound: Option<Arc<crate::sync::VectorOutbound>>,
+    /// Outbound queue for FTS index/delete sync.
+    ///
+    /// Populated by `index_document_text` / `remove_document_text` when sync
+    /// is enabled. `None` when sync is disabled.
+    pub(crate) fts_outbound: Option<Arc<crate::sync::FtsOutbound>>,
+    /// Outbound queue for spatial geometry insert/delete sync.
+    ///
+    /// Populated by `spatial_insert` / `spatial_delete` when sync is enabled.
+    /// `None` when sync is disabled.
+    pub(crate) spatial_outbound: Option<Arc<crate::sync::SpatialOutbound>>,
+    /// Outbound queue for timeseries-profile columnar insert sync.
+    ///
+    /// Shared with `ColumnarEngine` so timeseries inserts are automatically
+    /// enqueued.  `None` when sync is disabled.
+    pub(crate) timeseries_outbound: Option<Arc<crate::sync::TimeseriesOutbound>>,
     /// When `false`, KV operations go directly to redb, bypassing Loro.
     /// Other engines (vector, graph, document) are unaffected.
     pub(crate) sync_enabled: bool,
@@ -239,29 +265,20 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             }
         }
 
-        // ── Restore CSR (with CRC32C validation) ──
-        let csr = match storage.get(Namespace::Graph, META_CSR).await? {
-            Some(envelope) => match crate::storage::checksum::unwrap(&envelope) {
-                Some(bytes) => match CsrIndex::from_checkpoint(&bytes) {
-                    Ok(Some(idx)) => idx,
-                    Ok(None) | Err(_) => {
-                        tracing::warn!(
-                            "CSR checkpoint deserialization failed, rebuilding from CRDT edges"
-                        );
-                        CsrIndex::new()
-                    }
-                },
-                None => {
-                    tracing::error!(
-                        "CSR checkpoint CRC32C mismatch — discarding corrupted checkpoint. \
-                         Graph index will be rebuilt from CRDT edge documents."
-                    );
-                    let _ = storage.delete(Namespace::Graph, META_CSR).await;
-                    CsrIndex::new()
-                }
-            },
-            None => CsrIndex::new(),
-        };
+        // ── Delete legacy single-CSR checkpoint if present ──
+        if storage
+            .get(Namespace::Graph, META_CSR_LEGACY)
+            .await?
+            .is_some()
+        {
+            let _ = storage.delete(Namespace::Graph, META_CSR_LEGACY).await;
+        }
+
+        // ── Restore FTS indices ──
+        let fts_manager = Self::restore_fts_indices(&storage).await?;
+
+        // ── Restore per-collection CSR indices ──
+        let csr = Self::restore_csr_indices(&storage).await?;
 
         // ── Restore HNSW indices ──
         let hnsw_indices = Self::restore_hnsw_indices(&storage).await?;
@@ -275,9 +292,49 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             .map_err(NodeDbError::storage)?;
 
         // ── Restore columnar engine ──
-        let columnar = ColumnarEngine::restore(Arc::clone(&storage))
+        let mut columnar = ColumnarEngine::restore(Arc::clone(&storage))
             .await
             .map_err(NodeDbError::storage)?;
+
+        // Wire columnar sync outbound queue when sync is enabled.
+        let columnar_outbound: Option<Arc<crate::sync::ColumnarOutbound>> = if sync_enabled {
+            let q = Arc::new(crate::sync::ColumnarOutbound::new());
+            columnar.set_outbound(Arc::clone(&q));
+            Some(q)
+        } else {
+            None
+        };
+
+        // Wire vector sync outbound queue when sync is enabled.
+        let vector_outbound: Option<Arc<crate::sync::VectorOutbound>> = if sync_enabled {
+            Some(Arc::new(crate::sync::VectorOutbound::new()))
+        } else {
+            None
+        };
+
+        // Wire FTS sync outbound queue when sync is enabled.
+        let fts_outbound_init: Option<Arc<crate::sync::FtsOutbound>> = if sync_enabled {
+            Some(Arc::new(crate::sync::FtsOutbound::new()))
+        } else {
+            None
+        };
+
+        // Wire spatial sync outbound queue when sync is enabled.
+        let spatial_outbound_init: Option<Arc<crate::sync::SpatialOutbound>> = if sync_enabled {
+            Some(Arc::new(crate::sync::SpatialOutbound::new()))
+        } else {
+            None
+        };
+
+        // Wire timeseries sync outbound queue when sync is enabled.
+        let timeseries_outbound_init: Option<Arc<crate::sync::TimeseriesOutbound>> = if sync_enabled
+        {
+            let q = Arc::new(crate::sync::TimeseriesOutbound::new());
+            columnar.set_timeseries_outbound(Arc::clone(&q));
+            Some(q)
+        } else {
+            None
+        };
 
         let crdt = Arc::new(Mutex::new(crdt));
         let strict = Arc::new(strict);
@@ -357,7 +414,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             search_ef: 128,
             vector_id_map: Mutex::new(HashMap::new()),
             query_engine,
-            fts: Mutex::new(crate::engine::fts::FtsCollectionManager::new()),
+            fts: Mutex::new(fts_manager),
             spatial: Mutex::new(spatial),
             secondary_indices: Mutex::new(HashMap::new()),
             strict,
@@ -375,6 +432,11 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             array_inbound,
             #[cfg(not(target_arch = "wasm32"))]
             array_catchup,
+            columnar_outbound,
+            vector_outbound,
+            fts_outbound: fts_outbound_init,
+            spatial_outbound: spatial_outbound_init,
+            timeseries_outbound: timeseries_outbound_init,
             sync_enabled,
             kv_write_buf: Mutex::new(KvWriteBuffer {
                 ops: Vec::with_capacity(1024),
@@ -382,8 +444,16 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             }),
         };
 
-        // Rebuild text indices from CRDT state (cold start).
-        db.rebuild_text_indices();
+        // Rebuild text indices from CRDT state only when no checkpoint exists.
+        // When a checkpoint is present, `restore_fts_indices` has already loaded
+        // the full index without re-tokenizing source documents.
+        {
+            let fts = db.fts.lock_or_recover();
+            if fts.is_empty() {
+                drop(fts);
+                db.rebuild_text_indices();
+            }
+        }
 
         // Rebuild spatial indices if restore produced empty trees.
         // The R-tree checkpoint only stores bounding boxes, not doc IDs.
@@ -397,6 +467,45 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         }
 
         Ok(db)
+    }
+
+    /// Restore per-collection CSR graph indices from storage.
+    async fn restore_csr_indices(storage: &Arc<S>) -> NodeDbResult<HashMap<String, CsrIndex>> {
+        let mut csr_map: HashMap<String, CsrIndex> = HashMap::new();
+        let Some(collections_bytes) = storage.get(Namespace::Meta, META_CSR_COLLECTIONS).await?
+        else {
+            return Ok(csr_map);
+        };
+        let Ok(names) = zerompk::from_msgpack::<Vec<String>>(&collections_bytes) else {
+            return Ok(csr_map);
+        };
+        for name in &names {
+            let key = format!("csr:{name}");
+            if let Some(envelope) = storage.get(Namespace::Graph, key.as_bytes()).await? {
+                match crate::storage::checksum::unwrap(&envelope) {
+                    Some(bytes) => match CsrIndex::from_checkpoint(&bytes) {
+                        Ok(Some(idx)) => {
+                            csr_map.insert(name.clone(), idx);
+                        }
+                        Ok(None) | Err(_) => {
+                            tracing::warn!(
+                                collection = %name,
+                                "CSR checkpoint deserialization failed, will rebuild from CRDT"
+                            );
+                        }
+                    },
+                    None => {
+                        tracing::error!(
+                            collection = %name,
+                            "CSR checkpoint CRC32C mismatch — discarding. \
+                             Will rebuild from CRDT edge documents on next insert."
+                        );
+                        let _ = storage.delete(Namespace::Graph, key.as_bytes()).await;
+                    }
+                }
+            }
+        }
+        Ok(csr_map)
     }
 
     /// Restore HNSW indices from storage.
@@ -442,39 +551,51 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     async fn restore_spatial_indices(
         storage: &Arc<S>,
     ) -> crate::engine::spatial::SpatialIndexManager {
-        let Some(index_list_bytes) = storage
-            .get(Namespace::Meta, META_SPATIAL_INDEXES)
-            .await
-            .ok()
-            .flatten()
-        else {
-            return crate::engine::spatial::SpatialIndexManager::new();
-        };
-
-        let Ok(index_keys) = zerompk::from_msgpack::<Vec<(String, String)>>(&index_list_bytes)
-        else {
-            return crate::engine::spatial::SpatialIndexManager::new();
-        };
-
-        let mut checkpoints = Vec::new();
-        for (collection, field) in &index_keys {
-            let key = format!("spatial:{collection}:{field}");
-            if let Ok(Some(envelope)) = storage.get(Namespace::Spatial, key.as_bytes()).await {
-                match crate::storage::checksum::unwrap(&envelope) {
-                    Some(bytes) => checkpoints.push((collection.clone(), field.clone(), bytes)),
-                    None => {
-                        tracing::error!(
-                            collection = %collection,
-                            field = %field,
-                            "spatial index CRC32C mismatch — discarding"
-                        );
-                        let _ = storage.delete(Namespace::Spatial, key.as_bytes()).await;
-                    }
-                }
+        match crate::engine::spatial::checkpoint::restore_spatial(storage.as_ref()).await {
+            Ok((checkpoints, doc_to_entry, next_id)) if !checkpoints.is_empty() => {
+                let mut mgr = crate::engine::spatial::SpatialIndexManager::new();
+                mgr.load_checkpoint(&checkpoints, doc_to_entry, next_id);
+                mgr
+            }
+            Ok(_) => crate::engine::spatial::SpatialIndexManager::new(),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "spatial checkpoint restore failed — starting with empty index; \
+                     will rebuild from CRDT state on cold open"
+                );
+                crate::engine::spatial::SpatialIndexManager::new()
             }
         }
+    }
 
-        crate::engine::spatial::SpatialIndexManager::restore_all(&checkpoints)
+    /// Restore FTS indices from a persistent checkpoint.
+    ///
+    /// Returns an empty `FtsCollectionManager` when no checkpoint exists (first
+    /// open or after a collection drop).  The caller decides whether to fall
+    /// back to `rebuild_text_indices` — see `open_inner`.
+    async fn restore_fts_indices(
+        storage: &Arc<S>,
+    ) -> NodeDbResult<crate::engine::fts::FtsCollectionManager> {
+        let mut mgr = crate::engine::fts::FtsCollectionManager::new();
+        match crate::engine::fts::checkpoint::restore_fts(storage.as_ref()).await {
+            Ok((indices, id_to_surrogate, surrogate_to_id, next_surrogate))
+                if !indices.is_empty() =>
+            {
+                mgr.load_checkpoint(indices, id_to_surrogate, surrogate_to_id, next_surrogate);
+            }
+            Ok(_) => {
+                // No checkpoint found — caller will rebuild from CRDT state.
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "FTS checkpoint restore failed — starting with empty index; \
+                     will rebuild from CRDT state on cold open"
+                );
+            }
+        }
+        Ok(mgr)
     }
 
     /// Persist all in-memory state to storage (call before shutdown).
@@ -525,19 +646,35 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             });
         }
 
-        // ── Persist CSR (CRC32C wrapped) ──
+        // ── Persist per-collection CSR indices (CRC32C wrapped) ──
         {
-            let csr = self.csr.lock_or_recover();
-            match csr.checkpoint_to_bytes() {
-                Ok(checkpoint) => {
-                    ops.push(WriteOp::Put {
-                        ns: Namespace::Graph,
-                        key: META_CSR.to_vec(),
-                        value: crate::storage::checksum::wrap(&checkpoint),
-                    });
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "CSR checkpoint failed; graph state not persisted");
+            let csr_map = self.csr.lock_or_recover();
+            let names: Vec<String> = csr_map.keys().cloned().collect();
+            let names_bytes = zerompk::to_msgpack_vec(&names)
+                .map_err(|e| NodeDbError::serialization("msgpack", e))?;
+            ops.push(WriteOp::Put {
+                ns: Namespace::Meta,
+                key: META_CSR_COLLECTIONS.to_vec(),
+                value: names_bytes,
+            });
+
+            for (name, index) in csr_map.iter() {
+                let key = format!("csr:{name}");
+                match index.checkpoint_to_bytes() {
+                    Ok(checkpoint) => {
+                        ops.push(WriteOp::Put {
+                            ns: Namespace::Graph,
+                            key: key.into_bytes(),
+                            value: crate::storage::checksum::wrap(&checkpoint),
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            collection = %name,
+                            error = %e,
+                            "CSR checkpoint failed for collection; graph state not persisted"
+                        );
+                    }
                 }
             }
         }
@@ -565,34 +702,31 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             }
         }
 
-        // ── Persist spatial indices ──
-        {
-            let spatial = self.spatial.lock_or_recover();
-            let checkpoints = spatial.checkpoint_all();
-            let index_keys: Vec<(String, String)> = checkpoints
-                .iter()
-                .map(|(c, f, _)| (c.clone(), f.clone()))
-                .collect();
-            let keys_bytes = zerompk::to_msgpack_vec(&index_keys)
-                .map_err(|e| NodeDbError::serialization("msgpack", e))?;
-            ops.push(WriteOp::Put {
-                ns: Namespace::Meta,
-                key: META_SPATIAL_INDEXES.to_vec(),
-                value: keys_bytes,
-            });
-
-            for (collection, field, bytes) in &checkpoints {
-                let key = format!("spatial:{collection}:{field}");
-                ops.push(WriteOp::Put {
-                    ns: Namespace::Spatial,
-                    key: key.into_bytes(),
-                    value: crate::storage::checksum::wrap(bytes),
-                });
-            }
-        }
-
         self.storage
             .batch_write(&ops)
+            .await
+            .map_err(NodeDbError::storage)?;
+
+        // ── Persist spatial indices (separate batch — includes docmap) ────────
+        let (spatial_checkpoints, spatial_doc_to_entry, spatial_next_id) =
+            self.spatial.lock_or_recover().checkpoint_data();
+        crate::engine::spatial::checkpoint::flush_spatial(
+            self.storage.as_ref(),
+            &spatial_checkpoints,
+            &spatial_doc_to_entry,
+            spatial_next_id,
+        )
+        .await?;
+
+        // ── Persist FTS indices (separate batch — potentially large) ──
+        // Serialize synchronously while holding the lock, then write after.
+        let fts_ops = {
+            let fts = self.fts.lock_or_recover();
+            let (indices, id_to_surrogate, next_surrogate) = fts.checkpoint_data();
+            crate::engine::fts::checkpoint::serialize_fts(indices, id_to_surrogate, next_surrogate)?
+        };
+        self.storage
+            .batch_write(&fts_ops)
             .await
             .map_err(NodeDbError::storage)?;
 
@@ -689,6 +823,11 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         self.fts
             .lock_or_recover()
             .index_document(collection, doc_id, &text);
+
+        // Propagate to Origin via sync outbound queue.
+        if let Some(q) = &self.fts_outbound {
+            q.enqueue_index(collection, doc_id, text);
+        }
     }
 
     /// Remove a document from the text index.
@@ -696,6 +835,78 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         self.fts
             .lock_or_recover()
             .remove_document(collection, doc_id);
+
+        // Propagate deletion to Origin via sync outbound queue.
+        if let Some(q) = &self.fts_outbound {
+            q.enqueue_delete(collection, doc_id);
+        }
+    }
+
+    // ── Spatial public API ────────────────────────────────────────────────────
+
+    /// Index a geometry in a collection's spatial index.
+    ///
+    /// `field` identifies which geometry field is being indexed (allows a
+    /// collection to carry multiple spatial fields).  If the document was
+    /// previously indexed under the same `(collection, doc_id)`, the old entry
+    /// is replaced (upsert semantics).
+    pub fn spatial_insert(
+        &self,
+        collection: &str,
+        field: &str,
+        doc_id: &str,
+        geometry: &nodedb_types::geometry::Geometry,
+    ) {
+        let mut spatial = self.spatial.lock_or_recover();
+        spatial.index_document(collection, field, doc_id, geometry);
+        drop(spatial);
+        if let Some(q) = &self.spatial_outbound {
+            q.enqueue_insert(collection, field, doc_id, geometry);
+        }
+    }
+
+    /// Remove a document's geometry from the spatial index.
+    pub fn spatial_delete(&self, collection: &str, field: &str, doc_id: &str) {
+        let mut spatial = self.spatial.lock_or_recover();
+        spatial.remove_document(collection, field, doc_id);
+        drop(spatial);
+        if let Some(q) = &self.spatial_outbound {
+            q.enqueue_delete(collection, field, doc_id);
+        }
+    }
+
+    /// Bounding-box range search: returns all doc entry IDs whose bbox
+    /// intersects the query rectangle.
+    ///
+    /// Returns `(entry_id, bbox)` pairs so callers can resolve back to
+    /// doc_ids through their own mapping if needed.  For the gate tests,
+    /// we expose a convenience wrapper that returns entry IDs directly.
+    pub fn spatial_search_bbox(
+        &self,
+        collection: &str,
+        field: &str,
+        query: &nodedb_types::BoundingBox,
+    ) -> Vec<nodedb_spatial::rtree::RTreeEntry> {
+        let spatial = self.spatial.lock_or_recover();
+        spatial
+            .search(collection, field, query)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Nearest-neighbor search: returns the `k` closest spatial entries to
+    /// the given `(lng, lat)` point.
+    pub fn spatial_nearest(
+        &self,
+        collection: &str,
+        field: &str,
+        lng: f64,
+        lat: f64,
+        k: usize,
+    ) -> Vec<nodedb_spatial::rtree::NnResult> {
+        let spatial = self.spatial.lock_or_recover();
+        spatial.nearest(collection, field, lng, lat, k)
     }
 
     pub(crate) fn ensure_hnsw<'a>(
@@ -717,9 +928,12 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
                 .sum();
             self.governor.report_usage(EngineId::Hnsw, hnsw_bytes);
         }
-        if let Ok(csr) = self.csr.lock() {
-            self.governor
-                .report_usage(EngineId::Csr, csr.estimated_memory_bytes());
+        if let Ok(csr_map) = self.csr.lock() {
+            let total: usize = csr_map
+                .values()
+                .map(|idx| idx.estimated_memory_bytes())
+                .sum();
+            self.governor.report_usage(EngineId::Csr, total);
         }
         if let Ok(crdt) = self.crdt.lock() {
             self.governor

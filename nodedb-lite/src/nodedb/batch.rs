@@ -63,14 +63,22 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         Ok(())
     }
 
-    /// Batch insert graph edges — O(1) CRDT delta export instead of O(N).
-    pub fn batch_graph_insert_edges(&self, edges: &[(&str, &str, &str)]) -> NodeDbResult<()> {
+    /// Batch insert graph edges into a named collection — O(1) CRDT delta
+    /// export instead of O(N). Edges are isolated to `collection`.
+    pub fn batch_graph_insert_edges(
+        &self,
+        collection: &str,
+        edges: &[(&str, &str, &str)],
+    ) -> NodeDbResult<()> {
         if edges.is_empty() {
             return Ok(());
         }
 
         {
-            let mut csr = self.csr.lock_or_recover();
+            let mut csr_map = self.csr.lock_or_recover();
+            let csr = csr_map
+                .entry(collection.to_string())
+                .or_insert_with(crate::engine::graph::index::CsrIndex::new);
             for &(src, dst, label) in edges {
                 let _ = csr.add_edge(src, label, dst);
             }
@@ -80,6 +88,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             let mut crdt = self.crdt.lock_or_recover();
 
             use crate::engine::crdt::engine::{CrdtBatchOp, CrdtField};
+            let edge_coll = format!("__edges__{collection}");
 
             let ops: Vec<(String, Vec<CrdtField<'_>>)> = edges
                 .iter()
@@ -96,7 +105,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
 
             let refs: Vec<CrdtBatchOp<'_>> = ops
                 .iter()
-                .map(|(id, fields)| ("__edges", id.as_str(), fields.as_slice()))
+                .map(|(id, fields)| (edge_coll.as_str(), id.as_str(), fields.as_slice()))
                 .collect();
 
             crdt.batch_upsert(&refs).map_err(NodeDbError::storage)?;
@@ -106,11 +115,14 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         Ok(())
     }
 
-    /// Compact the CSR graph index (merge buffer into dense arrays).
+    /// Compact all per-collection CSR graph indices (merge buffer into dense arrays).
     pub fn compact_graph(&self) -> NodeDbResult<()> {
-        let mut csr = self.csr.lock_or_recover();
-        csr.compact()
-            .map_err(|e| NodeDbError::storage(format!("graph csr compact failed: {e}")))?;
+        let mut csr_map = self.csr.lock_or_recover();
+        for (name, csr) in csr_map.iter_mut() {
+            csr.compact().map_err(|e| {
+                NodeDbError::storage(format!("graph csr compact failed for '{name}': {e}"))
+            })?;
+        }
         Ok(())
     }
 

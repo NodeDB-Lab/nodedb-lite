@@ -155,8 +155,10 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         };
 
         let (csr_nodes, csr_edges) = {
-            let csr = self.csr.lock_or_recover();
-            (csr.node_count(), csr.edge_count())
+            let csr_map = self.csr.lock_or_recover();
+            let nodes: usize = csr_map.values().map(|c| c.node_count()).sum();
+            let edges: usize = csr_map.values().map(|c| c.edge_count()).sum();
+            (nodes, edges)
         };
 
         let (crdt_collections, pending_deltas) = {

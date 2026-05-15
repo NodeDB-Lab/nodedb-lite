@@ -13,41 +13,65 @@ use nodedb_types::graph::GraphStats;
 use nodedb_types::id::{EdgeId, NodeId};
 use nodedb_types::result::{SubGraph, SubGraphEdge, SubGraphNode};
 
-use crate::engine::graph::index::Direction;
+use crate::engine::graph::index::{CsrIndex, Direction};
 use crate::engine::graph::traversal::DEFAULT_MAX_VISITED;
 use crate::nodedb::LockExt;
 use crate::nodedb::NodeDbLite;
 use crate::nodedb::convert::{loro_value_to_document, value_to_loro};
 use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
+/// Returns the CRDT collection name for edges belonging to a graph collection.
+fn edge_crdt_collection(collection: &str) -> String {
+    format!("__edges__{collection}")
+}
+
 impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     /// Breadth-first traversal from `start` up to `depth` hops, returning a
     /// `SubGraph` with node properties and edges materialised from CRDT storage.
     ///
-    /// `collection` is accepted for API parity with Origin but ignored on Lite:
-    /// graph state is single-tenant. Edges are only included when both endpoints
-    /// were reached within the BFS frontier.
+    /// Only edges belonging to `collection` are considered. Edges inserted into
+    /// a different collection are invisible to this traversal.
     pub(super) async fn graph_traverse_impl(
         &self,
-        _collection: &str,
+        collection: &str,
         start: &NodeId,
         depth: u8,
         edge_filter: Option<&EdgeFilter>,
     ) -> NodeDbResult<SubGraph> {
-        let csr = self.csr.lock_or_recover();
-
         let label_strs: Vec<&str> = edge_filter
             .map(|f| f.labels.iter().map(|s| s.as_str()).collect())
             .unwrap_or_default();
 
-        let result = csr.traverse_bfs_with_depth_multi(
-            &[start.as_str()],
-            &label_strs,
-            Direction::Out,
-            depth as usize,
-            DEFAULT_MAX_VISITED,
-        );
+        // Collect BFS result and neighbors in a single lock scope.
+        type BfsResult = (Vec<(String, u8)>, HashMap<String, Vec<(String, String)>>);
+        let (result, neighbors_map): BfsResult = {
+            let csr_map = self.csr.lock_or_recover();
+            match csr_map.get(collection) {
+                None => {
+                    return Ok(SubGraph {
+                        nodes: vec![],
+                        edges: vec![],
+                    });
+                }
+                Some(csr) => {
+                    let bfs = csr.traverse_bfs_with_depth_multi(
+                        &[start.as_str()],
+                        &label_strs,
+                        Direction::Out,
+                        depth as usize,
+                        DEFAULT_MAX_VISITED,
+                    );
+                    let mut nbrs: HashMap<String, Vec<(String, String)>> = HashMap::new();
+                    for (node_name, _) in &bfs {
+                        let n = csr.neighbors_multi(node_name, &label_strs, Direction::Out);
+                        nbrs.insert(node_name.clone(), n);
+                    }
+                    (bfs, nbrs)
+                }
+            }
+        };
 
+        let edge_coll = edge_crdt_collection(collection);
         let crdt = self.crdt.lock_or_recover();
         let mut nodes = Vec::with_capacity(result.len());
         let mut edges = Vec::new();
@@ -66,8 +90,9 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
                 properties,
             });
 
-            let neighbors = csr.neighbors_multi(node_name, &label_strs, Direction::Out);
-            for (label, dst) in &neighbors {
+            let empty = vec![];
+            let neighbors = neighbors_map.get(node_name).unwrap_or(&empty);
+            for (label, dst) in neighbors {
                 if result.iter().any(|(n, _)| n == dst) {
                     let src_id = NodeId::from_validated(node_name.clone());
                     let dst_id = NodeId::from_validated(dst.clone());
@@ -78,7 +103,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
                             ))
                         })?;
                     let edge_key = format!("{edge_id}");
-                    let edge_props = if let Some(loro_val) = crdt.read("__edges", &edge_key) {
+                    let edge_props = if let Some(loro_val) = crdt.read(&edge_coll, &edge_key) {
                         let doc = loro_value_to_document(&edge_key, &loro_val);
                         doc.fields
                             .into_iter()
@@ -102,20 +127,23 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         Ok(SubGraph { nodes, edges })
     }
 
-    /// Insert an edge into the CSR adjacency index and persist a corresponding
-    /// `__edges` CRDT document holding `src`, `dst`, `label`, and user-supplied
-    /// properties. The returned `EdgeId` is the first occurrence id for the
-    /// `(from, to, label)` triple; duplicates re-use the same id slot.
+    /// Insert an edge into the collection-scoped CSR adjacency index and persist
+    /// a corresponding CRDT document holding `src`, `dst`, `label`, and any
+    /// user-supplied properties. Edges are stored under a per-collection CRDT
+    /// namespace so that collections are fully isolated from one another.
     pub(super) async fn graph_insert_edge_impl(
         &self,
-        _collection: &str,
+        collection: &str,
         from: &NodeId,
         to: &NodeId,
         edge_type: &str,
         properties: Option<Document>,
     ) -> NodeDbResult<EdgeId> {
         {
-            let mut csr = self.csr.lock_or_recover();
+            let mut csr_map = self.csr.lock_or_recover();
+            let csr = csr_map
+                .entry(collection.to_string())
+                .or_insert_with(CsrIndex::new);
             let _ = csr.add_edge(from.as_str(), edge_type, to.as_str());
         }
 
@@ -123,6 +151,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             NodeDbError::storage(format!("edge_store: invalid edge label '{edge_type}': {e}"))
         })?;
         let edge_key = format!("{edge_id}");
+        let edge_coll = edge_crdt_collection(collection);
 
         {
             let mut crdt = self.crdt.lock_or_recover();
@@ -138,7 +167,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
                 }
             }
 
-            crdt.upsert("__edges", &edge_key, &fields)
+            crdt.upsert(&edge_coll, &edge_key, &fields)
                 .map_err(NodeDbError::storage)?;
         }
 
@@ -146,40 +175,38 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         Ok(edge_id)
     }
 
-    /// Remove an edge from both the CSR adjacency index and the `__edges` CRDT
-    /// document store. Missing edges in the CSR are silently ignored; the CRDT
-    /// delete is authoritative for persistence.
+    /// Remove an edge from both the collection-scoped CSR index and the
+    /// collection-scoped CRDT edge document store.
     pub(super) async fn graph_delete_edge_impl(
         &self,
-        _collection: &str,
+        collection: &str,
         edge_id: &EdgeId,
     ) -> NodeDbResult<()> {
         let src = edge_id.src.as_str();
         let dst = edge_id.dst.as_str();
         let label = &edge_id.label;
         {
-            let mut csr = self.csr.lock_or_recover();
-            csr.remove_edge(src, label, dst);
+            let mut csr_map = self.csr.lock_or_recover();
+            if let Some(csr) = csr_map.get_mut(collection) {
+                csr.remove_edge(src, label, dst);
+            }
         }
 
         let edge_key = format!("{edge_id}");
+        let edge_coll = edge_crdt_collection(collection);
         {
             let mut crdt = self.crdt.lock_or_recover();
-            crdt.delete("__edges", &edge_key)
+            crdt.delete(&edge_coll, &edge_key)
                 .map_err(NodeDbError::storage)?;
         }
 
         Ok(())
     }
 
-    /// Aggregate edge statistics from the local CRDT edge store.
-    ///
-    /// Lite stores all edges in a single `__edges` CRDT document — there is no
-    /// per-collection partitioning on the Lite backend. When `collection` is
-    /// `Some(name)`, the returned `Vec` contains one entry with
-    /// `collection: name`; when `collection` is `None`, the vec contains one
-    /// entry keyed on `"__edges"`. In both cases the counts reflect the full
-    /// local edge store, not a filtered subset.
+    /// Return edge statistics for `collection`. When `collection` is `Some(name)`,
+    /// counts reflect only the edges in that collection. When `collection` is `None`,
+    /// all known graph collections are aggregated and a single combined entry is
+    /// returned under the key `"*"`.
     ///
     /// `as_of` is not supported on Lite: the backend has no bitemporal store.
     /// Passing `Some(_)` returns an error.
@@ -194,26 +221,37 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             ));
         }
 
-        // Read all persisted edge keys from the CRDT edge store and aggregate.
-        // Each document in "__edges" represents one edge; the src/dst/label fields
-        // provide the node IDs and relationship types for counting.
         let crdt = self.crdt.lock_or_recover();
-        let edge_ids = crdt.list_ids("__edges");
+
+        // Determine which CRDT collections to aggregate.
+        let edge_colls: Vec<String> = match collection {
+            Some(name) => vec![edge_crdt_collection(name)],
+            None => crdt
+                .collection_names()
+                .into_iter()
+                .filter(|c| c.starts_with("__edges__"))
+                .collect(),
+        };
 
         let mut node_ids: HashSet<String> = HashSet::new();
         let mut label_counts: HashMap<String, u64> = HashMap::new();
+        let mut total_edges: u64 = 0;
 
-        for key in &edge_ids {
-            if let Some(loro_val) = crdt.read("__edges", key) {
-                let doc = loro_value_to_document(key, &loro_val);
-                if let Some(label) = doc.get_str("label") {
-                    *label_counts.entry(label.to_string()).or_insert(0) += 1;
-                }
-                if let Some(src) = doc.get_str("src") {
-                    node_ids.insert(src.to_string());
-                }
-                if let Some(dst) = doc.get_str("dst") {
-                    node_ids.insert(dst.to_string());
+        for ec in &edge_colls {
+            let edge_ids = crdt.list_ids(ec);
+            total_edges += edge_ids.len() as u64;
+            for key in &edge_ids {
+                if let Some(loro_val) = crdt.read(ec, key) {
+                    let doc = loro_value_to_document(key, &loro_val);
+                    if let Some(label) = doc.get_str("label") {
+                        *label_counts.entry(label.to_string()).or_insert(0) += 1;
+                    }
+                    if let Some(src) = doc.get_str("src") {
+                        node_ids.insert(src.to_string());
+                    }
+                    if let Some(dst) = doc.get_str("dst") {
+                        node_ids.insert(dst.to_string());
+                    }
                 }
             }
         }
@@ -221,41 +259,42 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         let mut labels: Vec<(String, u64)> = label_counts.into_iter().collect();
         labels.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
 
-        let coll_name = collection.unwrap_or("__edges").to_string();
+        let coll_name = collection.unwrap_or("*").to_string();
         Ok(vec![GraphStats {
             collection: coll_name,
             node_count: node_ids.len() as u64,
-            edge_count: edge_ids.len() as u64,
+            edge_count: total_edges,
             distinct_label_count: labels.len() as u64,
             labels,
         }])
     }
 
-    /// Unweighted BFS shortest path from `from` to `to`, bounded by `max_depth`
-    /// and optionally restricted to a single edge label (the first entry of
-    /// `edge_filter.labels` if present). Returns `Ok(None)` when no path exists
-    /// within the bound. `collection` is accepted for API parity but unused.
+    /// Unweighted BFS shortest path from `from` to `to` within `collection`,
+    /// bounded by `max_depth`. Returns `Ok(None)` when no path exists.
     pub(super) async fn graph_shortest_path_impl(
         &self,
-        _collection: &str,
+        collection: &str,
         from: &NodeId,
         to: &NodeId,
         max_depth: u8,
         edge_filter: Option<&EdgeFilter>,
     ) -> NodeDbResult<Option<Vec<NodeId>>> {
-        let csr = self.csr.lock_or_recover();
         let label_filter = edge_filter
             .and_then(|f| f.labels.first())
             .map(|s| s.as_str());
 
-        let path = csr.shortest_path(
-            from.as_str(),
-            to.as_str(),
-            label_filter,
-            max_depth as usize,
-            DEFAULT_MAX_VISITED,
-            None,
-        );
+        let csr_map = self.csr.lock_or_recover();
+        let path = match csr_map.get(collection) {
+            Some(csr) => csr.shortest_path(
+                from.as_str(),
+                to.as_str(),
+                label_filter,
+                max_depth as usize,
+                DEFAULT_MAX_VISITED,
+                None,
+            ),
+            None => None,
+        };
 
         Ok(path.map(|p| p.into_iter().map(NodeId::from_validated).collect()))
     }
