@@ -295,6 +295,24 @@ impl<S: StorageEngine> StrictEngine<S> {
         Ok(arrays)
     }
 
+    /// Scan all rows in a collection and decode each to `Vec<Value>`.
+    ///
+    /// Returns rows in storage key order. Column order matches the schema
+    /// definition order, consistent with `schema().columns`.
+    pub async fn list_rows(&self, collection: &str) -> Result<Vec<Vec<Value>>, LiteError> {
+        let state = self.get_state(collection)?;
+        let raw_tuples = self.scan_raw(collection).await?;
+        let mut rows = Vec::with_capacity(raw_tuples.len());
+        for bytes in &raw_tuples {
+            let values = state
+                .decoder
+                .extract_all(bytes)
+                .map_err(strict_err_to_lite)?;
+            rows.push(values);
+        }
+        Ok(rows)
+    }
+
     /// Count the number of rows in a collection.
     pub async fn count(&self, collection: &str) -> Result<usize, LiteError> {
         let _state = self.get_state(collection)?;

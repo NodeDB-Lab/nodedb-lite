@@ -76,10 +76,10 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             return Ok(QueryResult::empty());
         }
 
-        self.execute_plan(&plans[0])
+        self.execute_plan(&plans[0]).await
     }
 
-    fn execute_plan(&self, plan: &SqlPlan) -> Result<QueryResult, LiteError> {
+    async fn execute_plan(&self, plan: &SqlPlan) -> Result<QueryResult, LiteError> {
         match plan {
             SqlPlan::ConstantResult { columns, values } => {
                 let row = values.iter().map(sql_value_to_value).collect();
@@ -131,42 +131,54 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                         ),
                     });
                 }
-                self.execute_scan(collection, engine)
+                self.execute_scan(collection, engine).await
             }
             SqlPlan::PointGet {
                 collection,
                 engine,
                 key_value,
                 ..
-            } => self.execute_point_get(collection, engine, key_value),
+            } => self.execute_point_get(collection, engine, key_value).await,
             SqlPlan::Insert {
                 collection,
+                engine,
                 rows,
                 if_absent,
                 ..
-            } => self.execute_insert(collection, rows, *if_absent),
+            } => {
+                self.execute_insert(collection, engine, rows, *if_absent)
+                    .await
+            }
             SqlPlan::Update {
                 collection,
+                engine,
                 assignments,
                 target_keys,
                 ..
-            } => self.execute_update(collection, assignments, target_keys),
+            } => {
+                self.execute_update(collection, engine, assignments, target_keys)
+                    .await
+            }
             SqlPlan::Delete {
                 collection,
+                engine,
                 target_keys,
                 ..
-            } => self.execute_delete(collection, target_keys),
-            SqlPlan::Truncate { collection, .. } => self.execute_truncate(collection),
+            } => self.execute_delete(collection, engine, target_keys).await,
+            SqlPlan::Truncate { collection, .. } => self.execute_truncate(collection).await,
             SqlPlan::Upsert {
-                collection, rows, ..
-            } => self.execute_upsert(collection, rows),
+                collection,
+                engine,
+                rows,
+                ..
+            } => self.execute_insert(collection, engine, rows, true).await,
             _ => Err(LiteError::Unsupported {
                 detail: format!("plan variant not supported in Lite 0.1.0: {plan:?}"),
             }),
         }
     }
 
-    fn execute_scan(
+    async fn execute_scan(
         &self,
         collection: &str,
         engine: &EngineType,
@@ -190,11 +202,29 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 })
             }
             EngineType::DocumentStrict => {
-                let schema = self.strict.schema(collection);
-                let columns = schema
-                    .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
-                    .unwrap_or_else(|| vec!["id".into(), "data".into()]);
-                let rows = Vec::new();
+                let schema =
+                    self.strict
+                        .schema(collection)
+                        .ok_or_else(|| LiteError::BadRequest {
+                            detail: format!("strict collection '{collection}' does not exist"),
+                        })?;
+                let columns: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
+                let rows = self.strict.list_rows(collection).await?;
+                Ok(QueryResult {
+                    columns,
+                    rows,
+                    rows_affected: 0,
+                })
+            }
+            EngineType::Columnar => {
+                let schema =
+                    self.columnar
+                        .schema(collection)
+                        .ok_or_else(|| LiteError::BadRequest {
+                            detail: format!("columnar collection '{collection}' does not exist"),
+                        })?;
+                let columns: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
+                let rows = self.columnar.list_rows(collection).await?;
                 Ok(QueryResult {
                     columns,
                     rows,
@@ -205,7 +235,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         }
     }
 
-    fn execute_point_get(
+    async fn execute_point_get(
         &self,
         collection: &str,
         engine: &EngineType,
@@ -228,25 +258,57 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                     None => Ok(QueryResult::empty()),
                 }
             }
+            EngineType::DocumentStrict => {
+                let schema =
+                    self.strict
+                        .schema(collection)
+                        .ok_or_else(|| LiteError::BadRequest {
+                            detail: format!("strict collection '{collection}' does not exist"),
+                        })?;
+                let columns: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
+                // The PK column type determines how to parse the key string.
+                let pk_col = schema
+                    .columns
+                    .iter()
+                    .find(|c| c.primary_key)
+                    .ok_or_else(|| LiteError::BadRequest {
+                        detail: format!(
+                            "strict collection '{collection}' has no primary key column"
+                        ),
+                    })?;
+                let pk_value = parse_pk_value(&key_str, &pk_col.column_type);
+                match self.strict.get(collection, &pk_value).await? {
+                    Some(values) => Ok(QueryResult {
+                        columns,
+                        rows: vec![values],
+                        rows_affected: 0,
+                    }),
+                    None => Ok(QueryResult {
+                        columns,
+                        rows: Vec::new(),
+                        rows_affected: 0,
+                    }),
+                }
+            }
             _ => Ok(QueryResult::empty()),
         }
     }
 
-    fn execute_upsert(
+    async fn execute_insert(
         &self,
         collection: &str,
-        rows: &[Vec<(String, nodedb_sql::SqlValue)>],
-    ) -> Result<QueryResult, LiteError> {
-        // In Lite, CRDT storage is naturally upsert — same as insert.
-        self.execute_insert(collection, rows, true)
-    }
-
-    fn execute_insert(
-        &self,
-        collection: &str,
+        engine: &EngineType,
         rows: &[Vec<(String, SqlValue)>],
         if_absent: bool,
     ) -> Result<QueryResult, LiteError> {
+        if *engine == EngineType::DocumentStrict {
+            return super::strict_dml::insert_strict(&self.strict, collection, rows, if_absent)
+                .await;
+        }
+        if *engine == EngineType::Columnar {
+            return super::columnar_dml::insert_columnar(&self.columnar, collection, rows);
+        }
+        // CRDT / schemaless path.
         let mut crdt = self.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
         let mut affected = 0;
         for row in rows {
@@ -278,12 +340,23 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         })
     }
 
-    fn execute_update(
+    async fn execute_update(
         &self,
         collection: &str,
+        engine: &EngineType,
         assignments: &[(String, nodedb_sql::types::SqlExpr)],
         target_keys: &[SqlValue],
     ) -> Result<QueryResult, LiteError> {
+        if *engine == EngineType::DocumentStrict {
+            return super::strict_dml::update_strict(
+                &self.strict,
+                collection,
+                assignments,
+                target_keys,
+            )
+            .await;
+        }
+        // CRDT / schemaless path.
         let mut crdt = self.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
         let mut affected = 0;
         for key in target_keys {
@@ -309,11 +382,16 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         })
     }
 
-    fn execute_delete(
+    async fn execute_delete(
         &self,
         collection: &str,
+        engine: &EngineType,
         target_keys: &[SqlValue],
     ) -> Result<QueryResult, LiteError> {
+        if *engine == EngineType::DocumentStrict {
+            return super::strict_dml::delete_strict(&self.strict, collection, target_keys).await;
+        }
+        // CRDT / schemaless path.
         let mut crdt = self.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
         let mut affected = 0;
         for key in target_keys {
@@ -329,7 +407,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         })
     }
 
-    fn execute_truncate(&self, collection: &str) -> Result<QueryResult, LiteError> {
+    async fn execute_truncate(&self, collection: &str) -> Result<QueryResult, LiteError> {
         self.crdt
             .lock()
             .map_err(|_| LiteError::LockPoisoned)?
@@ -360,7 +438,7 @@ fn sql_value_to_loro(v: &SqlValue) -> loro::LoroValue {
     }
 }
 
-fn sql_value_to_value(v: &nodedb_sql::types::SqlValue) -> Value {
+pub(super) fn sql_value_to_value(v: &nodedb_sql::types::SqlValue) -> Value {
     match v {
         nodedb_sql::types::SqlValue::Int(i) => Value::Integer(*i),
         nodedb_sql::types::SqlValue::Float(f) => Value::Float(*f),
@@ -368,6 +446,23 @@ fn sql_value_to_value(v: &nodedb_sql::types::SqlValue) -> Value {
         nodedb_sql::types::SqlValue::Bool(b) => Value::Bool(*b),
         nodedb_sql::types::SqlValue::Null => Value::Null,
         _ => Value::Null,
+    }
+}
+
+/// Convert a primary-key string from a SQL literal into the appropriate `Value`
+/// variant based on the column's declared type.
+pub(super) fn parse_pk_value(
+    key_str: &str,
+    col_type: &nodedb_types::columnar::ColumnType,
+) -> Value {
+    use nodedb_types::columnar::ColumnType;
+    match col_type {
+        ColumnType::Int64 => key_str
+            .parse::<i64>()
+            .map(Value::Integer)
+            .unwrap_or_else(|_| Value::String(key_str.to_string())),
+        ColumnType::Uuid => Value::Uuid(key_str.to_string()),
+        _ => Value::String(key_str.to_string()),
     }
 }
 
