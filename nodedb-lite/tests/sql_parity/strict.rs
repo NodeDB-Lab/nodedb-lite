@@ -9,10 +9,6 @@
 //!   INSERT  — rows_affected matches
 //!   SELECT  — column names match; row count matches; field values match
 //!   DROP    — both sides drop successfully
-//!
-//! Note: Lite strict SELECT returns empty rows in this beta (execute_scan
-//! for DocumentStrict returns `rows: Vec::new()`). This is documented as a
-//! known parity gap in lite-sql-support.md.
 
 use nodedb_client::NodeDb;
 
@@ -95,11 +91,7 @@ async fn strict_insert_returns_affected() {
 }
 
 #[tokio::test]
-async fn strict_select_row_count_gap_documented() {
-    // Known parity gap: Lite strict SELECT returns 0 rows in beta.
-    // Origin returns the inserted rows.
-    // This test documents the gap — it passes by asserting the KNOWN behavior,
-    // not by expecting parity. The gap is recorded in lite-sql-support.md.
+async fn strict_select_all_rows() {
     let _origin = OriginServer::spawn_with_pgwire();
     let pg = OriginPgwire::connect().await;
     let db = open_lite().await;
@@ -107,6 +99,79 @@ async fn strict_select_row_count_gap_documented() {
     pg.execute(CREATE_ORIGIN).await;
     db.execute_sql(CREATE_LITE, &[]).await.expect("Lite CREATE");
 
+    // Insert 3 rows on both sides.
+    for (id, name, score) in [(1i64, "Alice", 9.5f64), (2, "Bob", 8.0), (3, "Carol", 7.5)] {
+        let sql =
+            format!("INSERT INTO strict_parity (id, name, score) VALUES ({id}, '{name}', {score})");
+        pg.execute(&sql).await;
+        db.execute_sql(&sql, &[]).await.expect("Lite INSERT");
+    }
+
+    let origin_rows = pg.query("SELECT id, name, score FROM strict_parity").await;
+    let lite_result = db
+        .execute_sql("SELECT id, name, score FROM strict_parity", &[])
+        .await
+        .expect("Lite SELECT *");
+
+    // Both sides must return 3 rows.
+    assert_eq!(origin_rows.len(), 3, "Origin must return 3 rows");
+    assert_eq!(
+        lite_result.rows.len(),
+        3,
+        "Lite strict SELECT must return 3 rows after insert"
+    );
+
+    // Column names must include all schema columns.
+    assert!(
+        lite_result.columns.contains(&"id".to_string()),
+        "Lite SELECT must include 'id' column, got: {:?}",
+        lite_result.columns
+    );
+    assert!(
+        lite_result.columns.contains(&"name".to_string()),
+        "Lite SELECT must include 'name' column"
+    );
+    assert!(
+        lite_result.columns.contains(&"score".to_string()),
+        "Lite SELECT must include 'score' column"
+    );
+
+    // Row values must round-trip correctly (order-independent comparison).
+    let mut lite_ids: Vec<String> = lite_result
+        .rows
+        .iter()
+        .map(|r| {
+            crate::common::sql::normalise_lite_row(&lite_result, 0)
+                .get("id")
+                .cloned()
+                .unwrap_or_default();
+            // Extract id from this row using column index.
+            let id_idx = lite_result
+                .columns
+                .iter()
+                .position(|c| c == "id")
+                .unwrap_or(0);
+            format!("{:?}", r[id_idx])
+        })
+        .collect();
+    lite_ids.sort();
+    assert_eq!(
+        lite_ids,
+        vec!["Integer(1)", "Integer(2)", "Integer(3)"],
+        "Lite rows must contain id values 1, 2, 3"
+    );
+}
+
+#[tokio::test]
+async fn strict_update_returns_affected() {
+    let _origin = OriginServer::spawn_with_pgwire();
+    let pg = OriginPgwire::connect().await;
+    let db = open_lite().await;
+
+    pg.execute(CREATE_ORIGIN).await;
+    db.execute_sql(CREATE_LITE, &[]).await.expect("Lite CREATE");
+
+    // Seed a row on both sides.
     pg.execute("INSERT INTO strict_parity (id, name, score) VALUES (1, 'Alice', 9.5)")
         .await;
     db.execute_sql(
@@ -116,31 +181,108 @@ async fn strict_select_row_count_gap_documented() {
     .await
     .expect("Lite INSERT");
 
-    let origin_rows = pg.query("SELECT id, name, score FROM strict_parity").await;
-    let lite_result = db
-        .execute_sql("SELECT id, name FROM strict_parity", &[])
+    // Update on Origin via pgwire.
+    pg.execute("UPDATE strict_parity SET score = 8.0 WHERE id = 1")
+        .await;
+
+    // Update on Lite — must return at least 1 affected row, not an error.
+    let r = db
+        .execute_sql("UPDATE strict_parity SET score = 8.0 WHERE id = 1", &[])
         .await
-        .expect("Lite SELECT");
+        .expect("Lite UPDATE strict_parity");
 
-    // Origin must return 1 row (it has DML-to-storage plumbed).
-    assert_eq!(
-        origin_rows.len(),
-        1,
-        "Origin strict SELECT must return 1 row"
+    assert!(
+        r.rows_affected >= 1,
+        "Lite UPDATE must affect >= 1 row, got {}",
+        r.rows_affected
     );
+}
 
-    // Lite returns 0 rows — known gap, not a silent wrong-result (columns are correct).
+#[tokio::test]
+async fn strict_delete_returns_affected() {
+    let _origin = OriginServer::spawn_with_pgwire();
+    let pg = OriginPgwire::connect().await;
+    let db = open_lite().await;
+
+    pg.execute(CREATE_ORIGIN).await;
+    db.execute_sql(CREATE_LITE, &[]).await.expect("Lite CREATE");
+
+    // Seed a row on both sides.
+    pg.execute("INSERT INTO strict_parity (id, name, score) VALUES (1, 'Alice', 9.5)")
+        .await;
+    db.execute_sql(
+        "INSERT INTO strict_parity (id, name, score) VALUES (1, 'Alice', 9.5)",
+        &[],
+    )
+    .await
+    .expect("Lite INSERT");
+
+    // Delete on Origin.
+    pg.execute("DELETE FROM strict_parity WHERE id = 1").await;
+
+    // Delete on Lite — must return at least 1 affected row, not an error.
+    let r = db
+        .execute_sql("DELETE FROM strict_parity WHERE id = 1", &[])
+        .await
+        .expect("Lite DELETE strict_parity");
+
+    assert!(
+        r.rows_affected >= 1,
+        "Lite DELETE must affect >= 1 row, got {}",
+        r.rows_affected
+    );
+}
+
+#[tokio::test]
+async fn strict_point_get_by_primary_key() {
+    let _origin = OriginServer::spawn_with_pgwire();
+    let pg = OriginPgwire::connect().await;
+    let db = open_lite().await;
+
+    pg.execute(CREATE_ORIGIN).await;
+    db.execute_sql(CREATE_LITE, &[]).await.expect("Lite CREATE");
+
+    pg.execute("INSERT INTO strict_parity (id, name, score) VALUES (42, 'Eve', 7.0)")
+        .await;
+    db.execute_sql(
+        "INSERT INTO strict_parity (id, name, score) VALUES (42, 'Eve', 7.0)",
+        &[],
+    )
+    .await
+    .expect("Lite INSERT");
+
+    // Origin PointGet must return exactly 1 row.
+    let origin_rows = pg
+        .query("SELECT id, name, score FROM strict_parity WHERE id = 42")
+        .await;
+    assert_eq!(origin_rows.len(), 1, "Origin PointGet must return 1 row");
+
+    // Lite PointGet must return exactly 1 row with matching values.
+    let lite_result = db
+        .execute_sql(
+            "SELECT id, name, score FROM strict_parity WHERE id = 42",
+            &[],
+        )
+        .await
+        .expect("Lite PointGet strict_parity must not error");
+
     assert_eq!(
         lite_result.rows.len(),
-        0,
-        "KNOWN GAP: Lite strict SELECT returns 0 rows in beta (execute_scan stub)"
+        1,
+        "Lite PointGet must return 1 row, got {}",
+        lite_result.rows.len()
     );
 
-    // Column names on Lite must match the schema (not empty or garbage).
-    assert!(
-        lite_result.columns.contains(&"id".to_string())
-            || lite_result.columns.contains(&"name".to_string()),
-        "Lite strict SELECT must return schema columns, got: {:?}",
-        lite_result.columns
+    // Verify the id value round-trips correctly.
+    let row = crate::common::sql::normalise_lite_row(&lite_result, 0);
+    assert_eq!(
+        row.get("id").map(|s| s.as_str()),
+        Some("42"),
+        "Lite PointGet id must be 42, got row: {row:?}"
+    );
+    assert_eq!(
+        row.get("name").map(|s| s.as_str()),
+        Some("Eve"),
+        "Lite PointGet name must be 'Eve', got row: {row:?}"
     );
 }

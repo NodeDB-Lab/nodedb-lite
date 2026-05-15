@@ -7,12 +7,7 @@
 //! Parity contract for columnar:
 //!   CREATE/DROP — both sides execute without error
 //!   INSERT      — acknowledged on both sides (rows_affected >= 1)
-//!   SELECT      — both sides return the same number of rows
-//!
-//! Note: Lite columnar INSERT goes through execute_insert → CRDT store
-//! (the execute_plan arm for non-schemaless engine types currently returns
-//! QueryResult::empty). This is a known parity gap recorded in
-//! lite-sql-support.md: columnar INSERT/SELECT is not yet wired in Lite beta.
+//!   SELECT      — both sides return the same rows (count + id values)
 
 use nodedb_client::NodeDb;
 
@@ -50,10 +45,7 @@ async fn columnar_create_and_drop() {
 
 #[tokio::test]
 async fn columnar_insert_acknowledged() {
-    // Columnar INSERT on Lite goes to the CRDT layer (not the columnar engine)
-    // in beta — the call succeeds and acknowledges rows_affected = 1.
-    // Origin's columnar INSERT writes to the columnar segment store.
-    // Both sides must not return an error.
+    // Both sides must acknowledge rows_affected >= 1 for a columnar INSERT.
     let _origin = OriginServer::spawn_with_pgwire();
     let pg = OriginPgwire::connect().await;
     let db = open_lite().await;
@@ -80,11 +72,7 @@ async fn columnar_insert_acknowledged() {
 }
 
 #[tokio::test]
-async fn columnar_select_gap_documented() {
-    // Known parity gap: Lite columnar SELECT returns an empty result because
-    // execute_scan for non-schemaless/non-strict engines falls through to
-    // `Ok(QueryResult::empty())`. Origin returns the inserted rows.
-    // This test documents the gap; it passes by asserting known behavior.
+async fn columnar_select_all_rows() {
     let _origin = OriginServer::spawn_with_pgwire();
     let pg = OriginPgwire::connect().await;
     let db = open_lite().await;
@@ -92,25 +80,61 @@ async fn columnar_select_gap_documented() {
     pg.execute(CREATE_ORIGIN).await;
     db.execute_sql(CREATE_LITE, &[]).await.expect("Lite CREATE");
 
-    pg.execute("INSERT INTO col_parity (id, ts, value) VALUES (1, '2024-01-01 00:00:00', 2.71)")
-        .await;
-    db.execute_sql(
-        "INSERT INTO col_parity (id, ts, value) VALUES (1, '2024-01-01 00:00:00', 2.71)",
-        &[],
-    )
-    .await
-    .expect("Lite INSERT");
+    // Insert 3 rows on both sides.
+    for (id, val) in [(1i64, 1.11f64), (2, 2.22), (3, 3.33)] {
+        let sql = format!(
+            "INSERT INTO col_parity (id, ts, value) VALUES ({id}, '2024-01-01 00:00:00', {val})"
+        );
+        pg.execute(&sql).await;
+        db.execute_sql(&sql, &[]).await.expect("Lite INSERT");
+    }
 
     let origin_rows = pg.query("SELECT id, value FROM col_parity").await;
     let lite_result = db
-        .execute_sql("SELECT id, value FROM col_parity", &[])
+        .execute_sql("SELECT * FROM col_parity", &[])
         .await
-        .expect("Lite SELECT");
+        .expect("Lite SELECT *");
 
-    assert_eq!(origin_rows.len(), 1, "Origin must return 1 columnar row");
+    assert_eq!(origin_rows.len(), 3, "Origin must return 3 columnar rows");
     assert_eq!(
         lite_result.rows.len(),
-        0,
-        "KNOWN GAP: Lite columnar SELECT returns 0 rows in beta"
+        3,
+        "Lite columnar SELECT must return 3 rows after insert, got {}",
+        lite_result.rows.len()
+    );
+
+    // Column names must include all schema columns.
+    assert!(
+        lite_result.columns.contains(&"id".to_string()),
+        "Lite SELECT must include 'id' column, got: {:?}",
+        lite_result.columns
+    );
+    assert!(
+        lite_result.columns.contains(&"value".to_string()),
+        "Lite SELECT must include 'value' column"
+    );
+
+    // Row id values must round-trip correctly.
+    let id_idx = lite_result
+        .columns
+        .iter()
+        .position(|c| c == "id")
+        .expect("'id' column present");
+    let mut lite_ids: Vec<i64> = lite_result
+        .rows
+        .iter()
+        .filter_map(|r| {
+            if let nodedb_types::value::Value::Integer(i) = r[id_idx] {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect();
+    lite_ids.sort_unstable();
+    assert_eq!(
+        lite_ids,
+        vec![1, 2, 3],
+        "Lite columnar rows must contain id values 1, 2, 3"
     );
 }

@@ -74,9 +74,7 @@ async fn timeseries_insert_acknowledged() {
 }
 
 #[tokio::test]
-async fn timeseries_select_gap_documented() {
-    // Known parity gap: Lite timeseries SELECT returns empty result.
-    // Origin returns the inserted rows. Documented in lite-sql-support.md.
+async fn timeseries_select_all_rows() {
     let _origin = OriginServer::spawn_with_pgwire();
     let pg = OriginPgwire::connect().await;
     let db = open_lite().await;
@@ -98,8 +96,9 @@ async fn timeseries_select_gap_documented() {
     assert_eq!(origin_rows.len(), 1, "Origin must return 1 timeseries row");
     assert_eq!(
         lite_result.rows.len(),
-        0,
-        "KNOWN GAP: Lite timeseries SELECT returns 0 rows in beta"
+        1,
+        "Lite timeseries SELECT must return 1 row after insert, got {}",
+        lite_result.rows.len()
     );
 }
 

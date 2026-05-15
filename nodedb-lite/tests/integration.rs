@@ -78,7 +78,7 @@ async fn graph_batch_and_traverse_correctness() {
         .map(|(s, d, l)| (s.as_str(), d.as_str(), *l))
         .collect();
 
-    db.batch_graph_insert_edges(&refs).unwrap();
+    db.batch_graph_insert_edges("graph", &refs).unwrap();
     db.compact_graph().unwrap();
 
     let subgraph = db
@@ -136,10 +136,13 @@ async fn multi_modal_vector_graph_document() {
     )
     .unwrap();
 
-    db.batch_graph_insert_edges(&[
-        ("concept-ai", "concept-ml", "RELATES_TO"),
-        ("concept-ml", "concept-db", "USES"),
-    ])
+    db.batch_graph_insert_edges(
+        "kb",
+        &[
+            ("concept-ai", "concept-ml", "RELATES_TO"),
+            ("concept-ml", "concept-db", "USES"),
+        ],
+    )
     .unwrap();
 
     let mut doc = Document::new("note-1");
@@ -174,7 +177,8 @@ async fn flush_and_reopen_persists_all() {
 
         db.batch_vector_insert("vecs", &[("v1", &[1.0, 2.0, 3.0][..])])
             .unwrap();
-        db.batch_graph_insert_edges(&[("a", "b", "KNOWS")]).unwrap();
+        db.batch_graph_insert_edges("vecs", &[("a", "b", "KNOWS")])
+            .unwrap();
         let mut doc = Document::new("d1");
         doc.set("key", Value::String("persistent".into()));
         db.document_put("docs", doc).await.unwrap();

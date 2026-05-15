@@ -155,6 +155,31 @@ async fn create_index_is_unsupported() {
     assert_lite_unsupported(&db, "CREATE INDEX idx_name ON users (name)").await;
 }
 
+// ── ALTER COLLECTION (schema evolution on strict) ─────────────────────────────
+
+#[tokio::test]
+async fn alter_strict_collection_is_rejected() {
+    // ALTER COLLECTION for schema evolution (ADD COLUMN etc.) is not supported
+    // on Lite. The nodedb-sql parser does not recognise the `ALTER COLLECTION`
+    // syntax (it expects ALTER TABLE/VIEW/etc.), so Lite returns a parse-level
+    // error rather than a typed Unsupported error. This is the same documented
+    // pattern as MATCH and CREATE ARRAY syntax.
+    //
+    // Contract: the query must return *some* error — not succeed silently, not
+    // panic. The exact error variant is a parse error (storage/query).
+    let db = open_lite().await;
+    let result = db
+        .execute_sql(
+            "ALTER COLLECTION strict_schema ADD COLUMN rating FLOAT64",
+            &[],
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "ALTER COLLECTION must return an error on Lite (schema evolution is not supported)"
+    );
+}
+
 // ── DROP INDEX ────────────────────────────────────────────────────────────────
 
 #[tokio::test]

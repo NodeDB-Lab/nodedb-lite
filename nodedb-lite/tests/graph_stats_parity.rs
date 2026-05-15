@@ -35,10 +35,10 @@ async fn db_with_edges() -> NodeDbLite<RedbStorage> {
 #[tokio::test]
 async fn graph_stats_per_collection_returns_single_entry() {
     let db = db_with_edges().await;
-    let result = db.graph_stats(Some("any-name"), None).await.unwrap();
+    let result = db.graph_stats(Some("col"), None).await.unwrap();
     assert_eq!(result.len(), 1, "expected exactly one entry");
     let stats = &result[0];
-    assert_eq!(stats.collection, "any-name");
+    assert_eq!(stats.collection, "col");
     assert_eq!(stats.edge_count, N as u64);
     assert_eq!(stats.distinct_label_count, K as u64);
 }
