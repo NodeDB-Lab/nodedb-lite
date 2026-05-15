@@ -1,6 +1,7 @@
 //! Handshake: build outgoing `HandshakeMsg`, process incoming `HandshakeAckMsg`.
 
 use nodedb_types::sync::wire::{HandshakeAckMsg, HandshakeMsg};
+use nodedb_types::wire_version::WIRE_FORMAT_VERSION;
 
 use super::config::SyncState;
 use super::state::SyncClient;
@@ -24,7 +25,7 @@ impl SyncClient {
             client_version: self.config.client_version.clone(),
             lite_id: self.lite_id.clone().unwrap_or_default(),
             epoch: self.epoch.unwrap_or(0),
-            wire_version: 1,
+            wire_version: WIRE_FORMAT_VERSION,
         }
     }
 

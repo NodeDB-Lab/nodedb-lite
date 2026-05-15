@@ -10,12 +10,12 @@ use crate::sync::flow_control::SyncMetricsSnapshot;
 
 impl SyncClient {
     /// Build a ping frame.
-    pub fn build_ping(&self) -> SyncFrame {
+    pub fn build_ping(&self) -> Option<SyncFrame> {
         let ping = PingPongMsg {
             timestamp_ms: crate::runtime::now_millis(),
             is_pong: false,
         };
-        SyncFrame::encode_or_empty(SyncMessageType::PingPong, &ping)
+        SyncFrame::try_encode(SyncMessageType::PingPong, &ping)
     }
 
     /// Calculate backoff duration for reconnection attempt N.
@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn ping_frame_is_valid() {
         let client = SyncClient::new(make_config(), 1);
-        let frame = client.build_ping();
+        let frame = client.build_ping().expect("ping encode");
         assert_eq!(frame.msg_type, SyncMessageType::PingPong);
         assert!(!frame.body.is_empty());
     }

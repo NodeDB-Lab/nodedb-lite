@@ -11,6 +11,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use nodedb_lite::engine::crdt::CrdtEngine;
 use nodedb_types::sync::wire::*;
+use nodedb_types::wire_version::WIRE_FORMAT_VERSION;
 
 const ORIGIN_WS: &str = "ws://127.0.0.1:9090";
 
@@ -27,10 +28,11 @@ async fn connect_and_handshake()
         client_version: "live-test".into(),
         lite_id: String::new(),
         epoch: 0,
-        wire_version: 1,
+        wire_version: WIRE_FORMAT_VERSION,
     };
     ws.send(Message::Binary(
-        SyncFrame::encode_or_empty(SyncMessageType::Handshake, &hs)
+        SyncFrame::try_encode(SyncMessageType::Handshake, &hs)
+            .expect("frame encode")
             .to_bytes()
             .into(),
     ))
@@ -109,10 +111,11 @@ async fn test_handshake() -> Result<(), String> {
         client_version: "test-handshake".into(),
         lite_id: String::new(),
         epoch: 0,
-        wire_version: 1,
+        wire_version: WIRE_FORMAT_VERSION,
     };
     ws.send(Message::Binary(
-        SyncFrame::encode_or_empty(SyncMessageType::Handshake, &hs)
+        SyncFrame::try_encode(SyncMessageType::Handshake, &hs)
+            .expect("frame encode")
             .to_bytes()
             .into(),
     ))
@@ -150,7 +153,8 @@ async fn test_delta_push() -> Result<(), String> {
         device_valid_time_ms: None,
     };
     ws.send(Message::Binary(
-        SyncFrame::encode_or_empty(SyncMessageType::DeltaPush, &delta)
+        SyncFrame::try_encode(SyncMessageType::DeltaPush, &delta)
+            .expect("frame encode")
             .to_bytes()
             .into(),
     ))
@@ -179,7 +183,8 @@ async fn test_ping_pong() -> Result<(), String> {
         is_pong: false,
     };
     ws.send(Message::Binary(
-        SyncFrame::encode_or_empty(SyncMessageType::PingPong, &ping)
+        SyncFrame::try_encode(SyncMessageType::PingPong, &ping)
+            .expect("frame encode")
             .to_bytes()
             .into(),
     ))
@@ -228,7 +233,8 @@ async fn test_clock_sync() -> Result<(), String> {
         sender_id: 1,
     };
     ws.send(Message::Binary(
-        SyncFrame::encode_or_empty(SyncMessageType::VectorClockSync, &clock)
+        SyncFrame::try_encode(SyncMessageType::VectorClockSync, &clock)
+            .expect("frame encode")
             .to_bytes()
             .into(),
     ))
@@ -268,7 +274,8 @@ async fn test_shape_subscribe() -> Result<(), String> {
         },
     };
     ws.send(Message::Binary(
-        SyncFrame::encode_or_empty(SyncMessageType::ShapeSubscribe, &subscribe)
+        SyncFrame::try_encode(SyncMessageType::ShapeSubscribe, &subscribe)
+            .expect("frame encode")
             .to_bytes()
             .into(),
     ))
@@ -325,7 +332,8 @@ async fn test_real_loro_delta() -> Result<(), String> {
         device_valid_time_ms: None,
     };
     ws.send(Message::Binary(
-        SyncFrame::encode_or_empty(SyncMessageType::DeltaPush, &delta_msg)
+        SyncFrame::try_encode(SyncMessageType::DeltaPush, &delta_msg)
+            .expect("frame encode")
             .to_bytes()
             .into(),
     ))
@@ -389,7 +397,8 @@ async fn test_concurrent_deltas() -> Result<(), String> {
             device_valid_time_ms: None,
         };
         ws.send(Message::Binary(
-            SyncFrame::encode_or_empty(SyncMessageType::DeltaPush, &msg)
+            SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)
+                .expect("frame encode")
                 .to_bytes()
                 .into(),
         ))
@@ -439,7 +448,8 @@ async fn test_rls_violation() -> Result<(), String> {
         device_valid_time_ms: None,
     };
     ws.send(Message::Binary(
-        SyncFrame::encode_or_empty(SyncMessageType::DeltaPush, &msg)
+        SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)
+            .expect("frame encode")
             .to_bytes()
             .into(),
     ))
@@ -488,7 +498,8 @@ async fn test_shape_snapshot_lsn() -> Result<(), String> {
             device_valid_time_ms: None,
         };
         ws.send(Message::Binary(
-            SyncFrame::encode_or_empty(SyncMessageType::DeltaPush, &msg)
+            SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)
+                .expect("frame encode")
                 .to_bytes()
                 .into(),
         ))
@@ -512,7 +523,8 @@ async fn test_shape_snapshot_lsn() -> Result<(), String> {
         },
     };
     ws.send(Message::Binary(
-        SyncFrame::encode_or_empty(SyncMessageType::ShapeSubscribe, &subscribe)
+        SyncFrame::try_encode(SyncMessageType::ShapeSubscribe, &subscribe)
+            .expect("frame encode")
             .to_bytes()
             .into(),
     ))
