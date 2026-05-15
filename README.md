@@ -158,9 +158,15 @@ Converged:  Device and cloud share identical Loro state hash
 
 ## SQL support
 
-NodeDB Lite parses SQL via `nodedb-sql` and executes plans directly against local engines. Point lookups, scans, inserts, upserts, updates, deletes, and truncates are supported in `0.1.0-beta.1`. JOIN, aggregates, CTE, window functions, and cross-engine SQL are not yet supported.
+NodeDB Lite parses SQL via `nodedb-sql` and executes plans directly against local engines.
+8 of 44 `SqlPlan` variants are executed in `0.1.0-beta.1`: `ConstantResult`, `Scan` (partial),
+`PointGet`, `Insert`, `Upsert`, `Update`, `Delete`, and `Truncate`. JOIN, aggregates, CTE,
+window functions, vector/FTS/spatial SQL, and all Array DDL/DML variants return
+`LiteError::Unsupported`. The regression gate is `tests/sql_matrix.rs`.
 
-See [docs/lite-support-matrix.md](docs/lite-support-matrix.md) for the full SQL and engine support matrix.
+See [docs/lite-support-matrix.md](docs/lite-support-matrix.md) for the engine support matrix
+and [nodedb-lite/docs/lite-sql-support.md](nodedb-lite/docs/lite-sql-support.md) for the
+per-variant SQL matrix with file:line citations and known gaps.
 
 ## Performance
 

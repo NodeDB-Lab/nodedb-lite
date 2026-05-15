@@ -42,43 +42,51 @@ This document is the canonical record of what is supported, previewed, experimen
 | Spatial               | EXPERIMENTAL (no dedicated correctness tests yet)                            | `nodedb-lite/src/engines/spatial/`                        |
 | Timeseries            | EXPERIMENTAL (no dedicated correctness tests yet)                            | `nodedb-lite/src/engines/timeseries/`                     |
 | Array (local)         | BETA (local operations only)                                                 | `tests/array.rs`                                          |
-| Array (synced)        | EXPERIMENTAL (Origin transport phases not wired)                             | `tests/common/mod.rs` — sync path is simulated in-process |
+| Array (synced)        | EXPERIMENTAL — NOT IN 0.1.0-beta.1 interop gates (see note below)           | `tests/array_sync_*.rs` — edge-side simulation only; real-transport test is `tests/array_sync_interop.rs` (all `#[ignore]`) |
+
+> **Array sync note**: Origin implements all inbound wire phases
+> (`ArraySnapshot`, `ArraySnapshotChunk`, `ArrayCatchupRequest`, `ArraySchema`,
+> `ArrayAck`) in `nodedb/nodedb/src/control/array_sync/` and dispatches them in
+> `nodedb/nodedb/src/control/server/sync/session_handler.rs`.  The outbound
+> fan-out path (`ArrayDeltaMsg` / `ArrayDeltaBatchMsg`) is implemented in
+> `nodedb/nodedb/src/control/array_sync/outbound/`.  What is **missing** is the
+> Lite receive path: `nodedb-lite/src/sync/client/receive.rs` does not yet handle
+> `SyncMessageType::ArrayDelta` or `SyncMessageType::ArrayDeltaBatch`.  Until that
+> is wired and gate-tested with `OriginServer::spawn()`, array sync is classified
+> EXPERIMENTAL and excluded from 0.1.0-beta.1 interop guarantees.
 
 ---
 
 ## SQL support matrix
 
 SQL is parsed via `nodedb-sql` and executed directly against local engines.
+The full per-variant matrix with file:line anchors and known gaps is in
+[`nodedb-lite/docs/lite-sql-support.md`](../nodedb-lite/docs/lite-sql-support.md).
+The regression gate is `tests/sql_matrix.rs`.
 
-**Supported in 0.1.0-beta.1:**
+**Supported `SqlPlan` variants (8 of 44) in 0.1.0-beta.1:**
 
-- `ConstantResult` — constant-expression queries (e.g. `SELECT 1`)
-- `Scan` — full collection scan (document-schemaless and strict engines)
-- `PointGet` — single-key lookup by id (document-schemaless engine)
-- `Insert` — insert rows with duplicate-key check
-- `Upsert` — insert-or-replace (maps to CRDT upsert)
-- `Update` — update rows by key list (literal values only)
-- `Delete` — delete rows by key list
-- `Truncate` — clear all documents in a collection
+| Variant | Status |
+|---------|--------|
+| `ConstantResult` | Supported — constant-expression queries |
+| `Scan` | Partial — full scan on schemaless/strict; ORDER BY, LIMIT, WHERE, window functions guarded |
+| `PointGet` | Supported — single-key lookup by id |
+| `Insert` | Supported — with duplicate-key check |
+| `Upsert` | Supported — maps to CRDT upsert |
+| `Update` | Supported — literal-value assignments by key list |
+| `Delete` | Supported — delete by key list |
+| `Truncate` | Supported — clears collection |
 
-DDL (`CREATE COLLECTION`, etc.) is handled by the DDL path and is supported for documented collection types.
+**Unsupported — all 36 remaining variants return `LiteError::Unsupported`:**
+JOIN, LateralTopK, LateralLoop, Aggregate, TimeseriesScan, TimeseriesIngest,
+VectorSearch, MultiVectorSearch, TextSearch, HybridSearch, HybridSearchTriple,
+SpatialScan, Union, Intersect, Except, Cte, RecursiveScan, RecursiveValue, Merge,
+DocumentIndexLookup, RangeScan, KvInsert, InsertSelect, UpdateFrom,
+CreateArray, DropArray, AlterArray, InsertArray, DeleteArray,
+ArraySlice, ArrayProject, ArrayAgg, ArrayElementwise, ArrayFlush, ArrayCompact,
+VectorPrimaryInsert.
 
-**Not supported — return `unsupported plan` error in beta:**
-
-- JOIN
-- Subquery
-- CTE
-- Window functions
-- GROUP BY
-- HAVING
-- ORDER BY
-- LIMIT
-- Aggregate functions (COUNT, SUM, AVG, etc.)
-- Cross-engine SQL
-- FTS via SQL syntax (use the typed API: `text_search`)
-- Vector search via SQL syntax (use the typed API: `vector_search`)
-
-Source: `nodedb-lite/src/query/engine.rs` — plan variant dispatch.
+Source: `nodedb-lite/src/query/engine.rs` — the `execute_plan` match.
 
 ---
 
@@ -93,5 +101,5 @@ Sync requires a running Origin cluster. Cross-repo interop is not gate-tested in
 | Delta ack          | PREVIEW      | ACK-based flow control (AIMD) present; no live Origin test gate                              |
 | Compensation       | PREVIEW      | `CompensationHint` deserialization and dead-letter queue present; exercised in-process only  |
 | Shape subscription | PREVIEW      | Shape filter wire format present; no live Origin validation in this release                  |
-| Definition sync    | EXPERIMENTAL | Schema propagation path exists; correctness against Origin schema versioning not verified    |
-| Array sync         | EXPERIMENTAL | Origin transport phases not wired; tested via in-process simulation in `tests/common/mod.rs` |
+| Definition sync    | EXPERIMENTAL — NOT IN 0.1.0-beta.1 | Lite's receive path is wired (`sync/transport.rs:317-319`, `sync_delegate.rs:82`), but Origin never emits `DefinitionSync` (0x70) frames — no DDL handler in `nodedb/nodedb/src/control/server/sync/` constructs or sends `DefinitionSyncMsg`.  Placeholder real-transport tests in `tests/definition_sync_interop.rs` (all `#[ignore]`). |
+| Array sync         | EXPERIMENTAL — NOT IN 0.1.0-beta.1 | Lite's `sync/client/receive.rs` does not handle `ArrayDelta` / `ArrayDeltaBatch` frames; the real-transport round-trip is not gate-tested.  Simulated coverage only in `tests/array_sync_*.rs`.  Placeholder real-transport test in `tests/array_sync_interop.rs` (all `#[ignore]`). |
