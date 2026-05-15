@@ -46,7 +46,8 @@ pub(crate) fn value_to_loro(v: &Value) -> LoroValue {
         Value::Duration(d) => LoroValue::String(d.to_human().into()),
         Value::Decimal(d) => LoroValue::String(d.to_string().into()),
         Value::Geometry(g) => LoroValue::String(sonic_rs::to_string(g).unwrap_or_default().into()),
-        Value::NdArrayCell(_) => LoroValue::Null,
+        Value::ArrayCell(_) => LoroValue::Null,
+        _ => LoroValue::Null,
     }
 }
 

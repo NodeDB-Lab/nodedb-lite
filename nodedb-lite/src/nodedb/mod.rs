@@ -81,15 +81,32 @@ mod tests {
     async fn graph_insert_and_traverse() {
         let db = make_db().await;
 
-        db.graph_insert_edge(&NodeId::new("alice"), &NodeId::new("bob"), "KNOWS", None)
-            .await
-            .unwrap();
-        db.graph_insert_edge(&NodeId::new("bob"), &NodeId::new("carol"), "KNOWS", None)
-            .await
-            .unwrap();
+        db.graph_insert_edge(
+            "social",
+            &NodeId::from_validated("alice".to_string()),
+            &NodeId::from_validated("bob".to_string()),
+            "KNOWS",
+            None,
+        )
+        .await
+        .unwrap();
+        db.graph_insert_edge(
+            "social",
+            &NodeId::from_validated("bob".to_string()),
+            &NodeId::from_validated("carol".to_string()),
+            "KNOWS",
+            None,
+        )
+        .await
+        .unwrap();
 
         let subgraph = db
-            .graph_traverse(&NodeId::new("alice"), 2, None)
+            .graph_traverse(
+                "social",
+                &NodeId::from_validated("alice".to_string()),
+                2,
+                None,
+            )
             .await
             .unwrap();
 
@@ -101,13 +118,22 @@ mod tests {
     async fn graph_delete_edge() {
         let db = make_db().await;
         let edge_id = db
-            .graph_insert_edge(&NodeId::new("a"), &NodeId::new("b"), "L", None)
+            .graph_insert_edge(
+                "test",
+                &NodeId::from_validated("a".to_string()),
+                &NodeId::from_validated("b".to_string()),
+                "L",
+                None,
+            )
             .await
             .unwrap();
 
-        db.graph_delete_edge(&edge_id).await.unwrap();
+        db.graph_delete_edge("test", &edge_id).await.unwrap();
 
-        let subgraph = db.graph_traverse(&NodeId::new("a"), 1, None).await.unwrap();
+        let subgraph = db
+            .graph_traverse("test", &NodeId::from_validated("a".to_string()), 1, None)
+            .await
+            .unwrap();
         assert_eq!(subgraph.edge_count(), 0);
     }
 
@@ -169,9 +195,15 @@ mod tests {
             let mut doc = Document::new("d1");
             doc.set("key", Value::String("val".into()));
             db.document_put("docs", doc).await.unwrap();
-            db.graph_insert_edge(&NodeId::new("x"), &NodeId::new("y"), "REL", None)
-                .await
-                .unwrap();
+            db.graph_insert_edge(
+                "test",
+                &NodeId::from_validated("x".to_string()),
+                &NodeId::from_validated("y".to_string()),
+                "REL",
+                None,
+            )
+            .await
+            .unwrap();
 
             db.flush().await.unwrap();
 

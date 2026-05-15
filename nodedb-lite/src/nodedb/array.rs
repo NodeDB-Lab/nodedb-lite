@@ -8,6 +8,7 @@ use nodedb_array::schema::ArraySchema;
 use nodedb_array::tile::cell_payload::CellPayload;
 use nodedb_array::types::cell_value::value::CellValue;
 use nodedb_array::types::coord::value::CoordValue;
+#[cfg(not(target_arch = "wasm32"))]
 use nodedb_types::OPEN_UPPER;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 
@@ -30,9 +31,13 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             .map_err(NodeDbError::storage)?;
 
         // Register the schema CRDT so subsequent emit_* calls can find schema_hlc.
+        #[cfg(not(target_arch = "wasm32"))]
         self.array_schemas
             .put_schema(name, &schema_for_crdt)
             .map_err(NodeDbError::storage)?;
+        // On wasm, schema registration is skipped (sync not available).
+        #[cfg(target_arch = "wasm32")]
+        let _ = schema_for_crdt;
 
         Ok(())
     }
@@ -68,10 +73,8 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             )
             .map_err(NodeDbError::storage)?;
 
-        // Emit op after engine succeeds. If emit fails after a successful
-        // engine write, log the error and return it; the engine write is
-        // NOT rolled back — ack reconciliation in later phases will catch
-        // the gap.
+        // Emit op after engine succeeds (non-wasm only — sync not available on wasm).
+        #[cfg(not(target_arch = "wasm32"))]
         if let Err(e) = self.array_outbound.emit_put(
             name,
             coord_emit,
@@ -84,6 +87,10 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
                 "array_put_cell: emit failed after engine write — op-log gap: {e}"
             );
             return Err(NodeDbError::storage(e));
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (coord_emit, attrs_emit, valid_from_ms, valid_until_ms);
         }
 
         Ok(())
@@ -139,7 +146,8 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
 
         // valid_from_ms / valid_until_ms: the current API does not expose
         // valid-time arguments on delete. Defaults of 0 / OPEN_UPPER are used
-        // here. Phase F will widen the API to carry the full bitemporal envelope.
+        // here. A future API revision will widen this to carry the full bitemporal envelope.
+        #[cfg(not(target_arch = "wasm32"))]
         if let Err(e) = self
             .array_outbound
             .emit_delete(name, coord_emit, 0, OPEN_UPPER)
@@ -150,6 +158,8 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             );
             return Err(NodeDbError::storage(e));
         }
+        #[cfg(target_arch = "wasm32")]
+        let _ = coord_emit;
 
         Ok(())
     }
@@ -174,7 +184,8 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             .map_err(NodeDbError::storage)?;
 
         // valid_from_ms / valid_until_ms: same defaulting as array_delete_cell.
-        // Phase F will widen the API.
+        // A future API revision will widen this to carry the full bitemporal envelope.
+        #[cfg(not(target_arch = "wasm32"))]
         if let Err(e) = self
             .array_outbound
             .emit_erase(name, coord_emit, 0, OPEN_UPPER)
@@ -185,6 +196,8 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             );
             return Err(NodeDbError::storage(e));
         }
+        #[cfg(target_arch = "wasm32")]
+        let _ = coord_emit;
 
         Ok(())
     }

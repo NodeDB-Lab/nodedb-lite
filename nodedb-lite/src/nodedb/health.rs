@@ -225,8 +225,9 @@ mod tests {
             .await
             .unwrap();
         db.graph_insert_edge(
-            &nodedb_types::id::NodeId::new("a"),
-            &nodedb_types::id::NodeId::new("b"),
+            "test",
+            &nodedb_types::id::NodeId::from_validated("a".to_string()),
+            &nodedb_types::id::NodeId::from_validated("b".to_string()),
             "REL",
             None,
         )

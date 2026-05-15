@@ -109,7 +109,8 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     /// Compact the CSR graph index (merge buffer into dense arrays).
     pub fn compact_graph(&self) -> NodeDbResult<()> {
         let mut csr = self.csr.lock_or_recover();
-        csr.compact();
+        csr.compact()
+            .map_err(|e| NodeDbError::storage(format!("graph csr compact failed: {e}")))?;
         Ok(())
     }
 

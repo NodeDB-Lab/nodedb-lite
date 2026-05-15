@@ -1,7 +1,9 @@
 //! `SyncDelegate` implementation — bridges the sync transport to NodeDbLite's engines.
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
+#[cfg(not(target_arch = "wasm32"))]
 use super::core::NodeDbLite;
 
 #[cfg(not(target_arch = "wasm32"))]

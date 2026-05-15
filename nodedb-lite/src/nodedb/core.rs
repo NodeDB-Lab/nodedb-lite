@@ -75,18 +75,23 @@ pub struct NodeDbLite<S: StorageEngine + StorageEngineSync> {
     /// for the inbound receive path without borrowing `NodeDbLite`.
     pub(crate) array_state: Arc<std::sync::Mutex<crate::engine::array::engine::ArrayEngineState>>,
     /// Stable per-replica identity + HLC generator for array CRDT sync.
-    /// Used by the transport-layer wiring (Phase F+); held here so that
+    /// Used by the transport-layer wiring; held here so that
     /// the `NodeDbLite` constructor owns the lifetime.
+    #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)]
     pub(crate) array_replica: Arc<crate::sync::array::ReplicaState>,
     /// Per-array [`SchemaDoc`] registry (persisted Loro snapshots).
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) array_schemas: Arc<crate::sync::array::SchemaRegistry<S>>,
     /// Array CRDT send path: op-log + pending queue emitters.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) array_outbound: Arc<crate::sync::array::ArrayOutbound<S>>,
     /// Array CRDT receive path: applies inbound wire messages from Origin.
+    #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)]
     pub(crate) array_inbound: Arc<crate::sync::array::ArrayInbound<S>>,
     /// Per-array last-seen HLC tracker for catch-up requests.
+    #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)]
     pub(crate) array_catchup: Arc<crate::sync::array::CatchupTracker<S>>,
     /// When `false`, KV operations go directly to redb, bypassing Loro.
@@ -237,12 +242,15 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         // ── Restore CSR (with CRC32C validation) ──
         let csr = match storage.get(Namespace::Graph, META_CSR).await? {
             Some(envelope) => match crate::storage::checksum::unwrap(&envelope) {
-                Some(bytes) => CsrIndex::from_checkpoint(&bytes).unwrap_or_else(|| {
-                    tracing::warn!(
-                        "CSR checkpoint deserialization failed, rebuilding from CRDT edges"
-                    );
-                    CsrIndex::new()
-                }),
+                Some(bytes) => match CsrIndex::from_checkpoint(&bytes) {
+                    Ok(Some(idx)) => idx,
+                    Ok(None) | Err(_) => {
+                        tracing::warn!(
+                            "CSR checkpoint deserialization failed, rebuilding from CRDT edges"
+                        );
+                        CsrIndex::new()
+                    }
+                },
                 None => {
                     tracing::error!(
                         "CSR checkpoint CRC32C mismatch — discarding corrupted checkpoint. \
@@ -291,11 +299,13 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             crate::engine::array::ArrayEngineState::open(&storage).map_err(NodeDbError::storage)?;
         let array_state = Arc::new(Mutex::new(array_engine));
 
-        // ── Array CRDT sync state ──────────────────────────────────────────────
+        // ── Array CRDT sync state (non-wasm only) ─────────────────────────────
+        #[cfg(not(target_arch = "wasm32"))]
         let array_replica = Arc::new(
             crate::sync::array::ReplicaState::load_or_init(&*storage)
                 .map_err(NodeDbError::storage)?,
         );
+        #[cfg(not(target_arch = "wasm32"))]
         let array_schemas = Arc::new(
             crate::sync::array::SchemaRegistry::load(
                 Arc::clone(&storage),
@@ -303,8 +313,11 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             )
             .map_err(NodeDbError::storage)?,
         );
+        #[cfg(not(target_arch = "wasm32"))]
         let array_op_log = Arc::new(crate::sync::array::RedbOpLog::new(Arc::clone(&storage)));
+        #[cfg(not(target_arch = "wasm32"))]
         let array_pending = Arc::new(crate::sync::array::PendingQueue::new(Arc::clone(&storage)));
+        #[cfg(not(target_arch = "wasm32"))]
         let array_outbound = Arc::new(crate::sync::array::ArrayOutbound::new(
             Arc::clone(&array_op_log),
             Arc::clone(&array_pending),
@@ -312,17 +325,20 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             Arc::clone(&array_replica),
         ));
 
-        // ── Array CRDT inbound receive path ───────────────────────────────────
+        // ── Array CRDT inbound receive path (non-wasm only) ───────────────────
+        #[cfg(not(target_arch = "wasm32"))]
         let array_catchup = Arc::new(
             crate::sync::array::CatchupTracker::load(Arc::clone(&storage))
                 .map_err(NodeDbError::storage)?,
         );
+        #[cfg(not(target_arch = "wasm32"))]
         let array_apply_engine = Arc::new(crate::sync::array::LiteApplyEngine::new(
             Arc::clone(&storage),
             Arc::clone(&array_state),
             Arc::clone(&array_schemas),
             Arc::clone(array_outbound.op_log()),
         ));
+        #[cfg(not(target_arch = "wasm32"))]
         let array_inbound = Arc::new(crate::sync::array::ArrayInbound::new(
             array_apply_engine,
             Arc::clone(&array_schemas),
@@ -349,10 +365,15 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             htap,
             timeseries,
             array_state,
+            #[cfg(not(target_arch = "wasm32"))]
             array_replica,
+            #[cfg(not(target_arch = "wasm32"))]
             array_schemas,
+            #[cfg(not(target_arch = "wasm32"))]
             array_outbound,
+            #[cfg(not(target_arch = "wasm32"))]
             array_inbound,
+            #[cfg(not(target_arch = "wasm32"))]
             array_catchup,
             sync_enabled,
             kv_write_buf: Mutex::new(KvWriteBuffer {
@@ -392,16 +413,17 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             let key = format!("hnsw:{name}");
             if let Some(envelope) = storage.get(Namespace::Vector, key.as_bytes()).await? {
                 match crate::storage::checksum::unwrap(&envelope) {
-                    Some(checkpoint) => {
-                        if let Some(index) = HnswIndex::from_checkpoint(&checkpoint) {
+                    Some(checkpoint) => match HnswIndex::from_checkpoint(&checkpoint) {
+                        Ok(Some(index)) => {
                             hnsw_indices.insert(name.clone(), index);
-                        } else {
+                        }
+                        Ok(None) | Err(_) => {
                             tracing::warn!(
                                 collection = %name,
                                 "HNSW checkpoint deserialization failed, will rebuild from CRDT"
                             );
                         }
-                    }
+                    },
                     None => {
                         tracing::error!(
                             collection = %name,
@@ -506,12 +528,18 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         // ── Persist CSR (CRC32C wrapped) ──
         {
             let csr = self.csr.lock_or_recover();
-            let checkpoint = csr.checkpoint_to_bytes();
-            ops.push(WriteOp::Put {
-                ns: Namespace::Graph,
-                key: META_CSR.to_vec(),
-                value: crate::storage::checksum::wrap(&checkpoint),
-            });
+            match csr.checkpoint_to_bytes() {
+                Ok(checkpoint) => {
+                    ops.push(WriteOp::Put {
+                        ns: Namespace::Graph,
+                        key: META_CSR.to_vec(),
+                        value: crate::storage::checksum::wrap(&checkpoint),
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "CSR checkpoint failed; graph state not persisted");
+                }
+            }
         }
 
         // ── Persist HNSW indices ──
