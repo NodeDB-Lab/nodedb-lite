@@ -27,14 +27,14 @@
 <p align="center">
   <a href="https://discord.gg/s54gDMVc7B">
     <img src="assets/discord-cta.svg" alt="Join the NodeDB Discord" width="340">
-  </a>
+  </a> 
 </p>
 
 <p>
   <a href="https://github.com/NodeDB-Lab/nodedb-lite/actions/workflows/ci.yml">
     <img src="https://img.shields.io/github/actions/workflow/status/NodeDB-Lab/nodedb-lite/ci.yml?branch=main&label=ci" alt="CI status">
   </a>
-  <img src="https://img.shields.io/badge/status-in%20development-orange" alt="Status: in development">
+  <img src="https://img.shields.io/badge/status-beta-blue" alt="Status: beta">
   <a href="https://github.com/NodeDB-Lab/nodedb-lite/blob/main/LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License">
   </a>
@@ -49,11 +49,7 @@ NodeDB Lite replaces the usual SQLite + vector sidecar + ad hoc cache + custom s
 
 ## Status
 
-NodeDB Lite is currently in development and is not released yet.
-
-The immediate focus is NodeDB Origin through `v0.1.0`. Once Origin reaches `v0.1.0`, development focus shifts back to NodeDB Lite for packaging, platform hardening, and release work.
-
-Until then, this repository should be treated as active development, not a published/stable product.
+NodeDB Lite is in beta as of version `0.1.0-beta.1`. The Rust crate (`nodedb-lite`) is the primary supported surface. WASM (`nodedb-lite-wasm`) is preview — build and basic engine usage work end-to-end, but the npm package is not yet published. iOS FFI is in progress and not included in `0.1.0-beta.1`; see [Platforms](#platforms).
 
 ## Why NodeDB Lite
 
@@ -72,47 +68,55 @@ Until then, this repository should be treated as active development, not a publi
 
 ## Platforms
 
-| Platform | Crate              | Backend                 | Size      |
-| -------- | ------------------ | ----------------------- | --------- |
-| Linux    | `nodedb-lite`      | redb (file-backed)      | Native    |
-| macOS    | `nodedb-lite`      | redb (file-backed)      | Native    |
-| Windows  | `nodedb-lite`      | redb (file-backed)      | Native    |
-| Android  | `nodedb-lite-ffi`  | redb + C FFI + Kotlin/JNI | Native |
-| iOS      | `nodedb-lite-ffi`  | redb + C FFI (cbindgen) | Native    |
-| Browser  | `nodedb-lite-wasm` | redb (in-memory + OPFS) | Target: < 10 MB |
+| Platform                                  | Crate              | Backend                   | Size                                                               |
+| ----------------------------------------- | ------------------ | ------------------------- | ------------------------------------------------------------------ |
+| Linux                                     | `nodedb-lite`      | redb (file-backed)        | Native                                                             |
+| macOS                                     | `nodedb-lite`      | redb (file-backed)        | Native                                                             |
+| Windows                                   | `nodedb-lite`      | redb (file-backed)        | Native                                                             |
+| Android                                   | `nodedb-lite-ffi`  | redb + C FFI + Kotlin/JNI | Native                                                             |
+| iOS _(in progress — not in 0.1.0-beta.1)_ | `nodedb-lite-ffi`  | redb + C FFI (cbindgen)   | Native _(requires macOS build environment — not yet built/tested)_ |
+| Browser                                   | `nodedb-lite-wasm` | redb (in-memory + OPFS)   | Target: < 10 MB                                                    |
 
-## Planned Packages
-
-NodeDB Lite is not published yet. The package names below reflect the intended release targets:
+## Packages
 
 ```bash
-# Rust (planned)
+# Rust (beta)
 cargo add nodedb-lite
 
-# JavaScript / TypeScript (WASM, planned)
-npm install @nodedb/lite
+# JavaScript / TypeScript (WASM, preview — npm package not yet published)
+# Build locally: cd nodedb-lite-wasm && wasm-pack build --target web --release
+# npm install @nodedb/lite  # coming once npm publish lands
 ```
 
 ## Quick Start
 
-API shape preview while the project is still in development:
+The Rust crate API in `0.1.0-beta.1`:
 
 ```rust
-use nodedb_lite::NodeDbLite;
+use nodedb_lite::{NodeDbLite, RedbStorage};
 use nodedb_client::NodeDb;
 
-let db = NodeDbLite::open("./my-app-data").await?;
+// Open an in-memory database (peer_id uniquely identifies this device/replica):
+let storage = RedbStorage::open_in_memory()?;
+let db = NodeDbLite::open(storage, 1u64).await?;
 
 // Insert a document
-db.execute("CREATE COLLECTION notes").await?;
-db.execute("INSERT INTO notes { title: 'Hello', body: 'World' }").await?;
+db.execute_sql("CREATE COLLECTION notes", &[]).await?;
+
+// Put a document via the typed API
+use nodedb_types::document::Document;
+let mut doc = Document::new("n1");
+doc.set("title", "Hello".into());
+db.document_put("notes", doc).await?;
 
 // Vector search
-db.execute("CREATE COLLECTION articles ENGINE vector DIMENSION 384").await?;
-db.vector_search("articles", &embedding, 10).await?;
+db.vector_insert("articles", "a1", &embedding, None).await?;
+let results = db.vector_search("articles", &embedding, 10, None).await?;
 
 // Graph traversal
-db.execute("MATCH (a)-[:KNOWS*1..3]->(b) WHERE a.name = 'Alice' RETURN b").await?;
+use nodedb_types::id::NodeId;
+let start = NodeId::try_new("alice")?;
+let subgraph = db.graph_traverse("social", &start, 3, None).await?;
 ```
 
 ## Same API, Any Runtime
@@ -148,31 +152,37 @@ Converged:  Device and cloud share identical Loro state hash
 
 - **Multi-model locally** -- Vector, graph, document, full-text, timeseries, key-value, and more, all in-process with no network
 - **Sub-millisecond reads** -- Hot data lives in memory indexes (HNSW, CSR, Loro)
-- **Full SQL** -- Same SQL as Origin. Window functions, CTEs, subqueries, JOINs.
+- **SQL** -- Supports a documented subset of NodeDB's SQL surface; see [SQL support](#sql-support) below.
 - **Encryption at rest** -- AES-256-GCM + Argon2id key derivation
 - **Memory governance** -- Per-engine budgets, pressure levels, LRU eviction
 
+## SQL support
+
+NodeDB Lite parses SQL via `nodedb-sql` and executes plans directly against local engines. Point lookups, scans, inserts, upserts, updates, deletes, and truncates are supported in `0.1.0-beta.1`. JOIN, aggregates, CTE, window functions, and cross-engine SQL are not yet supported.
+
+See [docs/lite-support-matrix.md](docs/lite-support-matrix.md) for the full SQL and engine support matrix.
+
 ## Performance
 
-| Metric                                | Target        |
-| ------------------------------------- | ------------- |
-| Vector search (1K vectors, 384d, k=5) | < 1ms p99     |
-| Graph BFS (10K edges, 2 hops)         | < 1ms p99     |
-| Document get                          | < 0.1ms       |
-| Cold start (10K vectors + 100K edges) | < 500ms       |
-| Sync round-trip (single delta)        | < 200ms       |
-| WASM bundle                           | < 10 MB        |
-| Mobile memory                         | < 100 MB      |
+| Metric                                | Target    |
+| ------------------------------------- | --------- |
+| Vector search (1K vectors, 384d, k=5) | < 1ms p99 |
+| Graph BFS (10K edges, 2 hops)         | < 1ms p99 |
+| Document get                          | < 0.1ms   |
+| Cold start (10K vectors + 100K edges) | < 500ms   |
+| Sync round-trip (single delta)        | < 200ms   |
+| WASM bundle                           | < 10 MB   |
+| Mobile memory                         | < 100 MB  |
 
 ## Workspace
 
 This repository contains three crates:
 
-| Crate              | Description                                              |
-| ------------------ | -------------------------------------------------------- |
-| `nodedb-lite`      | Core embedded database library                           |
-| `nodedb-lite-ffi`  | C FFI bindings for iOS/Android (cbindgen, Kotlin/JNI)    |
-| `nodedb-lite-wasm` | JavaScript/TypeScript bindings via wasm-bindgen           |
+| Crate              | Description                                           |
+| ------------------ | ----------------------------------------------------- |
+| `nodedb-lite`      | Core embedded database library                        |
+| `nodedb-lite-ffi`  | C FFI bindings for iOS/Android (cbindgen, Kotlin/JNI) |
+| `nodedb-lite-wasm` | JavaScript/TypeScript bindings via wasm-bindgen       |
 
 ## Building from Source
 

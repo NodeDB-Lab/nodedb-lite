@@ -12,12 +12,14 @@ NodeDB-Lite is a fully capable embedded database for edge devices — phones, ta
 
 ## Platforms
 
-| Platform              | Backend                   | Binary Size                                                                          |
-| --------------------- | ------------------------- | ------------------------------------------------------------------------------------ |
-| Linux, macOS, Windows | redb (file-backed)        | Native                                                                               |
-| iOS _(in progress)_   | redb + C FFI (cbindgen)   | Native _(requires macOS build environment — Rust compiles but not yet built/tested)_ |
-| Android               | redb + C FFI + Kotlin/JNI | Native                                                                               |
-| Browser (WASM)        | redb (in-memory + OPFS)   | ~4.5 MB                                                                              |
+| Platform                                  | Backend                   | Binary Size                                                        |
+| ----------------------------------------- | ------------------------- | ------------------------------------------------------------------ |
+| Linux, macOS, Windows                     | redb (file-backed)        | Native                                                             |
+| iOS _(in progress — not in 0.1.0-beta.1)_ | redb + C FFI (cbindgen)   | Native _(requires macOS build environment — not yet built/tested)_ |
+| Android                                   | redb + C FFI + Kotlin/JNI | Native                                                             |
+| Browser (WASM)                            | redb (in-memory + OPFS)   | ~4.5 MB                                                            |
+
+For the full release posture of each surface and engine, see [lite-support-matrix.md](./lite-support-matrix.md).
 
 ## Key Features
 
@@ -28,7 +30,7 @@ NodeDB-Lite is a fully capable embedded database for edge devices — phones, ta
 - **Conflict resolution** — Declarative per-collection policies. SQL constraints (UNIQUE, FK) enforced on Origin at sync time with typed compensation hints back to the device.
 - **Encryption at rest** — AES-256-GCM + Argon2id key derivation
 - **Memory governance** — Per-engine budgets, pressure levels, LRU eviction
-- **Full SQL** — Same SQL via DataFusion as Origin. Window functions, CTEs, subqueries, JOINs.
+- **SQL** — Supports a documented subset of NodeDB's SQL surface. See the SQL compatibility matrix for the full list of supported plan types; complex queries (JOIN, CTE, window functions, aggregates) are not yet supported in beta.
 
 ## Same API, Any Runtime
 

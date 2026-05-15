@@ -7,7 +7,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.0.6"
+version = "0.1.0-beta.1"
 edition = "2024"
 rust-version = "1.94"
 license = "Apache-2.0"
@@ -17,20 +17,20 @@ homepage = "https://nodedb.dev"
 
 [workspace.dependencies]
 # Internal
-nodedb-lite = { path = "nodedb-lite", version = "0.0.6", default-features = false }
-nodedb-types = { version = "0.0.6" }
-nodedb-client = { version = "0.0.6" }
-nodedb-codec = { version = "0.0.6" }
-nodedb-crdt = { version = "0.0.6" }
-nodedb-query = { version = "0.0.6" }
-nodedb-spatial = { version = "0.0.6" }
-nodedb-graph = { version = "0.0.6" }
-nodedb-vector = { version = "0.0.6" }
-nodedb-fts = { version = "0.0.6" }
-nodedb-strict = { version = "0.0.6" }
-nodedb-columnar = { version = "0.0.6" }
-nodedb-sql = { version = "0.0.6" }
-nodedb-array = { version = "0.0.6" }
+nodedb-lite = { path = "nodedb-lite", version = "0.1.0-beta.1", default-features = false }
+nodedb-types = { version = "*" }
+nodedb-client = { version = "*" }
+nodedb-codec = { version = "*" }
+nodedb-crdt = { version = "*" }
+nodedb-query = { version = "*" }
+nodedb-spatial = { version = "*" }
+nodedb-graph = { version = "*" }
+nodedb-vector = { version = "*" }
+nodedb-fts = { version = "*" }
+nodedb-strict = { version = "*" }
+nodedb-columnar = { version = "*" }
+nodedb-sql = { version = "*" }
+nodedb-array = { version = "*" }
 
 # Async
 tokio = { version = "1" }
@@ -46,7 +46,7 @@ tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sonic-rs = "0.5"
-zerompk = { version = "0.4", features = ["std", "derive"] }
+zerompk = { version = "0.5", features = ["std", "derive"] }
 
 # Storage
 redb = "2"
