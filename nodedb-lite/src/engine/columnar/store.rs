@@ -25,6 +25,8 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::storage::engine::{StorageEngine, WriteOp};
+use crate::sync::ColumnarOutbound;
+use crate::sync::outbound::timeseries::TimeseriesOutbound;
 
 /// Meta key prefix for columnar schemas.
 const META_COLUMNAR_SCHEMA_PREFIX: &str = "columnar_schema:";
@@ -61,6 +63,17 @@ type CollectionMap = HashMap<String, Arc<Mutex<CollectionState>>>;
 pub struct ColumnarEngine<S: StorageEngine> {
     storage: Arc<S>,
     collections: RwLock<CollectionMap>,
+    /// Optional outbound queue for plain columnar insert sync.
+    /// `None` when sync is disabled or not yet configured.
+    outbound: Option<Arc<ColumnarOutbound>>,
+    /// Optional outbound queue for timeseries-profile insert sync.
+    ///
+    /// Timeseries collections must use `TimeseriesPush` frames on Origin
+    /// (the columnar `MutationEngine` and the timeseries engine are separate
+    /// storage paths on Origin).  When this queue is present, inserts into
+    /// collections with `ColumnarProfile::Timeseries` are enqueued here
+    /// instead of `outbound`.
+    timeseries_outbound: Option<Arc<TimeseriesOutbound>>,
 }
 
 impl<S: StorageEngine> ColumnarEngine<S> {
@@ -69,7 +82,25 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         Self {
             storage,
             collections: RwLock::new(HashMap::new()),
+            outbound: None,
+            timeseries_outbound: None,
         }
+    }
+
+    /// Attach a sync outbound queue for plain columnar collections.
+    ///
+    /// Must be called before any inserts if columnar sync is desired.
+    pub fn set_outbound(&mut self, outbound: Arc<ColumnarOutbound>) {
+        self.outbound = Some(outbound);
+    }
+
+    /// Attach a sync outbound queue for timeseries-profile collections.
+    ///
+    /// When set, inserts into collections with `ColumnarProfile::Timeseries`
+    /// are routed here instead of `outbound`, so the transport can send them
+    /// as `TimeseriesPush` frames to Origin's timeseries engine.
+    pub fn set_timeseries_outbound(&mut self, outbound: Arc<TimeseriesOutbound>) {
+        self.timeseries_outbound = Some(outbound);
     }
 
     /// Restore columnar collections from storage on startup.
@@ -146,6 +177,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
             .write()
             .map_err(|_| LiteError::LockPoisoned)? = loaded;
 
+        // outbound is wired after restore by the caller (NodeDbLite::open_inner).
         Ok(engine)
     }
 
@@ -392,10 +424,34 @@ impl<S: StorageEngine> ColumnarEngine<S> {
     // -- Write path --
 
     /// Insert a row into a columnar collection's memtable.
+    ///
+    /// When a sync outbound queue is attached the row is also enqueued for
+    /// replication to Origin.  Timeseries-profile collections use the
+    /// `timeseries_outbound` queue (→ `TimeseriesPush` frames); all other
+    /// columnar collections use `outbound` (→ `ColumnarInsert` frames).
     pub fn insert(&self, collection: &str, values: &[Value]) -> Result<(), LiteError> {
         let state_arc = self.lookup(collection)?;
         let mut s = Self::lock_state(&state_arc)?;
         s.mutation.insert(values).map_err(columnar_err_to_lite)?;
+
+        if matches!(s.profile, ColumnarProfile::Timeseries { .. }) {
+            // Timeseries rows must replicate via TimeseriesPush so that Origin
+            // stores them in its timeseries engine, not the columnar MutationEngine.
+            if let Some(ts_out) = &self.timeseries_outbound {
+                let column_names: Vec<String> = s
+                    .mutation
+                    .schema()
+                    .columns
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .collect();
+                ts_out.enqueue_row(collection, column_names, values.to_vec());
+            }
+        } else if let Some(outbound) = &self.outbound {
+            let schema_bytes = zerompk::to_msgpack_vec(s.mutation.schema()).unwrap_or_default();
+            outbound.enqueue_row(collection, values.to_vec(), schema_bytes);
+        }
+
         Ok(())
     }
 
@@ -680,6 +736,84 @@ impl<S: StorageEngine> ColumnarEngine<S> {
 
     // -- Read path --
 
+    /// Scan all rows in a columnar collection, returning them in schema column order.
+    ///
+    /// Reads memtable rows first, then flushed segments. Each row is a
+    /// `Vec<Value>` whose entries correspond 1-to-1 with `schema().columns`.
+    pub async fn list_rows(&self, collection: &str) -> Result<Vec<Vec<Value>>, LiteError> {
+        let state_arc = self.lookup(collection)?;
+
+        // Collect memtable rows and segment metadata under the inner lock (briefly).
+        struct Snapshot {
+            memtable_rows: Vec<Vec<Value>>,
+            seg_metas: Vec<SegmentMeta>,
+            col_count: usize,
+        }
+        let snap = {
+            let s = Self::lock_state(&state_arc)?;
+            let memtable_rows: Vec<Vec<Value>> = s.mutation.memtable().iter_rows().collect();
+            Snapshot {
+                memtable_rows,
+                seg_metas: s.segments.clone(),
+                col_count: s.mutation.schema().columns.len(),
+            }
+        };
+
+        let mut all_rows: Vec<Vec<Value>> = Vec::new();
+        all_rows.extend(snap.memtable_rows);
+
+        // Read each flushed segment from storage (lock dropped) and transpose
+        // the columnar layout back to row-major Values.
+        for seg_meta in &snap.seg_metas {
+            let seg_key = format!("{collection}:seg:{}", seg_meta.segment_id);
+            let seg_bytes = match self
+                .storage
+                .get(Namespace::Columnar, seg_key.as_bytes())
+                .await?
+            {
+                Some(b) => b,
+                None => continue,
+            };
+
+            let reader = nodedb_columnar::reader::SegmentReader::open(&seg_bytes).map_err(|e| {
+                LiteError::Storage {
+                    detail: format!("open segment {}: {e}", seg_meta.segment_id),
+                }
+            })?;
+
+            let row_count = reader.row_count() as usize;
+            if row_count == 0 {
+                continue;
+            }
+
+            // Decode all columns.
+            let mut decoded: Vec<nodedb_columnar::reader::DecodedColumn> =
+                Vec::with_capacity(snap.col_count);
+            for col_idx in 0..snap.col_count {
+                let col = reader
+                    .read_column(col_idx)
+                    .map_err(|e| LiteError::Storage {
+                        detail: format!(
+                            "read column {col_idx} of segment {}: {e}",
+                            seg_meta.segment_id
+                        ),
+                    })?;
+                decoded.push(col);
+            }
+
+            // Transpose: iterate row indices, extract one Value per column.
+            for row_idx in 0..row_count {
+                let row: Vec<Value> = decoded
+                    .iter()
+                    .map(|col| decoded_column_value(col, row_idx))
+                    .collect();
+                all_rows.push(row);
+            }
+        }
+
+        Ok(all_rows)
+    }
+
     /// Read all segment bytes for a collection (for the table provider).
     pub async fn read_segments(&self, collection: &str) -> Result<Vec<(u32, Vec<u8>)>, LiteError> {
         let state_arc = self.lookup(collection)?;
@@ -724,6 +858,76 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         };
         let seg_rows: u64 = s.segments.iter().map(|m| m.row_count).sum();
         seg_rows as usize + s.mutation.memtable().row_count()
+    }
+}
+
+/// Extract a single `Value` from a `DecodedColumn` at the given row index.
+///
+/// Returns `Value::Null` for rows whose validity bit is false.
+fn decoded_column_value(col: &nodedb_columnar::reader::DecodedColumn, row_idx: usize) -> Value {
+    use nodedb_columnar::reader::DecodedColumn;
+    match col {
+        DecodedColumn::Int64 { values, valid } => {
+            if *valid.get(row_idx).unwrap_or(&false) {
+                Value::Integer(*values.get(row_idx).unwrap_or(&0))
+            } else {
+                Value::Null
+            }
+        }
+        DecodedColumn::Float64 { values, valid } => {
+            if *valid.get(row_idx).unwrap_or(&false) {
+                Value::Float(*values.get(row_idx).unwrap_or(&0.0))
+            } else {
+                Value::Null
+            }
+        }
+        DecodedColumn::Timestamp { values, valid } => {
+            if *valid.get(row_idx).unwrap_or(&false) {
+                Value::Integer(*values.get(row_idx).unwrap_or(&0))
+            } else {
+                Value::Null
+            }
+        }
+        DecodedColumn::Bool { values, valid } => {
+            if *valid.get(row_idx).unwrap_or(&false) {
+                Value::Bool(*values.get(row_idx).unwrap_or(&false))
+            } else {
+                Value::Null
+            }
+        }
+        DecodedColumn::Binary {
+            data,
+            offsets,
+            valid,
+        } => {
+            if *valid.get(row_idx).unwrap_or(&false) && row_idx + 1 < offsets.len() {
+                let start = offsets[row_idx] as usize;
+                let end = offsets[row_idx + 1] as usize;
+                if let Ok(s) = std::str::from_utf8(&data[start..end]) {
+                    Value::String(s.to_string())
+                } else {
+                    Value::Bytes(data[start..end].to_vec())
+                }
+            } else {
+                Value::Null
+            }
+        }
+        DecodedColumn::DictEncoded {
+            ids,
+            dictionary,
+            valid,
+        } => {
+            if *valid.get(row_idx).unwrap_or(&false) {
+                let id = *ids.get(row_idx).unwrap_or(&0) as usize;
+                dictionary
+                    .get(id)
+                    .map(|s| Value::String(s.clone()))
+                    .unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            }
+        }
+        _ => Value::Null,
     }
 }
 
