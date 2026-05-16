@@ -53,7 +53,6 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + StorageEngineSync + 'a>(
                 let params = TextSearchParams {
                     fuzzy,
                     mode: QueryMode::Or,
-                    ..Default::default()
                 };
                 let mut results =
                     run_text_search(&fts_state, &crdt, &collection, &query, top_k, &params)
@@ -128,7 +127,6 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + StorageEngineSync + 'a>(
                 let text_params = TextSearchParams {
                     fuzzy,
                     mode: QueryMode::Or,
-                    ..Default::default()
                 };
                 let text_results = run_text_search(
                     &fts_state,

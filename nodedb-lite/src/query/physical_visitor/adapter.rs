@@ -15,13 +15,13 @@ use nodedb_physical::PhysicalTaskVisitor;
 use nodedb_physical::physical_plan::{ArrayOp, VectorOp};
 use roaring;
 
+use super::vector_op::execute_vector_op;
+
 use nodedb_physical::physical_plan::TextOp;
 
-use crate::engine::vector::search::run_vector_search;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::storage::engine::{StorageEngine, StorageEngineSync};
-use nodedb_types::filter::MetadataFilter;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
@@ -106,77 +106,7 @@ impl<'a, S: StorageEngine + StorageEngineSync + 'a> PhysicalTaskVisitor
     type Error = LiteError;
 
     fn vector(&mut self, op: &VectorOp) -> Result<LitePhysicalFut<'a>, LiteError> {
-        match op {
-            VectorOp::Search {
-                collection,
-                field_name,
-                query_vector,
-                top_k,
-                ef_search,
-                rls_filters,
-                metric,
-                skip_payload_fetch,
-                ..
-            } => {
-                let index_key = if field_name.is_empty() {
-                    collection.clone()
-                } else {
-                    format!("{collection}:{field_name}")
-                };
-                let collection = collection.clone();
-                let query = query_vector.clone();
-                let k = *top_k;
-                let ef = *ef_search;
-                let metric = *metric;
-                let skip_payload_fetch = *skip_payload_fetch;
-                let metadata_filter: Option<MetadataFilter> = if rls_filters.is_empty() {
-                    None
-                } else {
-                    Some(zerompk::from_msgpack(rls_filters).map_err(|e| {
-                        LiteError::Serialization {
-                            detail: format!("decode MetadataFilter: {e}"),
-                        }
-                    })?)
-                };
-                let vector_state = std::sync::Arc::clone(&self.engine.vector_state);
-                let crdt = std::sync::Arc::clone(&self.engine.crdt);
-                Ok(Box::pin(async move {
-                    let results = run_vector_search(
-                        &vector_state,
-                        &crdt,
-                        &index_key,
-                        &collection,
-                        &query,
-                        k,
-                        metadata_filter.as_ref(),
-                        &[],
-                        None,
-                        None,
-                        skip_payload_fetch,
-                        Some(metric),
-                        Some(ef),
-                    )
-                    .await
-                    .map_err(|e| LiteError::Query(e.to_string()))?;
-
-                    let columns = vec!["id".to_string(), "distance".to_string()];
-                    let rows: Vec<Vec<Value>> = results
-                        .into_iter()
-                        .map(|r| vec![Value::String(r.id), Value::Float(r.distance as f64)])
-                        .collect();
-                    Ok(QueryResult {
-                        columns,
-                        rows,
-                        rows_affected: 0,
-                    })
-                }))
-            }
-            _ => Ok(Box::pin(async {
-                Err(LiteError::Unsupported {
-                    detail: "Lite supports VectorOp::Search only".to_string(),
-                })
-            })),
-        }
+        execute_vector_op(self.engine, op)
     }
 
     fn array(&mut self, op: &ArrayOp) -> Result<LitePhysicalFut<'a>, LiteError> {
@@ -351,37 +281,29 @@ impl<'a, S: StorageEngine + StorageEngineSync + 'a> PhysicalTaskVisitor
                 }))
             }
 
-            ArrayOp::Project { .. } => Ok(Box::pin(async {
-                unimplemented!(
-                    "Lite array engine does not yet support ArrayOp::Project; \
-                     add the `project` method to ArrayEngineState in \
-                     nodedb-lite::engine::array::engine"
-                )
-            })),
+            ArrayOp::Project { .. } => Err(LiteError::Unsupported {
+                detail: "ArrayOp::Project is not yet implemented on Lite; \
+                         add the `project` method to ArrayEngineState"
+                    .to_string(),
+            }),
 
-            ArrayOp::Aggregate { .. } => Ok(Box::pin(async {
-                unimplemented!(
-                    "Lite array engine does not yet support ArrayOp::Aggregate; \
-                     add the `aggregate` method to ArrayEngineState in \
-                     nodedb-lite::engine::array::engine"
-                )
-            })),
+            ArrayOp::Aggregate { .. } => Err(LiteError::Unsupported {
+                detail: "ArrayOp::Aggregate is not yet implemented on Lite; \
+                         add the `aggregate` method to ArrayEngineState"
+                    .to_string(),
+            }),
 
-            ArrayOp::Elementwise { .. } => Ok(Box::pin(async {
-                unimplemented!(
-                    "Lite array engine does not yet support ArrayOp::Elementwise; \
-                     add the `elementwise` method to ArrayEngineState in \
-                     nodedb-lite::engine::array::engine"
-                )
-            })),
+            ArrayOp::Elementwise { .. } => Err(LiteError::Unsupported {
+                detail: "ArrayOp::Elementwise is not yet implemented on Lite; \
+                         add the `elementwise` method to ArrayEngineState"
+                    .to_string(),
+            }),
 
-            ArrayOp::Compact { .. } => Ok(Box::pin(async {
-                unimplemented!(
-                    "Lite array engine does not yet support ArrayOp::Compact; \
-                     add the `compact` method to ArrayEngineState in \
-                     nodedb-lite::engine::array::engine"
-                )
-            })),
+            ArrayOp::Compact { .. } => Err(LiteError::Unsupported {
+                detail: "ArrayOp::Compact is not yet implemented on Lite; \
+                         add the `compact` method to ArrayEngineState"
+                    .to_string(),
+            }),
 
             ArrayOp::SurrogateBitmapScan {
                 array_id,

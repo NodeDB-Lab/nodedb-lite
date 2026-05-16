@@ -380,6 +380,7 @@ macro_rules! impl_unsupported_lite_visitor_methods {
             _collection: &str,
             _field: &str,
             _quantization: &nodedb_types::VectorQuantization,
+            _storage_dtype: &nodedb_types::VectorStorageDtype,
             _payload_indexes: &[(String, nodedb_types::PayloadIndexKind)],
             _rows: &[nodedb_sql::types::plan::VectorPrimaryRow],
         ) -> Result<LiteFut<'a>, LiteError> {

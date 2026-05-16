@@ -65,7 +65,7 @@ async fn build_prefilter_bitmap<S: StorageEngine + StorageEngineSync>(
     // Resolve named dim ranges to positional Vec<Option<DimRange>> using the
     // array schema stored in the engine's array_state catalog.
     let slice_msgpack = {
-        let mut state = engine
+        let state = engine
             .array_state
             .lock()
             .map_err(|_| LiteError::LockPoisoned)?;

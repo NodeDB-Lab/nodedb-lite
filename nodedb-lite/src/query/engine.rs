@@ -35,6 +35,7 @@ pub struct LiteQueryEngine<S: StorageEngine + StorageEngineSync> {
 }
 
 impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         crdt: Arc<Mutex<CrdtEngine>>,
         strict: Arc<StrictEngine<S>>,
