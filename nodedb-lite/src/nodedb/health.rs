@@ -148,7 +148,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         };
 
         let (hnsw_count, hnsw_vectors) = {
-            let indices = self.hnsw_indices.lock_or_recover();
+            let indices = self.vector_state.hnsw_indices.lock_or_recover();
             let count = indices.len();
             let vectors: usize = indices.values().map(|idx| idx.len()).sum();
             (count, vectors)
@@ -167,7 +167,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         };
 
         let text_count = {
-            let fts = self.fts.lock_or_recover();
+            let fts = self.fts_state.manager.lock_or_recover();
             fts.collection_count()
         };
 

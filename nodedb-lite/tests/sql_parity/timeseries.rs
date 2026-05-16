@@ -11,7 +11,7 @@
 //!
 //! The timeseries engine in Lite uses the columnar engine under the hood with
 //! a Timeseries profile. DML routing to the timeseries engine is not yet wired
-//! in execute_plan for the beta. Documented in lite-sql-support.md.
+//! in execute_plan for 0.1.0. Documented in docs/lite-support-matrix.md.
 
 use nodedb_client::NodeDb;
 

@@ -2,16 +2,13 @@
 
 //! SQL execution and text-search helpers for `NodeDbLite`.
 
-use std::collections::HashMap;
-
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 use nodedb_types::result::{QueryResult, SearchResult};
 use nodedb_types::text_search::TextSearchParams;
 use nodedb_types::value::Value;
 
-use crate::nodedb::LockExt;
+use crate::engine::fts::run_text_search;
 use crate::nodedb::NodeDbLite;
-use crate::nodedb::convert::loro_value_to_document;
 use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
 impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
@@ -45,28 +42,13 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         top_k: usize,
         params: TextSearchParams,
     ) -> NodeDbResult<Vec<SearchResult>> {
-        let results = self
-            .fts
-            .lock_or_recover()
-            .search(collection, query, top_k, &params);
-
-        let crdt = self.crdt.lock_or_recover();
-        Ok(results
-            .into_iter()
-            .map(|r| {
-                let metadata = if let Some(loro_val) = crdt.read(collection, &r.doc_id) {
-                    let doc = loro_value_to_document(&r.doc_id, &loro_val);
-                    doc.fields
-                } else {
-                    HashMap::new()
-                };
-                SearchResult {
-                    id: r.doc_id,
-                    node_id: None,
-                    distance: 1.0 - (r.score / 20.0).min(1.0),
-                    metadata,
-                }
-            })
-            .collect())
+        run_text_search(
+            &self.fts_state,
+            &self.crdt,
+            collection,
+            query,
+            top_k,
+            &params,
+        )
     }
 }

@@ -5,11 +5,11 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
 use super::parser::parse_strict_create_sql;
 
-impl<S: StorageEngine> LiteQueryEngine<S> {
+impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
     /// Handle: CREATE COLLECTION <name> (<col_defs>) WITH storage = 'columnar'
     pub(in crate::query) async fn handle_create_columnar(
         &self,

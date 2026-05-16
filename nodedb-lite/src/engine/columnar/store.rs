@@ -25,7 +25,9 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::storage::engine::{StorageEngine, WriteOp};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::sync::ColumnarOutbound;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::sync::outbound::timeseries::TimeseriesOutbound;
 
 /// Meta key prefix for columnar schemas.
@@ -65,6 +67,7 @@ pub struct ColumnarEngine<S: StorageEngine> {
     collections: RwLock<CollectionMap>,
     /// Optional outbound queue for plain columnar insert sync.
     /// `None` when sync is disabled or not yet configured.
+    #[cfg(not(target_arch = "wasm32"))]
     outbound: Option<Arc<ColumnarOutbound>>,
     /// Optional outbound queue for timeseries-profile insert sync.
     ///
@@ -73,6 +76,7 @@ pub struct ColumnarEngine<S: StorageEngine> {
     /// storage paths on Origin).  When this queue is present, inserts into
     /// collections with `ColumnarProfile::Timeseries` are enqueued here
     /// instead of `outbound`.
+    #[cfg(not(target_arch = "wasm32"))]
     timeseries_outbound: Option<Arc<TimeseriesOutbound>>,
 }
 
@@ -82,7 +86,9 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         Self {
             storage,
             collections: RwLock::new(HashMap::new()),
+            #[cfg(not(target_arch = "wasm32"))]
             outbound: None,
+            #[cfg(not(target_arch = "wasm32"))]
             timeseries_outbound: None,
         }
     }
@@ -90,6 +96,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
     /// Attach a sync outbound queue for plain columnar collections.
     ///
     /// Must be called before any inserts if columnar sync is desired.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_outbound(&mut self, outbound: Arc<ColumnarOutbound>) {
         self.outbound = Some(outbound);
     }
@@ -99,6 +106,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
     /// When set, inserts into collections with `ColumnarProfile::Timeseries`
     /// are routed here instead of `outbound`, so the transport can send them
     /// as `TimeseriesPush` frames to Origin's timeseries engine.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_timeseries_outbound(&mut self, outbound: Arc<TimeseriesOutbound>) {
         self.timeseries_outbound = Some(outbound);
     }
@@ -434,6 +442,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         let mut s = Self::lock_state(&state_arc)?;
         s.mutation.insert(values).map_err(columnar_err_to_lite)?;
 
+        #[cfg(not(target_arch = "wasm32"))]
         if matches!(s.profile, ColumnarProfile::Timeseries { .. }) {
             // Timeseries rows must replicate via TimeseriesPush so that Origin
             // stores them in its timeseries engine, not the columnar MutationEngine.

@@ -8,6 +8,7 @@ mod diagnostic;
 mod graph_rag;
 mod health;
 pub(crate) mod lock_ext;
+#[cfg(not(target_arch = "wasm32"))]
 mod sync_delegate;
 mod trait_impl;
 

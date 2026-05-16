@@ -357,7 +357,7 @@ async fn shape_snapshot_data_queryable_after_import() {
 
 // ── §9.5 — CollectionPurged: documented as out of scope for beta ──────────────
 //
-// Status: OUT OF SCOPE for 0.1.0-beta.1.
+// Status: OUT OF SCOPE for 0.1.0.
 //
 // Origin's event plane DOES wire `CollectionPurged`:
 //   - `nodedb/nodedb/src/event/crdt_sync/delivery.rs` has

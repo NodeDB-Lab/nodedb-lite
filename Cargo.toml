@@ -7,7 +7,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0-beta.1"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
 license = "Apache-2.0"
@@ -17,7 +17,7 @@ homepage = "https://nodedb.dev"
 
 [workspace.dependencies]
 # Internal
-nodedb-lite = { path = "nodedb-lite", version = "0.1.0-beta.1", default-features = false }
+nodedb-lite = { path = "nodedb-lite", version = "0.1.0", default-features = false }
 nodedb-types = { version = "*" }
 nodedb-client = { version = "*" }
 nodedb-codec = { version = "*" }
@@ -31,6 +31,7 @@ nodedb-strict = { version = "*" }
 nodedb-columnar = { version = "*" }
 nodedb-sql = { version = "*" }
 nodedb-array = { version = "*" }
+nodedb-physical = { version = "*" }
 
 # Async
 tokio = { version = "1" }
@@ -81,3 +82,8 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+[profile.ci]
+inherits = "dev"
+debug = false
+incremental = false

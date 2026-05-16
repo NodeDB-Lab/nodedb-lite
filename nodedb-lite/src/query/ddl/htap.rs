@@ -9,9 +9,9 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
-impl<S: StorageEngine> LiteQueryEngine<S> {
+impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
     /// Handle: CREATE MATERIALIZED VIEW <target> FROM <source> [WITH storage = 'columnar']
     pub(in crate::query) async fn handle_create_materialized_view(
         &self,

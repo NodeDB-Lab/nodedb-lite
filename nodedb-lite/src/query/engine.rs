@@ -11,15 +11,17 @@ use nodedb_types::value::Value;
 
 use crate::engine::columnar::ColumnarEngine;
 use crate::engine::crdt::CrdtEngine;
+use crate::engine::fts::FtsState;
 use crate::engine::htap::HtapBridge;
 use crate::engine::strict::StrictEngine;
+use crate::engine::vector::VectorState;
 use crate::error::LiteError;
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
 use super::catalog::LiteCatalog;
 
 /// Lite-side query engine.
-pub struct LiteQueryEngine<S: StorageEngine> {
+pub struct LiteQueryEngine<S: StorageEngine + StorageEngineSync> {
     pub(in crate::query) crdt: Arc<Mutex<CrdtEngine>>,
     pub(in crate::query) strict: Arc<StrictEngine<S>>,
     pub(in crate::query) columnar: Arc<ColumnarEngine<S>>,
@@ -27,9 +29,12 @@ pub struct LiteQueryEngine<S: StorageEngine> {
     pub(in crate::query) storage: Arc<S>,
     pub(in crate::query) timeseries:
         Arc<Mutex<crate::engine::timeseries::engine::TimeseriesEngine>>,
+    pub(crate) vector_state: Arc<VectorState<S>>,
+    pub(crate) array_state: Arc<Mutex<crate::engine::array::engine::ArrayEngineState>>,
+    pub(crate) fts_state: Arc<FtsState>,
 }
 
-impl<S: StorageEngine> LiteQueryEngine<S> {
+impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
     pub fn new(
         crdt: Arc<Mutex<CrdtEngine>>,
         strict: Arc<StrictEngine<S>>,
@@ -37,6 +42,9 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         htap: Arc<HtapBridge>,
         storage: Arc<S>,
         timeseries: Arc<Mutex<crate::engine::timeseries::engine::TimeseriesEngine>>,
+        vector_state: Arc<VectorState<S>>,
+        array_state: Arc<Mutex<crate::engine::array::engine::ArrayEngineState>>,
+        fts_state: Arc<FtsState>,
     ) -> Self {
         Self {
             crdt,
@@ -45,6 +53,9 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             htap,
             storage,
             timeseries,
+            vector_state,
+            array_state,
+            fts_state,
         }
     }
 
@@ -80,105 +91,24 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
     }
 
     async fn execute_plan(&self, plan: &SqlPlan) -> Result<QueryResult, LiteError> {
-        match plan {
-            SqlPlan::ConstantResult { columns, values } => {
-                let row = values.iter().map(sql_value_to_value).collect();
-                Ok(QueryResult {
-                    columns: columns.clone(),
-                    rows: vec![row],
-                    rows_affected: 0,
-                })
-            }
-
-            SqlPlan::Scan {
-                collection,
-                engine,
-                sort_keys,
-                limit,
-                window_functions,
-                filters,
-                ..
-            } => {
-                // Guard unsupported scan modifiers. Silently ignoring these
-                // would produce wrong results (ORDER BY/LIMIT stripped,
-                // WHERE clause not applied).
-                if !sort_keys.is_empty() {
-                    return Err(LiteError::Unsupported {
-                        detail: "ORDER BY on collections is not supported in Lite 0.1.0"
-                            .to_string(),
-                    });
-                }
-                if limit.is_some() {
-                    return Err(LiteError::Unsupported {
-                        detail: "LIMIT on collections is not supported in Lite 0.1.0".to_string(),
-                    });
-                }
-                if !window_functions.is_empty() {
-                    return Err(LiteError::Unsupported {
-                        detail: "window functions (OVER) are not supported in Lite 0.1.0"
-                            .to_string(),
-                    });
-                }
-                // Guard complex WHERE filters that Lite cannot evaluate.
-                // A WHERE id = '<key>' is handled via PointGet (not Scan),
-                // so any filter reaching Scan is a predicate Lite cannot apply.
-                if !filters.is_empty() {
-                    return Err(LiteError::Unsupported {
-                        detail: format!(
-                            "WHERE predicates on collections are not supported in Lite 0.1.0 \
-                             (got {} filter(s)); use point-get by primary key instead",
-                            filters.len()
-                        ),
-                    });
-                }
-                self.execute_scan(collection, engine).await
-            }
-            SqlPlan::PointGet {
-                collection,
-                engine,
-                key_value,
-                ..
-            } => self.execute_point_get(collection, engine, key_value).await,
-            SqlPlan::Insert {
-                collection,
-                engine,
-                rows,
-                if_absent,
-                ..
-            } => {
-                self.execute_insert(collection, engine, rows, *if_absent)
-                    .await
-            }
-            SqlPlan::Update {
-                collection,
-                engine,
-                assignments,
-                target_keys,
-                ..
-            } => {
-                self.execute_update(collection, engine, assignments, target_keys)
-                    .await
-            }
-            SqlPlan::Delete {
-                collection,
-                engine,
-                target_keys,
-                ..
-            } => self.execute_delete(collection, engine, target_keys).await,
-            SqlPlan::Truncate { collection, .. } => self.execute_truncate(collection).await,
-            SqlPlan::Upsert {
-                collection,
-                engine,
-                rows,
-                ..
-            } => self.execute_insert(collection, engine, rows, true).await,
-            _ => Err(LiteError::Unsupported {
-                detail: format!("plan variant not supported in Lite 0.1.0: {plan:?}"),
-            }),
-        }
+        let mut visitor = super::visitor::LiteVisitor { engine: self };
+        nodedb_sql::dispatch(&mut visitor, plan)?.await
     }
 
-    async fn execute_scan(
+    pub(super) async fn execute_constant_result(
+        &self,
+        columns: &[String],
+        values: &[nodedb_sql::types::SqlValue],
+    ) -> Result<QueryResult, LiteError> {
+        let row = values.iter().map(sql_value_to_value).collect();
+        Ok(QueryResult {
+            columns: columns.to_vec(),
+            rows: vec![row],
+            rows_affected: 0,
+        })
+    }
+
+    pub(super) async fn execute_scan(
         &self,
         collection: &str,
         engine: &EngineType,
@@ -235,7 +165,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         }
     }
 
-    async fn execute_point_get(
+    pub(super) async fn execute_point_get(
         &self,
         collection: &str,
         engine: &EngineType,
@@ -294,7 +224,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         }
     }
 
-    async fn execute_insert(
+    pub(super) async fn execute_insert(
         &self,
         collection: &str,
         engine: &EngineType,
@@ -340,7 +270,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         })
     }
 
-    async fn execute_update(
+    pub(super) async fn execute_update(
         &self,
         collection: &str,
         engine: &EngineType,
@@ -382,7 +312,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         })
     }
 
-    async fn execute_delete(
+    pub(super) async fn execute_delete(
         &self,
         collection: &str,
         engine: &EngineType,
@@ -407,7 +337,10 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         })
     }
 
-    async fn execute_truncate(&self, collection: &str) -> Result<QueryResult, LiteError> {
+    pub(super) async fn execute_truncate(
+        &self,
+        collection: &str,
+    ) -> Result<QueryResult, LiteError> {
         self.crdt
             .lock()
             .map_err(|_| LiteError::LockPoisoned)?

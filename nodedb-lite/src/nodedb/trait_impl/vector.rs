@@ -2,19 +2,16 @@
 
 //! Vector engine helpers for `NodeDbLite`.
 
-use std::collections::HashMap;
-
 use loro::LoroValue;
 
 use nodedb_types::document::Document;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 use nodedb_types::filter::MetadataFilter;
 use nodedb_types::result::SearchResult;
-use nodedb_types::value::Value;
 
 use crate::nodedb::LockExt;
 use crate::nodedb::NodeDbLite;
-use crate::nodedb::convert::{loro_value_to_document, value_to_loro};
+use crate::nodedb::convert::value_to_loro;
 use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
 /// Internal fields stripped from search-result metadata for a single-vector collection.
@@ -34,104 +31,22 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         filter: Option<&MetadataFilter>,
         exclude_fields: &[&str],
     ) -> NodeDbResult<Vec<SearchResult>> {
-        {
-            let has_it = self.hnsw_indices.lock_or_recover().contains_key(index_key);
-            if !has_it {
-                let key = format!("hnsw:{index_key}");
-                if let Some(checkpoint) = self
-                    .storage
-                    .get(nodedb_types::Namespace::Vector, key.as_bytes())
-                    .await?
-                    && let Ok(Some(index)) =
-                        crate::engine::vector::graph::HnswIndex::from_checkpoint(&checkpoint)
-                {
-                    tracing::info!(index_key, "lazy-loaded HNSW collection from storage");
-                    self.hnsw_indices
-                        .lock_or_recover()
-                        .insert(index_key.to_string(), index);
-                }
-            }
-        }
-
-        let indices = self.hnsw_indices.lock_or_recover();
-        let Some(index) = indices.get(index_key) else {
-            return Ok(Vec::new());
-        };
-
-        let id_map = self.vector_id_map.lock_or_recover();
-        let crdt = self.crdt.lock_or_recover();
-
-        let fetch_k = if filter.is_some() { k * 3 } else { k };
-        let collection_size = id_map
-            .keys()
-            .filter(|key| key.starts_with(index_key))
-            .count();
-
-        let raw_results = if let Some(f) = filter
-            && collection_size <= 10_000
-        {
-            let mut allowed = roaring::RoaringBitmap::new();
-            for (composite_key, (doc_id, _)) in id_map.iter() {
-                if !composite_key.starts_with(index_key) {
-                    continue;
-                }
-                if let Some(loro_val) = crdt.read(collection, doc_id) {
-                    let doc = loro_value_to_document(doc_id, &loro_val);
-                    let json_doc = serde_json::to_value(&doc.fields).unwrap_or_default();
-                    if nodedb_query::metadata_filter::matches_metadata_filter(&json_doc, f)
-                        && let Some(vid_str) = composite_key.strip_prefix(&format!("{index_key}:"))
-                        && let Ok(vid) = vid_str.parse::<u32>()
-                    {
-                        allowed.insert(vid);
-                    }
-                }
-            }
-            if allowed.is_empty() {
-                return Ok(Vec::new());
-            }
-            index.search_filtered(query, k, self.search_ef, &allowed)
-        } else {
-            index.search(query, fetch_k, self.search_ef)
-        };
-
-        let results: Vec<SearchResult> = raw_results
-            .into_iter()
-            .filter(|r| !index.is_deleted(r.id))
-            .filter_map(|r| {
-                let composite_key = format!("{index_key}:{}", r.id);
-                let doc_id = id_map
-                    .get(&composite_key)
-                    .map(|(id, _)| id.clone())
-                    .unwrap_or_else(|| r.id.to_string());
-
-                let metadata = if let Some(loro_val) = crdt.read(collection, &doc_id) {
-                    let doc = loro_value_to_document(&doc_id, &loro_val);
-                    doc.fields
-                        .into_iter()
-                        .filter(|(k, _)| !exclude_fields.contains(&k.as_str()))
-                        .collect::<HashMap<String, Value>>()
-                } else {
-                    HashMap::new()
-                };
-
-                if let Some(f) = filter {
-                    let json_doc = serde_json::to_value(&metadata).unwrap_or_default();
-                    if !nodedb_query::metadata_filter::matches_metadata_filter(&json_doc, f) {
-                        return None;
-                    }
-                }
-
-                Some(SearchResult {
-                    id: doc_id,
-                    node_id: None,
-                    distance: r.distance,
-                    metadata,
-                })
-            })
-            .take(k)
-            .collect();
-
-        Ok(results)
+        crate::engine::vector::search::run_vector_search(
+            &self.vector_state,
+            &self.crdt,
+            index_key,
+            collection,
+            query,
+            k,
+            filter,
+            exclude_fields,
+            None,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Insert a single embedding into the collection's default HNSW index and
@@ -145,7 +60,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         metadata: Option<Document>,
     ) -> NodeDbResult<()> {
         let internal_id = {
-            let mut indices = self.hnsw_indices.lock_or_recover();
+            let mut indices = self.vector_state.hnsw_indices.lock_or_recover();
             let index = Self::ensure_hnsw(&mut indices, collection, embedding.len());
             let id_before = index.len() as u32;
             index
@@ -155,7 +70,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         };
 
         {
-            let mut id_map = self.vector_id_map.lock_or_recover();
+            let mut id_map = self.vector_state.vector_id_map.lock_or_recover();
             id_map.insert(
                 format!("{collection}:{internal_id}"),
                 (id.to_string(), internal_id),
@@ -175,6 +90,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         }
 
         // Enqueue for sync to Origin (no-op when sync is disabled).
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(q) = &self.vector_outbound {
             q.enqueue_insert(collection, id, embedding.to_vec(), embedding.len(), "");
         }
@@ -188,7 +104,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     /// on later inserts; no compaction is performed here.
     pub(super) async fn vector_delete_impl(&self, collection: &str, id: &str) -> NodeDbResult<()> {
         let internal_id = {
-            let id_map = self.vector_id_map.lock_or_recover();
+            let id_map = self.vector_state.vector_id_map.lock_or_recover();
             id_map
                 .iter()
                 .find(|(_, (doc_id, _))| doc_id == id)
@@ -196,7 +112,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         };
 
         if let Some(iid) = internal_id {
-            let mut indices = self.hnsw_indices.lock_or_recover();
+            let mut indices = self.vector_state.hnsw_indices.lock_or_recover();
             if let Some(index) = indices.get_mut(collection) {
                 index.delete(iid);
             }
@@ -208,6 +124,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         }
 
         // Enqueue for sync to Origin (no-op when sync is disabled).
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(q) = &self.vector_outbound {
             q.enqueue_delete(collection, id, "");
         }
@@ -237,7 +154,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         };
 
         let internal_id = {
-            let mut indices = self.hnsw_indices.lock_or_recover();
+            let mut indices = self.vector_state.hnsw_indices.lock_or_recover();
             let index = Self::ensure_hnsw(&mut indices, &index_key, embedding.len());
             let id_before = index.len() as u32;
             index
@@ -247,7 +164,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         };
 
         {
-            let mut id_map = self.vector_id_map.lock_or_recover();
+            let mut id_map = self.vector_state.vector_id_map.lock_or_recover();
             id_map.insert(
                 format!("{index_key}:{internal_id}"),
                 (id.to_string(), internal_id),
@@ -273,6 +190,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         }
 
         // Enqueue for sync to Origin (no-op when sync is disabled).
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(q) = &self.vector_outbound {
             q.enqueue_insert(
                 collection,

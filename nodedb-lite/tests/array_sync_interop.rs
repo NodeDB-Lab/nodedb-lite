@@ -1,34 +1,10 @@
-//! Real-transport array sync tests — require a live Origin node.
+//! Real-transport array sync follow-ups — `#[ignore]`d.
 //!
-//! Every test in this file is `#[ignore]` because array sync over the actual
-//! WebSocket transport has not been validated end-to-end for 0.1.0-beta.1.
-//! The in-process simulations live in `tests/array_sync_*.rs`; this file is
-//! the placeholder for promotion once Origin's outbound array-delta fan-out
-//! path is wired to Lite's `dispatch_frame` handler.
-//!
-//! ## What blocks promotion
-//!
-//! Origin's `session_handler.rs` dispatches inbound array messages
-//! (`ArraySnapshot`, `ArraySnapshotChunk`, `ArrayCatchupRequest`, `ArraySchema`,
-//! `ArrayAck`) to `OriginArrayInbound`.  The outbound path — Origin emitting
-//! `ArrayDeltaMsg` / `ArrayDeltaBatchMsg` back to Lite subscribers via
-//! `ArrayFanout` — is implemented in
-//! `nodedb/nodedb/src/control/array_sync/outbound/`.
-//!
-//! Lite's `sync/client/receive.rs` does not yet match on `SyncMessageType::ArrayDelta`
-//! or `SyncMessageType::ArrayDeltaBatch`; those frame types fall through to the
-//! catch-all arm.  Until that receive path is wired, a round-trip over a live
-//! Origin transport cannot be asserted.
-//!
-//! ## How to promote
-//!
-//! 1. Wire `SyncMessageType::ArrayDelta` and `SyncMessageType::ArrayDeltaBatch`
-//!    in `nodedb-lite/nodedb-lite/src/sync/client/receive.rs`.
-//! 2. Remove `#[ignore]` from the tests below and run:
-//!    `cargo nextest run -p nodedb-lite array_sync_interop`
-//! 3. Update `docs/lite-support-matrix.md`: change "Array sync" from
-//!    EXPERIMENTAL to PREVIEW (after 1 passing real-transport gate) or BETA
-//!    (after full suite passes).
+//! `ArrayDelta` / `ArrayDeltaBatch` receive is wired and gated by
+//! `tests/array_sync_interop_real.rs`. The two scenarios below — full
+//! put round-trip and post-disconnect catch-up — require Origin's outbound
+//! fan-out path (`ArrayFanout`) to deliver to subscribed Lite sessions and
+//! are deferred until that path lands.
 
 mod common;
 

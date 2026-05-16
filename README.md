@@ -13,7 +13,7 @@
 </p>
 
 <p>
-  <a href="#status"><strong>Status</strong></a>
+  <a href="#release-status"><strong>Release Status</strong></a>
   ·
   <a href="#platforms"><strong>Platforms</strong></a>
   ·
@@ -47,16 +47,31 @@
 
 NodeDB Lite replaces the usual SQLite + vector sidecar + ad hoc cache + custom sync layer stack with one embedded engine. Local reads stay in-process, writes remain available offline, and the same application code can later sync to NodeDB Origin without a rewrite.
 
-## Status
+## Release Status
 
-NodeDB Lite is in beta as of version `0.1.0-beta.1`. The Rust crate (`nodedb-lite`) is the primary supported surface. WASM (`nodedb-lite-wasm`) is preview — build and basic engine usage work end-to-end, but the npm package is not yet published. iOS FFI is in progress and not included in `0.1.0-beta.1`; see [Platforms](#platforms).
+NodeDB Lite is in **public beta** as of **v0.1.0 (2026-05-23)**. All engines listed in [`docs/lite-support-matrix.md`](docs/lite-support-matrix.md) are feature-complete and covered by tests. The public surface — the `NodeDb` trait, the supported SQL plan variants, the C FFI ABI, and the WASM / npm bindings — is stable; clients written against 0.1.0 will keep working through 1.0.
+
+**v0.1.0 — Beta (today).** Use it for embedded workloads and for piloting Lite ↔ Origin sync. The public surface is stable; expect internal changes (redb layout, on-disk index format, sync-protocol internals) between minor releases. Patch and minor bumps will land as needed.
+
+**v1.0.0 — Production-ready (target: 2026-07-23).** What 1.0 guarantees:
+
+- **API & SQL stability** — semver from 1.0 onward. No breaking changes to the `NodeDb` trait, the supported SQL plan variants, or the C FFI / WASM ABIs within a major.
+- **Sync protocol stability** — the Lite ↔ Origin WebSocket wire frames frozen at the version Origin ships in its 1.0.
+- **On-disk format stability** — no breaking migrations within 1.x. Forward-compatible upgrades only.
+- **Platform parity** — iOS FFI built and tested against a macOS environment; Android JNI packaging fully gated.
+- **Performance SLAs** — published p99 targets per engine, regression-gated in CI.
+- **Security audit** — third-party audit completed and findings remediated before 1.0 ships.
+
+Pre-1.0 versions may change internals between releases — that work is critical-path hardening (persistence layouts, sync coordination, platform packaging) that has to be exercised in real production conditions before we put a stability stamp on it. The public API, SQL surface, and sync wire frames won't break; everything underneath is fair game until 1.0.
+
+> **Note:** This release track applies to **NodeDB Lite** only. [NodeDB Origin](https://github.com/NodeDB-Lab/nodedb), [`ndb` CLI](https://github.com/NodeDB-Lab/nodedb-cli), and [NodeDB Studio](https://github.com/NodeDB-Lab/nodedb-studio) are versioned independently on their own tracks.
 
 ## Why NodeDB Lite
 
 - **One embedded engine, not a stitched-together client stack.** Vectors, graph, documents, full-text, timeseries, key-value, and other NodeDB data models run in one runtime with shared storage and one query surface.
 - **Built for offline-first.** Every write is captured as a CRDT delta locally, then merged to Origin when the network comes back.
 - **Same API as Origin.** The `NodeDb` trait is identical across Lite and server deployments, so moving from on-device to remote is a connection decision, not an architecture rewrite.
-- **Edge-ready.** Linux, macOS, Windows, Android, iOS, and browser/WASM support from the same product line.
+- **Edge-ready.** Linux, macOS, Windows, Android, and browser/WASM in `0.1.0`; iOS lands before `1.0`.
 
 ## When to Use
 
@@ -74,23 +89,22 @@ NodeDB Lite is in beta as of version `0.1.0-beta.1`. The Rust crate (`nodedb-lit
 | macOS                                     | `nodedb-lite`      | redb (file-backed)        | Native                                                             |
 | Windows                                   | `nodedb-lite`      | redb (file-backed)        | Native                                                             |
 | Android                                   | `nodedb-lite-ffi`  | redb + C FFI + Kotlin/JNI | Native                                                             |
-| iOS _(in progress — not in 0.1.0-beta.1)_ | `nodedb-lite-ffi`  | redb + C FFI (cbindgen)   | Native _(requires macOS build environment — not yet built/tested)_ |
+| iOS _(in progress — not in 0.1.0)_ | `nodedb-lite-ffi`  | redb + C FFI (cbindgen)   | Native _(requires macOS build environment — not yet built/tested)_ |
 | Browser                                   | `nodedb-lite-wasm` | redb (in-memory + OPFS)   | Target: < 10 MB                                                    |
 
 ## Packages
 
 ```bash
-# Rust (beta)
+# Rust
 cargo add nodedb-lite
 
-# JavaScript / TypeScript (WASM, preview — npm package not yet published)
-# Build locally: cd nodedb-lite-wasm && wasm-pack build --target web --release
-# npm install @nodedb/lite  # coming once npm publish lands
+# JavaScript / TypeScript (browser + Node)
+npm install @nodedb/lite
 ```
 
 ## Quick Start
 
-The Rust crate API in `0.1.0-beta.1`:
+The Rust crate API in `0.1.0`:
 
 ```rust
 use nodedb_lite::{NodeDbLite, RedbStorage};
@@ -121,7 +135,7 @@ let subgraph = db.graph_traverse("social", &start, 3, None).await?;
 
 ## Same API, Any Runtime
 
-The `NodeDb` trait is identical across Lite and Origin. Application code doesn't change:
+The `NodeDb` trait is identical across Lite and Origin. Application code doesn't change for the operations both implementations expose — Origin offers more (full SQL, Array DDL/DML, vector quantization, distributed search); see [`docs/lite-support-matrix.md`](docs/lite-support-matrix.md) for the exact Lite surface.
 
 ```rust
 // Works with both NodeDbLite (in-process) and NodeDbRemote (over network)
@@ -159,14 +173,12 @@ Converged:  Device and cloud share identical Loro state hash
 ## SQL support
 
 NodeDB Lite parses SQL via `nodedb-sql` and executes plans directly against local engines.
-8 of 44 `SqlPlan` variants are executed in `0.1.0-beta.1`: `ConstantResult`, `Scan` (partial),
+8 of 44 `SqlPlan` variants are executed in `0.1.0`: `ConstantResult`, `Scan` (partial),
 `PointGet`, `Insert`, `Upsert`, `Update`, `Delete`, and `Truncate`. JOIN, aggregates, CTE,
 window functions, vector/FTS/spatial SQL, and all Array DDL/DML variants return
 `LiteError::Unsupported`. The regression gate is `tests/sql_matrix.rs`.
 
-See [docs/lite-support-matrix.md](docs/lite-support-matrix.md) for the engine support matrix
-and [nodedb-lite/docs/lite-sql-support.md](nodedb-lite/docs/lite-sql-support.md) for the
-per-variant SQL matrix with file:line citations and known gaps.
+See [docs/lite-support-matrix.md](docs/lite-support-matrix.md) for the full engine, SQL, and sync support matrix.
 
 ## Performance
 
@@ -187,7 +199,7 @@ This repository contains three crates:
 | Crate              | Description                                           |
 | ------------------ | ----------------------------------------------------- |
 | `nodedb-lite`      | Core embedded database library                        |
-| `nodedb-lite-ffi`  | C FFI bindings for iOS/Android (cbindgen, Kotlin/JNI) |
+| `nodedb-lite-ffi`  | C FFI bindings for Android (cbindgen, Kotlin/JNI); iOS lands before 1.0 |
 | `nodedb-lite-wasm` | JavaScript/TypeScript bindings via wasm-bindgen       |
 
 ## Building from Source

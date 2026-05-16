@@ -24,9 +24,9 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         let dim = vectors[0].1.len();
 
         {
-            let mut indices = self.hnsw_indices.lock_or_recover();
+            let mut indices = self.vector_state.hnsw_indices.lock_or_recover();
             let index = Self::ensure_hnsw(&mut indices, collection, dim);
-            let mut id_map = self.vector_id_map.lock_or_recover();
+            let mut id_map = self.vector_state.vector_id_map.lock_or_recover();
 
             for &(id, embedding) in vectors {
                 let internal_id = index.len() as u32;
@@ -134,7 +134,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         let mut evicted = 0;
 
         let candidates: Vec<(String, usize)> = {
-            let indices = self.hnsw_indices.lock_or_recover();
+            let indices = self.vector_state.hnsw_indices.lock_or_recover();
             let mut sorted: Vec<(String, usize)> = indices
                 .iter()
                 .map(|(name, idx)| (name.clone(), idx.len()))
@@ -145,7 +145,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
 
         for (name, _) in candidates.into_iter().take(max_to_evict) {
             let checkpoint = {
-                let indices = self.hnsw_indices.lock_or_recover();
+                let indices = self.vector_state.hnsw_indices.lock_or_recover();
                 match indices.get(&name) {
                     Some(idx) => idx.checkpoint_to_bytes(),
                     None => continue,
@@ -159,7 +159,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
                 .map_err(NodeDbError::storage)?;
 
             {
-                let mut indices = self.hnsw_indices.lock_or_recover();
+                let mut indices = self.vector_state.hnsw_indices.lock_or_recover();
                 indices.remove(&name);
             }
 

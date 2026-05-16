@@ -9,9 +9,9 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
-impl<S: StorageEngine> LiteQueryEngine<S> {
+impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
     /// Handle: CREATE TIMESERIES COLLECTION <name> (<col_defs>) [PARTITION BY TIME(<interval>)]
     ///
     /// Creates a columnar collection with the Timeseries profile.

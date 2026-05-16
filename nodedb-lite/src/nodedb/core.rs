@@ -9,9 +9,11 @@ use nodedb_types::error::{NodeDbError, NodeDbResult};
 use super::lock_ext::LockExt;
 use crate::engine::columnar::ColumnarEngine;
 use crate::engine::crdt::CrdtEngine;
+use crate::engine::fts::FtsState;
 use crate::engine::graph::index::CsrIndex;
 use crate::engine::htap::HtapBridge;
 use crate::engine::strict::StrictEngine;
+use crate::engine::vector::VectorState;
 use crate::engine::vector::graph::{HnswIndex, HnswParams};
 use crate::memory::{EngineId, MemoryGovernor};
 use crate::storage::engine::{StorageEngine, StorageEngineSync, WriteOp};
@@ -35,8 +37,8 @@ pub(crate) const META_LAST_FLUSHED_MID: &[u8] = b"meta:last_flushed_mid";
 /// entirely offline. Optional sync to Origin via WebSocket.
 pub struct NodeDbLite<S: StorageEngine + StorageEngineSync> {
     pub(crate) storage: Arc<S>,
-    /// Per-collection HNSW indices.
-    pub(crate) hnsw_indices: Mutex<HashMap<String, HnswIndex>>,
+    /// Shared HNSW runtime state (indices, ID map, search_ef).
+    pub(crate) vector_state: Arc<VectorState<S>>,
     /// Per-collection CSR graph indices, keyed by collection name.
     pub(crate) csr: Mutex<HashMap<String, CsrIndex>>,
     /// CRDT engine for delta generation and sync.
@@ -44,15 +46,11 @@ pub struct NodeDbLite<S: StorageEngine + StorageEngineSync> {
     pub(crate) crdt: Arc<Mutex<CrdtEngine>>,
     /// Memory budget governor.
     pub(crate) governor: MemoryGovernor,
-    /// HNSW search ef parameter (configurable).
-    pub(crate) search_ef: usize,
-    /// Vector ID to collection+doc_id mapping (for CRDT integration).
-    pub(crate) vector_id_map: Mutex<HashMap<String, (String, u32)>>,
     /// SQL query engine (DataFusion over Loro documents and strict collections).
     pub(crate) query_engine: crate::query::LiteQueryEngine<S>,
-    /// Per-collection in-memory full-text search engine.
+    /// Shared FTS runtime state.
     /// Updated incrementally on `document_put` and `document_delete`.
-    pub(crate) fts: Mutex<crate::engine::fts::FtsCollectionManager>,
+    pub(crate) fts_state: Arc<FtsState>,
     /// Spatial R-tree indexes for geometry fields.
     pub(crate) spatial: Mutex<crate::engine::spatial::SpatialIndexManager>,
     /// Per-column secondary B-tree indexes for strict collections.
@@ -99,26 +97,31 @@ pub struct NodeDbLite<S: StorageEngine + StorageEngineSync> {
     ///
     /// Shared with `ColumnarEngine` so inserts are automatically enqueued.
     /// `None` when sync is disabled.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) columnar_outbound: Option<Arc<crate::sync::ColumnarOutbound>>,
     /// Outbound queue for vector insert/delete sync.
     ///
     /// Populated by `vector_insert_impl` / `vector_delete_impl` when sync is
     /// enabled. `None` when sync is disabled.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) vector_outbound: Option<Arc<crate::sync::VectorOutbound>>,
     /// Outbound queue for FTS index/delete sync.
     ///
     /// Populated by `index_document_text` / `remove_document_text` when sync
     /// is enabled. `None` when sync is disabled.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fts_outbound: Option<Arc<crate::sync::FtsOutbound>>,
     /// Outbound queue for spatial geometry insert/delete sync.
     ///
     /// Populated by `spatial_insert` / `spatial_delete` when sync is enabled.
     /// `None` when sync is disabled.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) spatial_outbound: Option<Arc<crate::sync::SpatialOutbound>>,
     /// Outbound queue for timeseries-profile columnar insert sync.
     ///
     /// Shared with `ColumnarEngine` so timeseries inserts are automatically
     /// enqueued.  `None` when sync is disabled.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) timeseries_outbound: Option<Arc<crate::sync::TimeseriesOutbound>>,
     /// When `false`, KV operations go directly to redb, bypassing Loro.
     /// Other engines (vector, graph, document) are unaffected.
@@ -281,7 +284,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         let csr = Self::restore_csr_indices(&storage).await?;
 
         // ── Restore HNSW indices ──
-        let hnsw_indices = Self::restore_hnsw_indices(&storage).await?;
+        let hnsw_map = Self::restore_hnsw_indices(&storage).await?;
 
         // ── Restore spatial indices ──
         let spatial = Self::restore_spatial_indices(&storage).await;
@@ -292,11 +295,17 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             .map_err(NodeDbError::storage)?;
 
         // ── Restore columnar engine ──
+        #[cfg(not(target_arch = "wasm32"))]
         let mut columnar = ColumnarEngine::restore(Arc::clone(&storage))
             .await
             .map_err(NodeDbError::storage)?;
+        #[cfg(target_arch = "wasm32")]
+        let columnar = ColumnarEngine::restore(Arc::clone(&storage))
+            .await
+            .map_err(NodeDbError::storage)?;
 
-        // Wire columnar sync outbound queue when sync is enabled.
+        // Wire per-engine sync outbound queues when sync is enabled (native only).
+        #[cfg(not(target_arch = "wasm32"))]
         let columnar_outbound: Option<Arc<crate::sync::ColumnarOutbound>> = if sync_enabled {
             let q = Arc::new(crate::sync::ColumnarOutbound::new());
             columnar.set_outbound(Arc::clone(&q));
@@ -305,28 +314,28 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             None
         };
 
-        // Wire vector sync outbound queue when sync is enabled.
+        #[cfg(not(target_arch = "wasm32"))]
         let vector_outbound: Option<Arc<crate::sync::VectorOutbound>> = if sync_enabled {
             Some(Arc::new(crate::sync::VectorOutbound::new()))
         } else {
             None
         };
 
-        // Wire FTS sync outbound queue when sync is enabled.
+        #[cfg(not(target_arch = "wasm32"))]
         let fts_outbound_init: Option<Arc<crate::sync::FtsOutbound>> = if sync_enabled {
             Some(Arc::new(crate::sync::FtsOutbound::new()))
         } else {
             None
         };
 
-        // Wire spatial sync outbound queue when sync is enabled.
+        #[cfg(not(target_arch = "wasm32"))]
         let spatial_outbound_init: Option<Arc<crate::sync::SpatialOutbound>> = if sync_enabled {
             Some(Arc::new(crate::sync::SpatialOutbound::new()))
         } else {
             None
         };
 
-        // Wire timeseries sync outbound queue when sync is enabled.
+        #[cfg(not(target_arch = "wasm32"))]
         let timeseries_outbound_init: Option<Arc<crate::sync::TimeseriesOutbound>> = if sync_enabled
         {
             let q = Arc::new(crate::sync::TimeseriesOutbound::new());
@@ -343,6 +352,16 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         let timeseries = Arc::new(Mutex::new(
             crate::engine::timeseries::engine::TimeseriesEngine::new(),
         ));
+        let vector_state = Arc::new(VectorState::from_restored(
+            Arc::clone(&storage),
+            128,
+            hnsw_map,
+        ));
+        let fts_state = Arc::new(FtsState::from_restored(fts_manager));
+        let array_engine =
+            crate::engine::array::ArrayEngineState::open(&storage).map_err(NodeDbError::storage)?;
+        let array_state = Arc::new(Mutex::new(array_engine));
+
         let query_engine = crate::query::LiteQueryEngine::new(
             Arc::clone(&crdt),
             Arc::clone(&strict),
@@ -350,11 +369,10 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             Arc::clone(&htap),
             Arc::clone(&storage),
             Arc::clone(&timeseries),
+            Arc::clone(&vector_state),
+            Arc::clone(&array_state),
+            Arc::clone(&fts_state),
         );
-
-        let array_engine =
-            crate::engine::array::ArrayEngineState::open(&storage).map_err(NodeDbError::storage)?;
-        let array_state = Arc::new(Mutex::new(array_engine));
 
         // ── Array CRDT sync state (non-wasm only) ─────────────────────────────
         #[cfg(not(target_arch = "wasm32"))]
@@ -407,14 +425,12 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
 
         let db = Self {
             storage,
-            hnsw_indices: Mutex::new(hnsw_indices),
+            vector_state,
             csr: Mutex::new(csr),
             crdt,
             governor,
-            search_ef: 128,
-            vector_id_map: Mutex::new(HashMap::new()),
             query_engine,
-            fts: Mutex::new(fts_manager),
+            fts_state,
             spatial: Mutex::new(spatial),
             secondary_indices: Mutex::new(HashMap::new()),
             strict,
@@ -432,10 +448,15 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             array_inbound,
             #[cfg(not(target_arch = "wasm32"))]
             array_catchup,
+            #[cfg(not(target_arch = "wasm32"))]
             columnar_outbound,
+            #[cfg(not(target_arch = "wasm32"))]
             vector_outbound,
+            #[cfg(not(target_arch = "wasm32"))]
             fts_outbound: fts_outbound_init,
+            #[cfg(not(target_arch = "wasm32"))]
             spatial_outbound: spatial_outbound_init,
+            #[cfg(not(target_arch = "wasm32"))]
             timeseries_outbound: timeseries_outbound_init,
             sync_enabled,
             kv_write_buf: Mutex::new(KvWriteBuffer {
@@ -448,7 +469,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         // When a checkpoint is present, `restore_fts_indices` has already loaded
         // the full index without re-tokenizing source documents.
         {
-            let fts = db.fts.lock_or_recover();
+            let fts = db.fts_state.manager.lock_or_recover();
             if fts.is_empty() {
                 drop(fts);
                 db.rebuild_text_indices();
@@ -681,7 +702,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
 
         // ── Persist HNSW indices ──
         {
-            let indices = self.hnsw_indices.lock_or_recover();
+            let indices = self.vector_state.hnsw_indices.lock_or_recover();
             let names: Vec<String> = indices.keys().cloned().collect();
             let names_bytes = zerompk::to_msgpack_vec(&names)
                 .map_err(|e| NodeDbError::serialization("msgpack", e))?;
@@ -721,7 +742,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         // ── Persist FTS indices (separate batch — potentially large) ──
         // Serialize synchronously while holding the lock, then write after.
         let fts_ops = {
-            let fts = self.fts.lock_or_recover();
+            let fts = self.fts_state.manager.lock_or_recover();
             let (indices, id_to_surrogate, next_surrogate) = fts.checkpoint_data();
             crate::engine::fts::checkpoint::serialize_fts(indices, id_to_surrogate, next_surrogate)?
         };
@@ -741,7 +762,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     fn rebuild_text_indices(&self) {
         let crdt = self.crdt.lock_or_recover();
         let collections = crdt.collection_names();
-        let mut fts = self.fts.lock_or_recover();
+        let mut fts = self.fts_state.manager.lock_or_recover();
 
         for collection in &collections {
             if collection.starts_with("__") {
@@ -820,23 +841,29 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             .collect::<Vec<_>>()
             .join(" ");
 
-        self.fts
+        self.fts_state
+            .manager
             .lock_or_recover()
             .index_document(collection, doc_id, &text);
 
         // Propagate to Origin via sync outbound queue.
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(q) = &self.fts_outbound {
             q.enqueue_index(collection, doc_id, text);
         }
+        #[cfg(target_arch = "wasm32")]
+        let _ = text;
     }
 
     /// Remove a document from the text index.
     pub(crate) fn remove_document_text(&self, collection: &str, doc_id: &str) {
-        self.fts
+        self.fts_state
+            .manager
             .lock_or_recover()
             .remove_document(collection, doc_id);
 
         // Propagate deletion to Origin via sync outbound queue.
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(q) = &self.fts_outbound {
             q.enqueue_delete(collection, doc_id);
         }
@@ -860,6 +887,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         let mut spatial = self.spatial.lock_or_recover();
         spatial.index_document(collection, field, doc_id, geometry);
         drop(spatial);
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(q) = &self.spatial_outbound {
             q.enqueue_insert(collection, field, doc_id, geometry);
         }
@@ -870,6 +898,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         let mut spatial = self.spatial.lock_or_recover();
         spatial.remove_document(collection, field, doc_id);
         drop(spatial);
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(q) = &self.spatial_outbound {
             q.enqueue_delete(collection, field, doc_id);
         }
@@ -921,7 +950,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
 
     /// Update memory governor with current engine usage.
     pub fn update_memory_stats(&self) {
-        if let Ok(indices) = self.hnsw_indices.lock() {
+        if let Ok(indices) = self.vector_state.hnsw_indices.lock() {
             let hnsw_bytes: usize = indices
                 .values()
                 .map(|idx| idx.len() * (idx.dim() * 4 + 128))
@@ -943,7 +972,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
 
     /// List currently loaded HNSW collections.
     pub fn loaded_collections(&self) -> NodeDbResult<Vec<String>> {
-        let indices = self.hnsw_indices.lock_or_recover();
+        let indices = self.vector_state.hnsw_indices.lock_or_recover();
         Ok(indices.keys().cloned().collect())
     }
 
@@ -1009,9 +1038,9 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             &row_id,
             &schema.columns,
             values,
-            &self.hnsw_indices,
+            &self.vector_state.hnsw_indices,
             &self.spatial,
-            &self.fts,
+            &self.fts_state.manager,
         );
 
         // Update secondary B-tree indexes on non-PK columns.
@@ -1059,7 +1088,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             collection,
             &row_id,
             &schema.columns,
-            &self.fts,
+            &self.fts_state.manager,
         );
 
         // Replicate delete to materialized columnar views (HTAP CDC).
@@ -1092,9 +1121,9 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             &row_id,
             &schema.columns,
             values,
-            &self.hnsw_indices,
+            &self.vector_state.hnsw_indices,
             &self.spatial,
-            &self.fts,
+            &self.fts_state.manager,
         );
 
         // Spatial profile: compute geohash for Point geometries and store
@@ -1105,7 +1134,8 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             )
             && let Some(hash) = crate::engine::columnar::spatial_profile::compute_geohash(&geom)
         {
-            self.fts
+            self.fts_state
+                .manager
                 .lock_or_recover()
                 .index_field(collection, "_geohash", &row_id, &hash);
         }

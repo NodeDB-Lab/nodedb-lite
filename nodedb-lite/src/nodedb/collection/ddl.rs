@@ -90,7 +90,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
 
         // Remove text index for this collection.
         {
-            let mut fts = self.fts.lock_or_recover();
+            let mut fts = self.fts_state.manager.lock_or_recover();
             fts.drop_collection(name);
         }
 

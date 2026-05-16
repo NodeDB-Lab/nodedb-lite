@@ -1,7 +1,7 @@
 //! SQL compatibility matrix regression gate.
 //!
-//! This test file is the machine-checkable form of
-//! `docs/lite-sql-support.md`. Every supported `SqlPlan` variant has at
+//! This test file is the machine-checkable form of the SQL support
+//! matrix in `docs/lite-support-matrix.md`. Every supported `SqlPlan` variant has at
 //! least one test that asserts the query succeeds (any non-error result is
 //! acceptable — row content is verified in `tests/sql_parity/`). Every
 //! unsupported variant has at least one test that asserts `LiteError::Unsupported`

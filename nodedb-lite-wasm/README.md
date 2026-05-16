@@ -6,15 +6,13 @@ WebAssembly bindings for **NodeDB-Lite**, the embedded variant of NodeDB. Runs i
 
 ## Status
 
-**Experimental / preview.** Build and basic engine usage work end-to-end. A WASM CI lane runs `cargo check --workspace --target wasm32-unknown-unknown`, a release build via `wasm-pack build`, and the `wasm-pack test --node` suite on every PR.
-
-Outstanding items before this is considered stable:
-
-- Published `npm` package
-
-Until that lands, treat the WASM target as preview. File issues for anything that breaks.
+Ships as part of NodeDB Lite `0.1.0`. The WASM CI lane runs `cargo check --workspace --target wasm32-unknown-unknown`, `wasm-pack build`, `wasm-pack test --node`, and `wasm-pack test --headless --chrome` on every PR. The npm package is published as `@nodedb/lite` on tag release (see `release.yml`).
 
 ## Install
+
+```bash
+npm install @nodedb/lite
+```
 
 Local development build:
 
@@ -76,7 +74,15 @@ console.log(result); // { columns: [...], rows: [...], rows_affected: 0 }
 
 ## Engines
 
-All eight engines work in WASM with the same SQL surface as native Lite:
+The WASM build exposes the same engines as native Lite via the typed
+`NodeDb` methods (`document_put`, `vector_insert`, `vector_search`,
+`graph_insert_edge`, `graph_traverse`, `text_search`, `kv_put`, etc.).
+SQL DDL coverage is bounded; see
+[`docs/lite-support-matrix.md`](../docs/lite-support-matrix.md) for the
+exact list of executed plan variants. Examples below show the syntax
+each engine accepts when the corresponding DDL/DML variant is in scope —
+several are valid against Origin and return `LiteError::Unsupported`
+when executed against Lite (e.g. `CREATE ARRAY`).
 
 | Engine          | DDL example                                                    |
 | --------------- | -------------------------------------------------------------- |
@@ -165,4 +171,4 @@ Apache-2.0. See the workspace root `LICENSE` file.
 
 - [WASM deployment guide](../../nodedb/docs/wasm.md)
 - [NodeDB-Lite](../nodedb-lite/) — native embedded crate
-- [NodeDB-Lite FFI](../nodedb-lite-ffi/) — C/iOS/Android bindings
+- [NodeDB-Lite FFI](../nodedb-lite-ffi/) — C / Android bindings (iOS lands before 1.0)

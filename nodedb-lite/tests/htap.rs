@@ -1,12 +1,10 @@
 //! HTAP bridge integration tests.
 //!
 //! Tests the CDC pipeline from strict document collections to columnar
-//! materialized views, query routing, and consistency controls.
-//!
-//! **Status: EXPERIMENTAL.** HTAP / materialized-view support in NodeDB Lite
-//! is classified EXPERIMENTAL in 0.1.0-beta.1. The bounded columnar insert/scan
-//! subset is BETA; the HTAP routing layer tested here is not covered by beta
-//! stability guarantees. See `docs/lite-support-matrix.md` § Columnar.
+//! materialized views, query routing, and consistency controls. The
+//! columnar insert/scan path is exercised by the 0.1.0 gates; HTAP
+//! materialized-view routing tested here is not part of those gates
+//! (see `docs/lite-support-matrix.md`).
 
 use std::sync::Arc;
 

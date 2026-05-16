@@ -9,6 +9,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use roaring;
+
 use nodedb_array::query::ceiling::{CeilingParams, CeilingResult, ceiling_resolve_cell};
 use nodedb_array::query::slice::{DimRange, Slice};
 use nodedb_array::schema::ArraySchema;
@@ -370,6 +372,28 @@ impl ArrayEngineState {
         }
 
         Ok(results)
+    }
+
+    /// Return the set of surrogates for all live cells whose coordinates
+    /// fall within `ranges` at or before `system_as_of`.
+    ///
+    /// This is the cross-engine prefilter primitive: the returned bitmap
+    /// gates the HNSW candidate set in the vector search path so only
+    /// vector records whose array-cell counterpart matches the slice
+    /// predicate are considered.
+    pub fn surrogate_bitmap_scan<S: StorageEngineSync>(
+        &mut self,
+        storage: &Arc<S>,
+        name: &str,
+        ranges: Vec<Option<DimRange>>,
+        system_as_of: i64,
+    ) -> Result<roaring::RoaringBitmap, LiteError> {
+        let cells = self.slice(storage, name, ranges, system_as_of)?;
+        let mut bitmap = roaring::RoaringBitmap::new();
+        for payload in cells {
+            bitmap.insert(payload.surrogate.as_u32());
+        }
+        Ok(bitmap)
     }
 
     /// Flush pending memtable data to a persistent segment.

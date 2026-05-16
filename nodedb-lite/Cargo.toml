@@ -36,6 +36,7 @@ sonic-rs = { workspace = true }
 loro = { workspace = true }
 redb = { workspace = true }
 nodedb-sql = { workspace = true }
+nodedb-physical = { workspace = true }
 arrow = { workspace = true }
 crc32c = { workspace = true }
 aes-gcm = { workspace = true }
