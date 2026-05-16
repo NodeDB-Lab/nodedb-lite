@@ -9,5 +9,6 @@ pub use nodedb_vector::hnsw::search as hnsw_search;
 pub use nodedb_vector::{DistanceMetric, HnswIndex, HnswParams, SearchResult};
 
 pub mod search;
+pub mod sidecar;
 pub mod state;
 pub use state::VectorState;

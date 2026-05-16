@@ -2,6 +2,9 @@
 
 use nodedb_types::Namespace;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
+use nodedb_types::vector_dtype::VectorStorageDtype;
+
+use crate::engine::vector::state::ensure_hnsw;
 
 use super::{LockExt, NodeDbLite};
 use crate::storage::engine::{StorageEngine, StorageEngineSync};
@@ -24,8 +27,15 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         let dim = vectors[0].1.len();
 
         {
+            let dtype = {
+                let configs = self.vector_state.per_index_config.lock_or_recover();
+                configs
+                    .get(collection)
+                    .map(|cfg| cfg.storage_dtype)
+                    .unwrap_or(VectorStorageDtype::F32)
+            };
             let mut indices = self.vector_state.hnsw_indices.lock_or_recover();
-            let index = Self::ensure_hnsw(&mut indices, collection, dim);
+            let index = ensure_hnsw(&mut indices, collection, dim, dtype);
             let mut id_map = self.vector_state.vector_id_map.lock_or_recover();
 
             for &(id, embedding) in vectors {

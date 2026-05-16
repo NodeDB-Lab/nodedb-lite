@@ -8,7 +8,9 @@ use nodedb_types::document::Document;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 use nodedb_types::filter::MetadataFilter;
 use nodedb_types::result::SearchResult;
+use nodedb_types::vector_dtype::VectorStorageDtype;
 
+use crate::engine::vector::state::ensure_hnsw;
 use crate::nodedb::LockExt;
 use crate::nodedb::NodeDbLite;
 use crate::nodedb::convert::value_to_loro;
@@ -60,8 +62,15 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         metadata: Option<Document>,
     ) -> NodeDbResult<()> {
         let internal_id = {
+            let dtype = {
+                let configs = self.vector_state.per_index_config.lock_or_recover();
+                configs
+                    .get(collection)
+                    .map(|cfg| cfg.storage_dtype)
+                    .unwrap_or(VectorStorageDtype::F32)
+            };
             let mut indices = self.vector_state.hnsw_indices.lock_or_recover();
-            let index = Self::ensure_hnsw(&mut indices, collection, embedding.len());
+            let index = ensure_hnsw(&mut indices, collection, embedding.len(), dtype);
             let id_before = index.len() as u32;
             index
                 .insert(embedding.to_vec())
@@ -75,6 +84,29 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
                 format!("{collection}:{internal_id}"),
                 (id.to_string(), internal_id),
             );
+        }
+
+        // Lazily install a sidecar if the collection config calls for one, then
+        // encode the just-inserted vector.  Sidecar install errors surface as
+        // BadRequest (e.g. unsupported codec).  Encode failures warn-and-continue
+        // so a single bad vector does not abort the insert; affected rows degrade
+        // to FP32 rerank at search time.
+        match crate::engine::vector::sidecar::ensure_sidecar(&self.vector_state, collection) {
+            Ok(true) => {
+                let mut sidecars = self.vector_state.codec_sidecars.lock_or_recover();
+                if let Some(sidecar) = sidecars.get_mut(collection)
+                    && let Err(e) = sidecar.encode_and_insert(internal_id, embedding)
+                {
+                    tracing::warn!(
+                        index_key = collection,
+                        id = internal_id,
+                        error = %e,
+                        "sidecar encode_and_insert failed; row falls back to FP32 rerank"
+                    );
+                }
+            }
+            Ok(false) => {}
+            Err(e) => return Err(NodeDbError::bad_request(e.to_string())),
         }
 
         {
@@ -112,9 +144,36 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         };
 
         if let Some(iid) = internal_id {
-            let mut indices = self.vector_state.hnsw_indices.lock_or_recover();
-            if let Some(index) = indices.get_mut(collection) {
-                index.delete(iid);
+            {
+                let mut indices = self.vector_state.hnsw_indices.lock_or_recover();
+                if let Some(index) = indices.get_mut(collection) {
+                    index.delete(iid);
+                }
+            }
+
+            // Remove the encoded entry from any installed sidecar so it
+            // doesn't carry stale data after the HNSW slot is tombstoned.
+            {
+                let mut sidecars = self.vector_state.codec_sidecars.lock_or_recover();
+                if let Some(sidecar) = sidecars.get_mut(collection) {
+                    sidecar.remove(iid);
+                }
+            }
+
+            // Persist the updated sidecar after every delete. Deletes change
+            // the sidecar's encoded-vector set in a way that cannot be
+            // reconstructed cheaply from HNSW vectors alone (a deleted slot
+            // is tombstoned and has no live vector to re-encode). Persisting
+            // here ensures restarts don't re-surface deleted entries.
+            if let Err(e) =
+                crate::engine::vector::sidecar::persist_sidecar(&self.vector_state, collection)
+                    .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    collection,
+                    "sidecar persist after delete failed; in-memory sidecar still valid"
+                );
             }
         }
 
@@ -154,8 +213,15 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         };
 
         let internal_id = {
+            let dtype = {
+                let configs = self.vector_state.per_index_config.lock_or_recover();
+                configs
+                    .get(&index_key)
+                    .map(|cfg| cfg.storage_dtype)
+                    .unwrap_or(VectorStorageDtype::F32)
+            };
             let mut indices = self.vector_state.hnsw_indices.lock_or_recover();
-            let index = Self::ensure_hnsw(&mut indices, &index_key, embedding.len());
+            let index = ensure_hnsw(&mut indices, &index_key, embedding.len(), dtype);
             let id_before = index.len() as u32;
             index
                 .insert(embedding.to_vec())
@@ -169,6 +235,26 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
                 format!("{index_key}:{internal_id}"),
                 (id.to_string(), internal_id),
             );
+        }
+
+        // Lazily install a sidecar if the collection config calls for one, then
+        // encode the just-inserted vector.  Encode failures warn-and-continue.
+        match crate::engine::vector::sidecar::ensure_sidecar(&self.vector_state, &index_key) {
+            Ok(true) => {
+                let mut sidecars = self.vector_state.codec_sidecars.lock_or_recover();
+                if let Some(sidecar) = sidecars.get_mut(&index_key)
+                    && let Err(e) = sidecar.encode_and_insert(internal_id, embedding)
+                {
+                    tracing::warn!(
+                        index_key = %index_key,
+                        id = internal_id,
+                        error = %e,
+                        "sidecar encode_and_insert failed; row falls back to FP32 rerank"
+                    );
+                }
+            }
+            Ok(false) => {}
+            Err(e) => return Err(NodeDbError::bad_request(e.to_string())),
         }
 
         {
