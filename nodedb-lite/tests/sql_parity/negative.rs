@@ -17,7 +17,7 @@ use nodedb_lite::storage::redb_storage::RedbStorage;
 use nodedb_types::document::Document;
 use nodedb_types::value::Value;
 
-use crate::common::sql::{assert_lite_unsupported, open_lite};
+use crate::common::sql::open_lite;
 
 // ── Setup helpers ─────────────────────────────────────────────────────────────
 
@@ -31,128 +31,126 @@ async fn seed_collection(db: &Arc<NodeDbLite<RedbStorage>>, collection: &str, id
 }
 
 // ── JOIN ──────────────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn join_is_unsupported() {
-    let db = open_lite().await;
-    seed_collection(&db, "users", "u1").await;
-    seed_collection(&db, "orders", "o1").await;
-    assert_lite_unsupported(
-        &db,
-        "SELECT a.id, b.id FROM users a JOIN orders b ON a.id = b.user_id",
-    )
-    .await;
-}
+// Join is now implemented — negative test removed.
 
 // ── Window functions ──────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn window_function_is_unsupported() {
+async fn window_function_returns_row_numbers() {
     let db = open_lite().await;
-    seed_collection(&db, "users", "u1").await;
-    assert_lite_unsupported(
-        &db,
-        "SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM users",
-    )
-    .await;
+    seed_collection(&db, "win_users", "u1").await;
+    seed_collection(&db, "win_users", "u2").await;
+    let r = db
+        .execute_sql(
+            "SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM win_users",
+            &[],
+        )
+        .await
+        .expect("window function must succeed");
+    assert_eq!(r.rows.len(), 2, "window function must return all rows");
 }
 
 // ── Aggregates ────────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn aggregate_count_is_unsupported() {
-    let db = open_lite().await;
-    seed_collection(&db, "users", "u1").await;
-    assert_lite_unsupported(&db, "SELECT COUNT(*) FROM users").await;
-}
+// Aggregate is now implemented — negative test removed.
 
 // ── Subqueries ────────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn subquery_in_where_is_unsupported() {
-    let db = open_lite().await;
-    seed_collection(&db, "users", "u1").await;
-    seed_collection(&db, "orders", "o1").await;
-    assert_lite_unsupported(
-        &db,
-        "SELECT id FROM users WHERE id IN (SELECT user_id FROM orders)",
-    )
-    .await;
-}
+// Subquery (IN with SELECT) is now implemented via Join lowering — negative test removed.
 
 // ── GROUP BY ──────────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn group_by_is_unsupported() {
-    let db = open_lite().await;
-    seed_collection(&db, "users", "u1").await;
-    assert_lite_unsupported(&db, "SELECT id, COUNT(*) FROM users GROUP BY id").await;
-}
+// GROUP BY is now implemented — negative test removed.
 
 // ── HAVING ────────────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn having_is_unsupported() {
-    let db = open_lite().await;
-    seed_collection(&db, "users", "u1").await;
-    assert_lite_unsupported(
-        &db,
-        "SELECT id, COUNT(*) FROM users GROUP BY id HAVING COUNT(*) > 1",
-    )
-    .await;
-}
+// HAVING is now implemented — negative test removed.
 
 // ── ORDER BY with LIMIT on a collection ──────────────────────────────────────
 
 #[tokio::test]
-async fn order_by_limit_is_unsupported() {
+async fn order_by_limit_sorts_and_truncates() {
     let db = open_lite().await;
-    seed_collection(&db, "users", "u1").await;
-    assert_lite_unsupported(&db, "SELECT id FROM users ORDER BY id LIMIT 10").await;
+    seed_collection(&db, "ob_limit_users", "b").await;
+    seed_collection(&db, "ob_limit_users", "a").await;
+    let r = db
+        .execute_sql("SELECT id FROM ob_limit_users ORDER BY id LIMIT 10", &[])
+        .await
+        .expect("ORDER BY ... LIMIT must succeed");
+    assert_eq!(r.rows.len(), 2, "ORDER BY LIMIT must return rows");
+    let first = r.rows[0][0].to_string();
+    let second = r.rows[1][0].to_string();
+    assert!(
+        first <= second,
+        "ORDER BY id must produce ascending order; got {first:?} before {second:?}"
+    );
 }
 
 // ── CTE (WITH clause) ─────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn cte_is_unsupported() {
+async fn cte_resolves_inline() {
     let db = open_lite().await;
-    seed_collection(&db, "users", "u1").await;
-    assert_lite_unsupported(&db, "WITH cte AS (SELECT id FROM users) SELECT * FROM cte").await;
+    seed_collection(&db, "cte_users", "u1").await;
+    // CTE must execute without error (previously returned Unsupported).
+    db.execute_sql(
+        "WITH cte AS (SELECT id FROM cte_users) SELECT id FROM cte",
+        &[],
+    )
+    .await
+    .expect("CTE must succeed");
 }
 
 // ── Vector SQL (VECTOR_DISTANCE) ──────────────────────────────────────────────
 
 #[tokio::test]
-async fn vector_distance_sql_is_unsupported() {
+async fn vector_distance_sql_returns_results() {
     let db = open_lite().await;
     seed_collection(&db, "embeddings", "e1").await;
-    assert_lite_unsupported(
-        &db,
-        "SELECT id FROM embeddings ORDER BY vector_distance(embedding, '[1,0,0]') LIMIT 5",
-    )
-    .await;
+    let r = db
+        .execute_sql(
+            "SELECT id FROM embeddings ORDER BY vector_distance(embedding, '[1,0,0]') LIMIT 5",
+            &[],
+        )
+        .await
+        .expect("vector_distance SQL must succeed");
+    assert_eq!(
+        r.columns,
+        vec!["id".to_string(), "distance".to_string()],
+        "vector_distance must return id and distance columns"
+    );
 }
 
 // ── FTS SEARCH function ───────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn fts_search_sql_is_unsupported() {
+async fn fts_search_sql_returns_results() {
     let db = open_lite().await;
     seed_collection(&db, "docs", "d1").await;
-    assert_lite_unsupported(
-        &db,
-        "SELECT id FROM docs WHERE SEARCH(content, 'hello world')",
-    )
-    .await;
+    let r = db
+        .execute_sql(
+            "SELECT id FROM docs WHERE SEARCH(content, 'hello world')",
+            &[],
+        )
+        .await
+        .expect("SEARCH SQL must succeed");
+    assert_eq!(
+        r.columns,
+        vec!["id".to_string(), "score".to_string()],
+        "SEARCH must return id and score columns"
+    );
 }
 
 // ── CREATE INDEX ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn create_index_is_unsupported() {
+async fn create_index_registers_field_index() {
     let db = open_lite().await;
     seed_collection(&db, "users", "u1").await;
-    assert_lite_unsupported(&db, "CREATE INDEX idx_name ON users (name)").await;
+    let r = db
+        .execute_sql("CREATE INDEX idx_name ON users (name)", &[])
+        .await
+        .expect("CREATE INDEX must succeed");
+    assert_eq!(
+        r.rows_affected, 0,
+        "CREATE INDEX on empty field produces 0 rows_affected"
+    );
 }
 
 // ── ALTER COLLECTION (schema evolution on strict) ─────────────────────────────
@@ -183,9 +181,11 @@ async fn alter_strict_collection_is_rejected() {
 // ── DROP INDEX ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn drop_index_is_unsupported() {
+async fn drop_index_succeeds() {
     let db = open_lite().await;
-    assert_lite_unsupported(&db, "DROP INDEX idx_name ON users").await;
+    db.execute_sql("DROP INDEX idx_name ON users", &[])
+        .await
+        .expect("DROP INDEX must succeed");
 }
 
 // ── Graph MATCH — parse-level rejection ──────────────────────────────────────

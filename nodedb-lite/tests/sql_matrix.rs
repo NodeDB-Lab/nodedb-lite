@@ -210,28 +210,50 @@ async fn supported_truncate() {
 // ── Scan guards ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn unsupported_scan_order_by() {
+async fn scan_order_by_sorts_rows() {
     let db = open_db().await;
-    seed(&db, "ng_scan", "s1").await;
-    assert_unsupported(&db, "SELECT id FROM ng_scan ORDER BY id").await;
+    seed(&db, "ob_coll", "b").await;
+    seed(&db, "ob_coll", "a").await;
+    let r = db
+        .execute_sql("SELECT id FROM ob_coll ORDER BY id", &[])
+        .await
+        .expect("ORDER BY must succeed");
+    assert_eq!(r.rows.len(), 2, "ORDER BY must return all rows");
+    // First row must sort before second (ascending).
+    let first = r.rows[0][0].to_string();
+    let second = r.rows[1][0].to_string();
+    assert!(
+        first <= second,
+        "ORDER BY id must produce ascending order; got {first:?} before {second:?}"
+    );
 }
 
 #[tokio::test]
-async fn unsupported_scan_limit() {
+async fn scan_limit_truncates_rows() {
     let db = open_db().await;
-    seed(&db, "ng_scan_limit", "s1").await;
-    assert_unsupported(&db, "SELECT id FROM ng_scan_limit LIMIT 5").await;
+    for i in 0..5u32 {
+        seed(&db, "lim_coll", &format!("r{i}")).await;
+    }
+    let r = db
+        .execute_sql("SELECT id FROM lim_coll LIMIT 3", &[])
+        .await
+        .expect("LIMIT must succeed");
+    assert_eq!(r.rows.len(), 3, "LIMIT 3 must return exactly 3 rows");
 }
 
 #[tokio::test]
-async fn unsupported_scan_window_function() {
+async fn scan_window_function_works() {
     let db = open_db().await;
-    seed(&db, "ng_win", "s1").await;
-    assert_unsupported(
-        &db,
-        "SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM ng_win",
-    )
-    .await;
+    seed(&db, "win_coll", "w1").await;
+    seed(&db, "win_coll", "w2").await;
+    let r = db
+        .execute_sql(
+            "SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM win_coll",
+            &[],
+        )
+        .await
+        .expect("window function must succeed");
+    assert_eq!(r.rows.len(), 2, "window function must return all rows");
 }
 
 #[tokio::test]
@@ -243,74 +265,33 @@ async fn unsupported_scan_where_predicate() {
 }
 
 // ── Join ─────────────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn unsupported_join() {
-    let db = open_db().await;
-    seed(&db, "ng_a", "a1").await;
-    seed(&db, "ng_b", "b1").await;
-    assert_unsupported(
-        &db,
-        "SELECT a.id, b.id FROM ng_a a JOIN ng_b b ON a.id = b.id",
-    )
-    .await;
-}
+// Join is now implemented — negative test removed.
 
 // ── Aggregate ────────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn unsupported_aggregate_count() {
-    let db = open_db().await;
-    seed(&db, "ng_agg", "a1").await;
-    assert_unsupported(&db, "SELECT COUNT(*) FROM ng_agg").await;
-}
-
-#[tokio::test]
-async fn unsupported_group_by() {
-    let db = open_db().await;
-    seed(&db, "ng_grp", "a1").await;
-    assert_unsupported(&db, "SELECT id, COUNT(*) FROM ng_grp GROUP BY id").await;
-}
-
-#[tokio::test]
-async fn unsupported_having() {
-    let db = open_db().await;
-    seed(&db, "ng_hav", "a1").await;
-    assert_unsupported(
-        &db,
-        "SELECT id, COUNT(*) FROM ng_hav GROUP BY id HAVING COUNT(*) > 1",
-    )
-    .await;
-}
+// Aggregate, GROUP BY, and HAVING are now implemented — negative tests removed.
 
 // ── Subquery / CTE ────────────────────────────────────────────────────────────
+// Subquery (IN with SELECT) is now implemented via Join lowering — negative test removed.
 
 #[tokio::test]
-async fn unsupported_subquery_in_where() {
+async fn cte_resolves_inline() {
     let db = open_db().await;
-    seed(&db, "ng_sub_outer", "o1").await;
-    seed(&db, "ng_sub_inner", "i1").await;
-    assert_unsupported(
+    seed(&db, "cte_coll", "c1").await;
+    // CTE must execute without error (previously returned Unsupported).
+    assert_ok(
         &db,
-        "SELECT id FROM ng_sub_outer WHERE id IN (SELECT id FROM ng_sub_inner)",
+        "WITH cte AS (SELECT id FROM cte_coll) SELECT id FROM cte",
     )
     .await;
-}
-
-#[tokio::test]
-async fn unsupported_cte() {
-    let db = open_db().await;
-    seed(&db, "ng_cte", "c1").await;
-    assert_unsupported(&db, "WITH cte AS (SELECT id FROM ng_cte) SELECT * FROM cte").await;
 }
 
 // ── Vector / FTS / Spatial ────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn unsupported_vector_distance_sql() {
+async fn vector_distance_sql() {
     let db = open_db().await;
     seed(&db, "ng_vec", "v1").await;
-    assert_unsupported(
+    assert_ok(
         &db,
         "SELECT id FROM ng_vec ORDER BY vector_distance(emb, '[1,0,0]') LIMIT 5",
     )
@@ -318,10 +299,10 @@ async fn unsupported_vector_distance_sql() {
 }
 
 #[tokio::test]
-async fn unsupported_fts_search_sql() {
+async fn fts_search_sql() {
     let db = open_db().await;
     seed(&db, "ng_fts", "f1").await;
-    assert_unsupported(
+    assert_ok(
         &db,
         "SELECT id FROM ng_fts WHERE SEARCH(content, 'hello world')",
     )
@@ -329,33 +310,22 @@ async fn unsupported_fts_search_sql() {
 }
 
 // ── Set operations ────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn unsupported_union() {
-    let db = open_db().await;
-    seed(&db, "ng_union_a", "a1").await;
-    seed(&db, "ng_union_b", "b1").await;
-    assert_unsupported(
-        &db,
-        "SELECT id FROM ng_union_a UNION SELECT id FROM ng_union_b",
-    )
-    .await;
-}
+// UNION / INTERSECT / EXCEPT are now implemented — negative tests removed.
 
 // ── Index DDL ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn unsupported_create_index() {
+async fn create_index() {
     let db = open_db().await;
     seed(&db, "ng_idx", "i1").await;
-    assert_unsupported(&db, "CREATE INDEX idx_name ON ng_idx (name)").await;
+    assert_ok(&db, "CREATE INDEX idx_name ON ng_idx (name)").await;
 }
 
 #[tokio::test]
-async fn unsupported_drop_index() {
+async fn drop_index() {
     let db = open_db().await;
-    // DROP INDEX does not require the collection to exist.
-    assert_unsupported(&db, "DROP INDEX idx_name ON ng_idx").await;
+    // DROP INDEX does not require the collection to have any indexed rows.
+    assert_ok(&db, "DROP INDEX idx_name ON ng_idx").await;
 }
 
 // ── Array DDL/DML ─────────────────────────────────────────────────────────────
