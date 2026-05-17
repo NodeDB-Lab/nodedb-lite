@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use loro::LoroValue;
 use nodedb_crdt::CrdtState;
+use sonic_rs::JsonValueTrait as _;
 
 use crate::error::LiteError;
 
@@ -584,6 +585,186 @@ impl CrdtEngine {
     /// Access the underlying `CrdtState` for advanced operations.
     pub fn state(&self) -> &CrdtState {
         &self.state
+    }
+
+    // ─── Version-History Operations ──────────────────────────────────
+
+    /// Export the oplog delta from a specific version to the current state.
+    ///
+    /// Returns the Loro update bytes that transform `from_version` into
+    /// the current oplog state. Used by `ExportDelta`.
+    pub fn export_delta_from(
+        &self,
+        from_version: &loro::VersionVector,
+    ) -> Result<Vec<u8>, LiteError> {
+        self.state
+            .export_updates_since(from_version)
+            .map_err(|e| LiteError::Storage {
+                detail: format!("export_delta_from: {e}"),
+            })
+    }
+
+    /// Compact history at a specific version, discarding oplog entries before it.
+    ///
+    /// The current state and all versions after the target are preserved.
+    /// Used by `CompactAtVersion`.
+    pub fn compact_at_version(&mut self, version: &loro::VersionVector) -> Result<(), LiteError> {
+        self.state
+            .compact_at_version(version)
+            .map_err(|e| LiteError::Storage {
+                detail: format!("compact_at_version: {e}"),
+            })
+    }
+
+    // ─── LoroMovableList Operations ──────────────────────────────────
+
+    /// Run `body` against the doc, capture the resulting Loro delta against
+    /// the pre-mutation version vector, and push it onto the pending-deltas
+    /// queue tagged with a fresh mutation id. Used to factor the
+    /// "snapshot → mutate → export delta → enqueue" envelope shared by all
+    /// LoroMovableList helpers.
+    fn with_delta_capture<F>(
+        &mut self,
+        collection: &str,
+        document_id: &str,
+        op_name: &str,
+        body: F,
+    ) -> Result<(), LiteError>
+    where
+        F: FnOnce(&loro::LoroDoc) -> Result<(), LiteError>,
+    {
+        let version_before = self.state.doc().oplog_vv();
+        body(self.state.doc())?;
+        let delta_bytes = self
+            .state
+            .doc()
+            .export(loro::ExportMode::updates(&version_before))
+            .map_err(|e| LiteError::Storage {
+                detail: format!("{op_name} delta export: {e}"),
+            })?;
+        let mutation_id = self.next_mutation_id.fetch_add(1, Ordering::Relaxed);
+        self.pending_deltas.push(PendingDelta {
+            mutation_id,
+            collection: collection.to_string(),
+            document_id: document_id.to_string(),
+            delta_bytes,
+        });
+        Ok(())
+    }
+
+    /// Insert a new LoroMap block into a document's movable list at `index`.
+    ///
+    /// `fields` is a `sonic_rs::Value` object; each top-level key is
+    /// recursively converted via [`sonic_value_to_loro`] so nested objects /
+    /// arrays survive the round-trip as `LoroValue::Map` / `LoroValue::List`.
+    pub fn list_insert(
+        &mut self,
+        collection: &str,
+        document_id: &str,
+        list_path: &str,
+        index: usize,
+        fields: &sonic_rs::Value,
+    ) -> Result<(), LiteError> {
+        use sonic_rs::JsonContainerTrait as _;
+
+        self.with_delta_capture(collection, document_id, "list_insert", |doc| {
+            let block = nodedb_crdt::list_ops::list_insert_container(
+                doc,
+                collection,
+                document_id,
+                list_path,
+                index,
+            )
+            .map_err(|e| LiteError::Storage {
+                detail: format!("list_insert container: {e}"),
+            })?;
+
+            if let Some(obj) = fields.as_object() {
+                for (k, v) in obj {
+                    block
+                        .insert(k, sonic_value_to_loro(v))
+                        .map_err(|e| LiteError::Storage {
+                            detail: format!("list_insert field '{k}': {e}"),
+                        })?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Delete a block from a document's movable list at `index`.
+    pub fn list_delete(
+        &mut self,
+        collection: &str,
+        document_id: &str,
+        list_path: &str,
+        index: usize,
+    ) -> Result<(), LiteError> {
+        self.with_delta_capture(collection, document_id, "list_delete", |doc| {
+            nodedb_crdt::list_ops::list_delete(doc, collection, document_id, list_path, index)
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("list_delete: {e}"),
+                })
+        })
+    }
+
+    /// Move a block within a document's movable list from `from_index` to `to_index`.
+    pub fn list_move(
+        &mut self,
+        collection: &str,
+        document_id: &str,
+        list_path: &str,
+        from_index: usize,
+        to_index: usize,
+    ) -> Result<(), LiteError> {
+        self.with_delta_capture(collection, document_id, "list_move", |doc| {
+            nodedb_crdt::list_ops::list_move(
+                doc,
+                collection,
+                document_id,
+                list_path,
+                from_index,
+                to_index,
+            )
+            .map_err(|e| LiteError::Storage {
+                detail: format!("list_move: {e}"),
+            })
+        })
+    }
+}
+
+/// Convert a `sonic_rs::Value` to a `loro::LoroValue`, recursing into
+/// objects and arrays so nested data is preserved as `LoroValue::Map` /
+/// `LoroValue::List` rather than collapsed to an opaque JSON string.
+///
+/// Plain `LoroValue` containers (as opposed to `LoroMap` / `LoroList`
+/// containers attached to the document) are value-only and have no CRDT
+/// identity — that is the right shape for a field inserted onto a block
+/// map: it round-trips through `read()` as a `LoroValue::Map`/`List`.
+fn sonic_value_to_loro(v: &sonic_rs::Value) -> loro::LoroValue {
+    use sonic_rs::JsonContainerTrait as _;
+
+    if v.is_null() {
+        loro::LoroValue::Null
+    } else if let Some(b) = v.as_bool() {
+        loro::LoroValue::Bool(b)
+    } else if let Some(n) = v.as_i64() {
+        loro::LoroValue::I64(n)
+    } else if let Some(f) = v.as_f64() {
+        loro::LoroValue::Double(f)
+    } else if v.is_str() {
+        loro::LoroValue::String(v.as_str().unwrap_or("").to_string().into())
+    } else if let Some(arr) = v.as_array() {
+        let items: Vec<loro::LoroValue> = arr.iter().map(sonic_value_to_loro).collect();
+        loro::LoroValue::List(items.into())
+    } else if let Some(obj) = v.as_object() {
+        let map: std::collections::HashMap<String, loro::LoroValue> = obj
+            .iter()
+            .map(|(k, vv)| (k.to_string(), sonic_value_to_loro(vv)))
+            .collect();
+        loro::LoroValue::Map(map.into())
+    } else {
+        loro::LoroValue::Null
     }
 }
 
