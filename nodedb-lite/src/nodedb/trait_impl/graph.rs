@@ -12,7 +12,10 @@ use nodedb_types::filter::EdgeFilter;
 use nodedb_types::graph::GraphStats;
 use nodedb_types::id::{EdgeId, NodeId};
 use nodedb_types::result::{SubGraph, SubGraphEdge, SubGraphNode};
+use nodedb_types::value::Value;
 
+use crate::engine::array::ops::util::time::now_ms;
+use crate::engine::graph::history;
 use crate::engine::graph::index::{CsrIndex, Direction};
 use crate::engine::graph::traversal::DEFAULT_MAX_VISITED;
 use crate::nodedb::LockExt;
@@ -171,6 +174,35 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
                 .map_err(NodeDbError::storage)?;
         }
 
+        // Record edge birth in the bitemporal history table if the collection
+        // has bitemporal tracking enabled.
+        let bitemporal = history::is_bitemporal(self.storage.as_ref(), collection)
+            .await
+            .unwrap_or(false);
+        if bitemporal {
+            let system_from_ms = now_ms();
+            let props_value = {
+                let mut m = std::collections::HashMap::new();
+                m.insert("src".to_string(), Value::String(from.as_str().to_string()));
+                m.insert("dst".to_string(), Value::String(to.as_str().to_string()));
+                m.insert("label".to_string(), Value::String(edge_type.to_string()));
+                if let Some(ref props) = properties {
+                    for (k, v) in &props.fields {
+                        m.insert(k.clone(), v.clone());
+                    }
+                }
+                Value::Object(m)
+            };
+            let _ = history::record_edge_insert(
+                self.storage.as_ref(),
+                collection,
+                &edge_key,
+                &props_value,
+                system_from_ms,
+            )
+            .await;
+        }
+
         self.update_memory_stats();
         Ok(edge_id)
     }
@@ -198,6 +230,21 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             let mut crdt = self.crdt.lock_or_recover();
             crdt.delete(&edge_coll, &edge_key)
                 .map_err(NodeDbError::storage)?;
+        }
+
+        // Finalize the history entry if the collection is bitemporal.
+        let bitemporal = history::is_bitemporal(self.storage.as_ref(), collection)
+            .await
+            .unwrap_or(false);
+        if bitemporal {
+            let system_to_ms = now_ms();
+            let _ = history::record_edge_delete(
+                self.storage.as_ref(),
+                collection,
+                &edge_key,
+                system_to_ms,
+            )
+            .await;
         }
 
         Ok(())
