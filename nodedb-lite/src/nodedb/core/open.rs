@@ -162,7 +162,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         let hnsw_map = Self::restore_hnsw_indices(&storage).await?;
 
         // ── Restore spatial indices ──
-        let spatial = Self::restore_spatial_indices(&storage).await;
+        let spatial = Arc::new(Mutex::new(Self::restore_spatial_indices(&storage).await));
 
         // ── Restore strict document engine ──
         let strict = StrictEngine::restore(Arc::clone(&storage))
@@ -237,6 +237,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             crate::engine::array::ArrayEngineState::open(&storage).map_err(NodeDbError::storage)?;
         let array_state = Arc::new(Mutex::new(array_engine));
 
+        let csr_arc = Arc::new(Mutex::new(csr));
         let query_engine = crate::query::LiteQueryEngine::new(
             Arc::clone(&crdt),
             Arc::clone(&strict),
@@ -247,6 +248,8 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             Arc::clone(&vector_state),
             Arc::clone(&array_state),
             Arc::clone(&fts_state),
+            Arc::clone(&spatial),
+            Arc::clone(&csr_arc),
         );
 
         // ── Array CRDT sync state (non-wasm only) ─────────────────────────────
@@ -301,12 +304,12 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         let db = Self {
             storage,
             vector_state,
-            csr: Mutex::new(csr),
+            csr: csr_arc,
             crdt,
             governor,
             query_engine,
             fts_state,
-            spatial: Mutex::new(spatial),
+            spatial,
             secondary_indices: Mutex::new(HashMap::new()),
             strict,
             columnar,

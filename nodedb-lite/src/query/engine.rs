@@ -3,6 +3,7 @@
 //! Parses SQL with nodedb-sql, then executes against CRDT, strict,
 //! and columnar engines directly — no DataFusion dependency.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use nodedb_sql::types::*;
@@ -12,7 +13,9 @@ use nodedb_types::value::Value;
 use crate::engine::columnar::ColumnarEngine;
 use crate::engine::crdt::CrdtEngine;
 use crate::engine::fts::FtsState;
+use crate::engine::graph::index::CsrIndex;
 use crate::engine::htap::HtapBridge;
+use crate::engine::spatial::SpatialIndexManager;
 use crate::engine::strict::StrictEngine;
 use crate::engine::vector::VectorState;
 use crate::error::LiteError;
@@ -33,7 +36,10 @@ pub struct LiteQueryEngine<S: StorageEngine + StorageEngineSync> {
     pub(crate) vector_state: Arc<VectorState<S>>,
     pub(crate) array_state: Arc<Mutex<crate::engine::array::engine::ArrayEngineState>>,
     pub(crate) fts_state: Arc<FtsState>,
+    pub(in crate::query) spatial: Arc<Mutex<SpatialIndexManager>>,
     pub(crate) cancellation: CancellationRegistry,
+    /// Per-collection CSR graph indices shared with the owning NodeDbLite.
+    pub(crate) csr: Arc<Mutex<HashMap<String, CsrIndex>>>,
 }
 
 impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
@@ -48,6 +54,8 @@ impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
         vector_state: Arc<VectorState<S>>,
         array_state: Arc<Mutex<crate::engine::array::engine::ArrayEngineState>>,
         fts_state: Arc<FtsState>,
+        spatial: Arc<Mutex<SpatialIndexManager>>,
+        csr: Arc<Mutex<HashMap<String, CsrIndex>>>,
     ) -> Self {
         Self {
             crdt,
@@ -59,7 +67,9 @@ impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
             vector_state,
             array_state,
             fts_state,
+            spatial,
             cancellation: CancellationRegistry::new(),
+            csr,
         }
     }
 
@@ -94,7 +104,10 @@ impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
         self.execute_plan(&plans[0]).await
     }
 
-    async fn execute_plan(&self, plan: &SqlPlan) -> Result<QueryResult, LiteError> {
+    pub(in crate::query) async fn execute_plan(
+        &self,
+        plan: &SqlPlan,
+    ) -> Result<QueryResult, LiteError> {
         let mut visitor = super::visitor::LiteVisitor { engine: self };
         nodedb_sql::dispatch(&mut visitor, plan)?.await
     }

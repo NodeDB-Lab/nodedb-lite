@@ -35,7 +35,7 @@ pub struct NodeDbLite<S: StorageEngine + StorageEngineSync> {
     /// Shared HNSW runtime state (indices, ID map, search_ef).
     pub(crate) vector_state: Arc<VectorState<S>>,
     /// Per-collection CSR graph indices, keyed by collection name.
-    pub(crate) csr: Mutex<HashMap<String, CsrIndex>>,
+    pub(crate) csr: Arc<Mutex<HashMap<String, CsrIndex>>>,
     /// CRDT engine for delta generation and sync.
     /// Arc-wrapped for sharing with the query engine's TableProvider.
     pub(crate) crdt: Arc<Mutex<CrdtEngine>>,
@@ -46,7 +46,7 @@ pub struct NodeDbLite<S: StorageEngine + StorageEngineSync> {
     /// Shared FTS runtime state.
     pub(crate) fts_state: Arc<FtsState>,
     /// Spatial R-tree indexes for geometry fields.
-    pub(crate) spatial: Mutex<crate::engine::spatial::SpatialIndexManager>,
+    pub(crate) spatial: Arc<Mutex<crate::engine::spatial::SpatialIndexManager>>,
     /// Per-column secondary B-tree indexes for strict collections.
     /// Key: `{collection}:{column}` → SecondaryIndex.
     pub(crate) secondary_indices:
