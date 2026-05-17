@@ -67,7 +67,9 @@ fn encode_filters(filters: &[Filter]) -> Result<Vec<u8>, LiteError> {
     if filters.is_empty() {
         return Ok(Vec::new());
     }
-    match sql_filters_to_metadata(filters, &[])? {
+    // Complex QExpr predicates are evaluated post-scan; only primitive conditions
+    // are pushed to the physical visitor via serialized MetadataFilter.
+    match sql_filters_to_metadata(filters, &[])?.meta {
         None => Ok(Vec::new()),
         Some(mf) => zerompk::to_msgpack_vec(&mf).map_err(|e| LiteError::Serialization {
             detail: format!("encode filters: {e}"),
@@ -139,19 +141,12 @@ pub(super) fn lower_aggregate<'a, S: StorageEngine + StorageEngineSync + 'a>(
     let agg_specs = convert_aggregates(aggregates);
     // Build aggregate-function → alias lookup for HAVING post-filter.
     let agg_alias_map = make_agg_alias_map(aggregates);
-    // Attempt to encode HAVING predicates as scan filters. Predicates that
-    // reference aggregate result columns (e.g. SUM(x) > N) may fail encoding
-    // because they contain function expressions; in that case we pass empty
-    // having bytes and apply a post-filter directly on the result rows using
-    // `apply_having_result`.
-    let having_encoded = encode_filters(having);
-    let having_bytes = having_encoded.as_deref().unwrap_or(&[]).to_vec();
-    let needs_post_having = having_encoded.is_err() && !having.is_empty();
-    let having_post = if needs_post_having {
-        having.to_vec()
-    } else {
-        Vec::new()
-    };
+    // HAVING predicates always reference aggregate results (e.g. SUM(salary) > 100)
+    // which are not present as named columns until after aggregation.
+    // apply_having_result handles all predicate shapes via having_eval, including
+    // function-call resolution through agg_alias_map. We always do the post-filter
+    // and pass empty bytes to execute_aggregate (no pushdown for HAVING).
+    let having_post = having.to_vec();
     let sort_pairs: Vec<(String, bool)> = sort_keys.iter().map(sort_key_to_pair).collect();
     let gs: Vec<Vec<u32>> = grouping_sets
         .unwrap_or(&[])
@@ -162,15 +157,7 @@ pub(super) fn lower_aggregate<'a, S: StorageEngine + StorageEngineSync + 'a>(
     Ok(Box::pin(async move {
         let source_result = engine.execute_plan(&input).await?;
         let rows = result_to_maps(source_result);
-        let result = execute_aggregate(
-            rows,
-            &group_cols,
-            &agg_specs,
-            &[],
-            &having_bytes,
-            &sort_pairs,
-            &gs,
-        )?;
+        let result = execute_aggregate(rows, &group_cols, &agg_specs, &[], &[], &sort_pairs, &gs)?;
         Ok(apply_having_result(result, &having_post, &agg_alias_map))
     }))
 }

@@ -19,7 +19,9 @@ fn encode_filters(filters: &[Filter]) -> Result<Vec<u8>, LiteError> {
     if filters.is_empty() {
         return Ok(Vec::new());
     }
-    match sql_filters_to_metadata(filters, &[])? {
+    // Complex QExpr predicates are evaluated post-scan; only primitive conditions
+    // are pushed to the physical visitor via serialized MetadataFilter.
+    match sql_filters_to_metadata(filters, &[])?.meta {
         None => Ok(Vec::new()),
         Some(mf) => zerompk::to_msgpack_vec(&mf).map_err(|e| LiteError::Serialization {
             detail: format!("encode lateral filters: {e}"),

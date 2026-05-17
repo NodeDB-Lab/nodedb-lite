@@ -61,11 +61,11 @@ pub(super) fn lower_text_search<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let rls_filters = if filters.is_empty() {
                 Vec::new()
             } else {
-                let mf =
-                    sql_filters_to_metadata(filters, &[]).map_err(|e| LiteError::BadRequest {
-                        detail: format!("FTS filter encode: {e}"),
-                    })?;
-                match mf {
+                // Complex QExpr predicates cannot be serialized to the FTS physical visitor;
+                // they are dropped from the pre-filter here. Any such predicates will be applied
+                // at post-scan time by apply_scan_post_processing on the caller side.
+                let lf = sql_filters_to_metadata(filters, &[])?;
+                match lf.meta {
                     None => Vec::new(),
                     Some(mf) => {
                         zerompk::to_msgpack_vec(&mf).map_err(|e| LiteError::Serialization {

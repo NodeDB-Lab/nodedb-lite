@@ -18,7 +18,10 @@ fn encode_filters(filters: &[Filter]) -> Result<Vec<u8>, LiteError> {
     if filters.is_empty() {
         return Ok(Vec::new());
     }
-    match sql_filters_to_metadata(filters, &[])? {
+    // Only the primitive MetadataFilter part is serialized for the physical visitor.
+    // Complex QExpr predicates (from FilterExpr::Expr) are not serializable through
+    // this path; they are evaluated at the post-scan layer in apply_scan_post_processing.
+    match sql_filters_to_metadata(filters, &[])?.meta {
         None => Ok(Vec::new()),
         Some(mf) => zerompk::to_msgpack_vec(&mf).map_err(|e| LiteError::Serialization {
             detail: format!("encode recursive filters: {e}"),

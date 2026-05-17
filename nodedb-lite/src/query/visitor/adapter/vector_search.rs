@@ -118,7 +118,10 @@ pub(super) fn lower_vector_search<'a, S: StorageEngine + StorageEngineSync + 'a>
     payload_filters: &[SqlPayloadAtom],
 ) -> Result<LiteFut<'a>, LiteError> {
     let prefilter = array_prefilter.cloned();
-    let rls_filters = match sql_filters_to_metadata(filters, payload_filters)? {
+    // Complex QExpr predicates from FilterExpr::Expr are not serializable to the
+    // vector search pre-filter; only the primitive MetadataFilter is pushed down.
+    // Complex predicates are applied post-search by apply_scan_post_processing.
+    let rls_filters = match sql_filters_to_metadata(filters, payload_filters)?.meta {
         None => Vec::new(),
         Some(mf) => zerompk::to_msgpack_vec(&mf).map_err(|e| LiteError::Serialization {
             detail: format!("encode MetadataFilter: {e}"),

@@ -16,7 +16,7 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::expr_convert::convert_sql_expr;
-use crate::query::filter_convert::sql_filters_to_metadata;
+use crate::query::filter_convert::{LiteFilter, sql_filters_to_metadata};
 
 /// Apply WHERE / DISTINCT / ORDER BY / window functions / OFFSET / LIMIT to a raw scan result.
 ///
@@ -36,13 +36,26 @@ pub(crate) fn apply_scan_post_processing(
     offset: usize,
     distinct: bool,
 ) -> Result<QueryResult, LiteError> {
-    // 1. WHERE
+    // 1. WHERE — apply both primitive MetadataFilter and complex QExpr predicates.
     if !filters.is_empty() {
-        let mf = sql_filters_to_metadata(filters, &[])?;
-        if let Some(filter) = mf {
+        let lf: LiteFilter = sql_filters_to_metadata(filters, &[])?;
+        if !lf.is_empty() {
             result.rows.retain(|row| {
-                let doc = row_to_json(&result.columns, row);
-                matches_metadata_filter(&doc, &filter)
+                let json_doc = row_to_json(&result.columns, row);
+                let meta_pass = lf
+                    .meta
+                    .as_ref()
+                    .map(|f| matches_metadata_filter(&json_doc, f))
+                    .unwrap_or(true);
+                if !meta_pass {
+                    return false;
+                }
+                if !lf.exprs.is_empty() {
+                    let typed_doc = row_to_typed_value(&result.columns, row);
+                    lf.eval_exprs(&typed_doc)
+                } else {
+                    true
+                }
             });
         }
     }
