@@ -225,18 +225,72 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
                 meta_ops::handle_query_collection_size(engine, tid, &n).await
             }))
         }
-        op @ (MetaOp::WalAppend { .. }
-        | MetaOp::Cancel { .. }
-        | MetaOp::TransactionBatch { .. }
-        | MetaOp::CreateTenantSnapshot { .. }
-        | MetaOp::RestoreTenantSnapshot { .. }
-        | MetaOp::PurgeTenant { .. }
-        | MetaOp::CalvinExecuteStatic { .. }
-        | MetaOp::CalvinExecutePassive { .. }
-        | MetaOp::CalvinExecuteActive { .. }
-        | MetaOp::RawResponse { .. }) => {
-            let result = meta_ops::handle_distributed_op(op);
-            Ok(Box::pin(async move { result }))
+        // ── Distributed ops implemented on Lite ─────────────────────────────
+        MetaOp::WalAppend { payload } => {
+            let bytes = payload.clone();
+            let storage = engine.storage.clone();
+            Ok(Box::pin(async move {
+                meta_ops::handle_wal_append(&storage, &bytes).await
+            }))
+        }
+        MetaOp::Cancel { target_request_id } => {
+            let rid = *target_request_id;
+            let registry = engine.cancellation.clone();
+            Ok(Box::pin(
+                async move { meta_ops::handle_cancel(&registry, rid) },
+            ))
+        }
+        MetaOp::TransactionBatch { plans } => {
+            let plans = plans.clone();
+            Ok(Box::pin(async move {
+                meta_ops::handle_txn_batch(engine, &plans).await
+            }))
+        }
+        MetaOp::CalvinExecuteStatic { plans, .. } => {
+            let plans = plans.clone();
+            Ok(Box::pin(async move {
+                meta_ops::handle_calvin_static(engine, &plans).await
+            }))
+        }
+        MetaOp::CalvinExecutePassive { .. } => {
+            Ok(Box::pin(
+                async move { meta_ops::handle_calvin_passive().await },
+            ))
+        }
+        MetaOp::CalvinExecuteActive { plans, .. } => {
+            let plans = plans.clone();
+            Ok(Box::pin(async move {
+                meta_ops::handle_calvin_active(engine, &plans).await
+            }))
+        }
+        // ── Origin-only ops that Lite's plan converter never emits ───────────
+        MetaOp::RawResponse { .. } => {
+            meta_ops::handle_raw_response();
+        }
+        MetaOp::CreateTenantSnapshot { tenant_id } => {
+            let tid = *tenant_id;
+            let storage = engine.storage.clone();
+            Ok(Box::pin(async move {
+                meta_ops::handle_create_tenant_snapshot(&*storage, tid).await
+            }))
+        }
+        MetaOp::RestoreTenantSnapshot {
+            tenant_id,
+            snapshot,
+        } => {
+            let tid = *tenant_id;
+            let snap = snapshot.clone();
+            let storage = engine.storage.clone();
+            Ok(Box::pin(async move {
+                meta_ops::handle_restore_tenant_snapshot(&*storage, tid, &snap).await
+            }))
+        }
+        MetaOp::PurgeTenant { tenant_id } => {
+            let tid = *tenant_id;
+            let storage = engine.storage.clone();
+            Ok(Box::pin(async move {
+                meta_ops::handle_purge_tenant(&*storage, tid).await
+            }))
         }
     }
 }

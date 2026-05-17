@@ -15,7 +15,11 @@ pub use continuous_agg::{
     handle_query_aggregate_watermark, handle_register_continuous_aggregate,
     handle_unregister_continuous_aggregate,
 };
-pub use distributed::handle_distributed_op;
+pub use distributed::txn::{handle_calvin_active, handle_calvin_passive, handle_calvin_static};
+pub use distributed::{
+    CancellationRegistry, handle_cancel, handle_create_tenant_snapshot, handle_purge_tenant,
+    handle_raw_response, handle_restore_tenant_snapshot, handle_txn_batch, handle_wal_append,
+};
 pub use indexes::handle_rebuild_index;
 pub use info::handle_query_collection_size;
 pub use lifecycle::{

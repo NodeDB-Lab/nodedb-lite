@@ -19,6 +19,7 @@ use crate::error::LiteError;
 use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
 use super::catalog::LiteCatalog;
+use super::meta_ops::CancellationRegistry;
 
 /// Lite-side query engine.
 pub struct LiteQueryEngine<S: StorageEngine + StorageEngineSync> {
@@ -32,6 +33,7 @@ pub struct LiteQueryEngine<S: StorageEngine + StorageEngineSync> {
     pub(crate) vector_state: Arc<VectorState<S>>,
     pub(crate) array_state: Arc<Mutex<crate::engine::array::engine::ArrayEngineState>>,
     pub(crate) fts_state: Arc<FtsState>,
+    pub(crate) cancellation: CancellationRegistry,
 }
 
 impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
@@ -57,6 +59,7 @@ impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
             vector_state,
             array_state,
             fts_state,
+            cancellation: CancellationRegistry::new(),
         }
     }
 

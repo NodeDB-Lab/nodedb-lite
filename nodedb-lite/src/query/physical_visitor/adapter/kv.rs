@@ -76,13 +76,18 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             }))
         }
 
-        KvOp::MaterializeScan { .. } => Ok(Box::pin(async move {
-            Err(LiteError::Unsupported {
-                detail: "MaterializeScan requires Origin's distributed cursor-scan executor; \
-                         Lite is single-node — use Scan + client-side pagination."
-                    .into(),
-            })
-        })),
+        KvOp::MaterializeScan {
+            collection,
+            cursor,
+            count,
+        } => {
+            let col = collection.clone();
+            let cur = cursor.clone();
+            let cnt = *count;
+            Ok(Box::pin(async move {
+                kv_ops::reads::kv_materialize_scan(engine, &col, &cur, cnt, None)
+            }))
+        }
 
         KvOp::Put {
             collection,
@@ -325,12 +330,18 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
         KvOp::RegisterSortedIndex {
             index_name,
             window_type,
+            window_timestamp_column,
+            window_start_ms,
+            window_end_ms,
             ..
         } => {
             let name = index_name.clone();
             let wt = window_type.clone();
+            let ts_col = window_timestamp_column.clone();
+            let ws = *window_start_ms;
+            let we = *window_end_ms;
             Ok(Box::pin(async move {
-                kv_ops::sorted::kv_register_sorted_index(engine, &name, &wt)
+                kv_ops::sorted::kv_register_sorted_index(engine, &name, &wt, &ts_col, ws, we)
             }))
         }
 
