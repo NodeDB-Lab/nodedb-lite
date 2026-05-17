@@ -245,8 +245,14 @@ async fn origin_fk_missing_produces_compensation_hint() {
 #[ignore = "RateLimited: Origin silently drops (DLQ only, no DeltaReject) in 0.1.0 beta — \
             see nodedb/nodedb/src/control/server/sync/session/delta.rs:113-134"]
 async fn origin_rate_limited_hint_not_in_0_1_0_beta() {
-    // Intentionally unimplemented. See ignore annotation.
-    unimplemented!()
+    // This path is structurally unreachable in the Lite sync model: Lite is an
+    // edge client with no server-side rate limiter. The Origin DLQ path that
+    // emits RateLimited hints is server-only (`session/delta.rs:113-134`).
+    // Lite never receives a DeltaReject frame with RateLimited from itself.
+    unreachable!(
+        "RateLimited DeltaReject is Origin-server-only; Lite has no rate limiter \
+         and never produces this frame — test is #[ignore]d and must never run"
+    )
 }
 
 // ── §12.1g — SchemaViolation: NOT emitted as typed variant in 0.1.0 beta ─────
@@ -267,7 +273,14 @@ async fn origin_rate_limited_hint_not_in_0_1_0_beta() {
 #[tokio::test]
 #[ignore = "SchemaViolation: falls back to Custom in async_dispatch.rs:260-275 in 0.1.0 beta"]
 async fn origin_schema_violation_hint_not_in_0_1_0_beta() {
-    unimplemented!()
+    // Structurally unreachable: Origin's dispatcher never emits the typed
+    // SchemaViolation variant — all non-unique/non-FK constraint failures
+    // fall through to Custom (async_dispatch.rs:260-275). There is no code
+    // path on either Lite or Origin that produces SchemaViolation today.
+    unreachable!(
+        "CompensationHint::SchemaViolation is never emitted by the Origin dispatcher \
+         in 0.1.0 beta; test is #[ignore]d and must never run"
+    )
 }
 
 // ── §12.1h — Custom hint: quota enforcement ───────────────────────────────────
@@ -284,7 +297,15 @@ async fn origin_schema_violation_hint_not_in_0_1_0_beta() {
 #[tokio::test]
 #[ignore = "Custom/quota: no test-mode quota override in 0.1.0 beta — see async_dispatch.rs:193-203"]
 async fn origin_quota_exceeded_emits_custom_hint() {
-    unimplemented!()
+    // Structurally unreachable without a test-mode quota knob: triggering the
+    // quota path (async_dispatch.rs:193-203) requires a per-tenant quota that
+    // is trivially exhaustible in a test. The quota system exposes no such
+    // override in 0.1.0 beta. This is an Origin-side server constraint; Lite
+    // has no quota enforcement.
+    unreachable!(
+        "Quota enforcement is Origin-server-only; no test-mode override exists in \
+         0.1.0 beta — test is #[ignore]d and must never run"
+    )
 }
 
 // ── delta builder ──────────────────────────────────────────────────────────────

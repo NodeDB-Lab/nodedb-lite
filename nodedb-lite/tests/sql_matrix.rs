@@ -1,14 +1,9 @@
-//! SQL compatibility matrix regression gate.
+//! SQL regression gate.
 //!
-//! This test file is the machine-checkable form of the SQL support
-//! matrix in `docs/lite-support-matrix.md`. Every supported `SqlPlan` variant has at
-//! least one test that asserts the query succeeds (any non-error result is
-//! acceptable — row content is verified in `tests/sql_parity/`). Every
-//! unsupported variant has at least one test that asserts `LiteError::Unsupported`
-//! is returned.
-//!
-//! If a future change silently adds or removes support for a documented
-//! variant, this file will fail immediately.
+//! Every `SqlPlan` variant has at least one test that asserts the query
+//! succeeds (any non-error result is acceptable — row content is verified in
+//! `tests/sql_parity/`). If a future change silently breaks a variant, this
+//! file will fail immediately.
 //!
 //! Run with:
 //!   cargo nextest run -p nodedb-lite --test sql_matrix
@@ -48,28 +43,6 @@ async fn assert_ok(db: &Arc<NodeDbLite<RedbStorage>>, sql: &str) {
     db.execute_sql(sql, &[])
         .await
         .unwrap_or_else(|e| panic!("expected Ok for SQL: {sql:?}\n  got: {e}"));
-}
-
-/// Assert the query returns a typed Unsupported error.
-async fn assert_unsupported(db: &Arc<NodeDbLite<RedbStorage>>, sql: &str) {
-    let result = db.execute_sql(sql, &[]).await;
-    match result {
-        Err(e) => {
-            let msg = e.to_string();
-            assert!(
-                msg.contains("unsupported")
-                    || msg.contains("Unsupported")
-                    || msg.contains("not supported"),
-                "expected Unsupported error for SQL: {sql:?}\n  got: {msg}"
-            );
-        }
-        Ok(r) => panic!(
-            "expected Unsupported error but query succeeded for SQL: {sql:?}\n  \
-             columns: {:?}, rows: {}",
-            r.columns,
-            r.rows.len()
-        ),
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -203,11 +176,7 @@ async fn supported_truncate() {
     assert_ok(&db, "TRUNCATE trunc_coll").await;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// UNSUPPORTED variants
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ── Scan guards ──────────────────────────────────────────────────────────────
+// ── Scan post-processing ─────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn scan_order_by_sorts_rows() {
@@ -257,27 +226,43 @@ async fn scan_window_function_works() {
 }
 
 #[tokio::test]
-async fn unsupported_scan_where_predicate() {
+async fn scan_where_predicate_is_supported() {
     let db = open_db().await;
-    seed(&db, "ng_where", "s1").await;
-    // WHERE on a non-id field should be unsupported (Scan with filters).
-    assert_unsupported(&db, "SELECT id FROM ng_where WHERE _seed = true").await;
+
+    // Seed two rows that differ on a non-id field so WHERE has work to do.
+    let mut keep = Document::new("keep");
+    keep.set("tier", Value::String("gold".into()));
+    db.document_put("ng_where", keep).await.expect("seed gold");
+    let mut drop = Document::new("drop");
+    drop.set("tier", Value::String("silver".into()));
+    db.document_put("ng_where", drop)
+        .await
+        .expect("seed silver");
+
+    let r = db
+        .execute_sql("SELECT id FROM ng_where WHERE tier = 'gold'", &[])
+        .await
+        .expect("WHERE on non-id field must succeed");
+
+    assert_eq!(
+        r.rows.len(),
+        1,
+        "WHERE tier = 'gold' must filter out the silver row; got {} rows",
+        r.rows.len()
+    );
+    let id = r.rows[0][0].to_string();
+    assert!(
+        id.contains("keep"),
+        "WHERE must return only the matching row; got id={id:?}"
+    );
 }
 
-// ── Join ─────────────────────────────────────────────────────────────────────
-// Join is now implemented — negative test removed.
-
-// ── Aggregate ────────────────────────────────────────────────────────────────
-// Aggregate, GROUP BY, and HAVING are now implemented — negative tests removed.
-
-// ── Subquery / CTE ────────────────────────────────────────────────────────────
-// Subquery (IN with SELECT) is now implemented via Join lowering — negative test removed.
+// ── CTE ──────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn cte_resolves_inline() {
     let db = open_db().await;
     seed(&db, "cte_coll", "c1").await;
-    // CTE must execute without error (previously returned Unsupported).
     assert_ok(
         &db,
         "WITH cte AS (SELECT id FROM cte_coll) SELECT id FROM cte",
@@ -309,9 +294,6 @@ async fn fts_search_sql() {
     .await;
 }
 
-// ── Set operations ────────────────────────────────────────────────────────────
-// UNION / INTERSECT / EXCEPT are now implemented — negative tests removed.
-
 // ── Index DDL ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -328,12 +310,13 @@ async fn drop_index() {
     assert_ok(&db, "DROP INDEX idx_name ON ng_idx").await;
 }
 
-// ── Array DDL/DML ─────────────────────────────────────────────────────────────
+// ── Parse-error guardrails ───────────────────────────────────────────────────
+// These assert that out-of-grammar SQL is rejected at parse time, before the
+// visitor is reached. They are NOT a statement about variant support.
 
 #[tokio::test]
-async fn unsupported_create_array_ddl() {
-    // CREATE ARRAY is not intercepted by try_handle_ddl and is not valid SQL.
-    // The query must return an error (parse error or Unsupported).
+async fn create_array_rejected_at_parse() {
+    // `CREATE ARRAY` is not part of the SQL grammar Lite accepts.
     let db = open_db().await;
     let result = db
         .execute_sql(
@@ -341,14 +324,12 @@ async fn unsupported_create_array_ddl() {
             &[],
         )
         .await;
-    assert!(result.is_err(), "CREATE ARRAY must return an error on Lite");
+    assert!(result.is_err(), "CREATE ARRAY must be rejected on Lite");
 }
 
-// ── Graph MATCH ───────────────────────────────────────────────────────────────
-
 #[tokio::test]
-async fn unsupported_graph_match_parse_error() {
-    // MATCH pattern syntax is not valid SQL — parse error is acceptable.
+async fn graph_match_rejected_at_parse() {
+    // MATCH pattern syntax is not part of the SQL grammar Lite accepts.
     let db = open_db().await;
     let result = db
         .execute_sql(
@@ -356,5 +337,5 @@ async fn unsupported_graph_match_parse_error() {
             &[],
         )
         .await;
-    assert!(result.is_err(), "MATCH syntax must return an error on Lite");
+    assert!(result.is_err(), "MATCH syntax must be rejected on Lite");
 }
