@@ -15,7 +15,8 @@ use roaring;
 
 use nodedb_physical::PhysicalTaskVisitor;
 use nodedb_physical::physical_plan::{
-    ArrayOp, ColumnarOp, CrdtOp, DocumentOp, KvOp, MetaOp, TextOp, VectorOp,
+    ArrayOp, ColumnarOp, CrdtOp, DocumentOp, GraphOp, KvOp, MetaOp, QueryOp, SpatialOp, TextOp,
+    TimeseriesOp, VectorOp,
 };
 use nodedb_types::result::QueryResult;
 
@@ -25,15 +26,18 @@ use crate::query::engine::LiteQueryEngine;
 use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
 use super::text_op::execute_text_op;
-use super::unsupported::impl_unsupported_lite_physical_visitor_methods;
 use super::vector_op::execute_vector_op;
 
 mod array;
 mod columnar;
 mod crdt;
 mod document;
+mod graph;
 mod kv;
 mod meta;
+mod query;
+mod spatial;
+mod timeseries;
 
 pub(crate) type LitePhysicalFut<'a> =
     Pin<Box<dyn Future<Output = Result<QueryResult, LiteError>> + Send + 'a>>;
@@ -58,20 +62,6 @@ pub(crate) fn execute_surrogate_scan<S: StorageEngine + StorageEngineSync>(
     let system_as_of = now_ms();
     let mut state = array_state.lock().map_err(|_| LiteError::LockPoisoned)?;
     state.surrogate_bitmap_scan(storage, name, slice.dim_ranges, system_as_of)
-}
-
-fn unsupported_phys_fut<'a>(name: &'static str) -> LitePhysicalFut<'a> {
-    Box::pin(async move {
-        Err(LiteError::Unsupported {
-            detail: format!("Lite executor does not yet implement PhysicalPlan::{name}"),
-        })
-    })
-}
-
-macro_rules! u_phys {
-    ($name:literal) => {
-        Ok(unsupported_phys_fut($name))
-    };
 }
 
 impl<'a, S: StorageEngine + StorageEngineSync + 'a> PhysicalTaskVisitor
@@ -112,5 +102,29 @@ impl<'a, S: StorageEngine + StorageEngineSync + 'a> PhysicalTaskVisitor
         columnar::dispatch(self.engine, op)
     }
 
-    impl_unsupported_lite_physical_visitor_methods!();
+    fn timeseries(&mut self, op: &TimeseriesOp) -> Result<LitePhysicalFut<'a>, LiteError> {
+        timeseries::dispatch(self.engine, op)
+    }
+
+    fn spatial(&mut self, op: &SpatialOp) -> Result<LitePhysicalFut<'a>, LiteError> {
+        spatial::dispatch(self.engine, op)
+    }
+
+    fn graph(&mut self, op: &GraphOp) -> Result<LitePhysicalFut<'a>, LiteError> {
+        graph::dispatch(self.engine, op)
+    }
+
+    fn query(&mut self, op: &QueryOp) -> Result<LitePhysicalFut<'a>, LiteError> {
+        query::dispatch(self.engine, op)
+    }
+
+    fn cluster_array(
+        &mut self,
+        _op: &nodedb_physical::physical_plan::ClusterArrayOp,
+    ) -> Result<LitePhysicalFut<'a>, LiteError> {
+        unreachable!(
+            "ClusterArray plans are coordinator-only; Lite never sets \
+             cluster_enabled so its SQL planner cannot produce this variant"
+        )
+    }
 }

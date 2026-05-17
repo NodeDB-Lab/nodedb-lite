@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 mod adapter;
 mod text_op;
-mod unsupported;
 mod vector_op;
 mod vector_write;
 

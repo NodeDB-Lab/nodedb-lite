@@ -296,6 +296,9 @@ mod tests {
             ArrayEngineState::open(&storage).expect("ArrayEngineState::open"),
         ));
         let fts_state = Arc::new(FtsState::new());
+        let spatial = Arc::new(Mutex::new(
+            crate::engine::spatial::SpatialIndexManager::new(),
+        ));
         LiteQueryEngine::new(
             crdt,
             strict,
@@ -306,6 +309,8 @@ mod tests {
             vector_state,
             array_state,
             fts_state,
+            spatial,
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
         )
     }
 

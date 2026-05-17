@@ -4,7 +4,10 @@
 
 use std::sync::Arc;
 
+use nodedb_graph::Direction;
+use nodedb_graph::traversal::DEFAULT_MAX_VISITED;
 use nodedb_physical::physical_plan::TextOp;
+use nodedb_query::fusion::{FusedResult, RankedResult, reciprocal_rank_fusion_weighted};
 use nodedb_types::result::QueryResult;
 use nodedb_types::text_search::{QueryMode, TextSearchParams};
 use nodedb_types::value::Value;
@@ -76,19 +79,72 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + StorageEngineSync + 'a>(
             }))
         }
 
-        TextOp::BM25ScoreScan { .. } => Ok(Box::pin(async {
-            unimplemented!(
-                "Lite FTS engine does not yet support TextOp::BM25ScoreScan; \
-                 add a `scan_all_with_scores` method to FtsCollectionManager"
-            )
-        })),
+        TextOp::BM25ScoreScan {
+            collection,
+            query,
+            score_alias,
+            fuzzy,
+        } => {
+            let collection = collection.clone();
+            let query = query.clone();
+            let score_alias = score_alias.clone();
+            let fuzzy = *fuzzy;
+            let fts_state = Arc::clone(&engine.fts_state);
+            Ok(Box::pin(async move {
+                let params = TextSearchParams {
+                    fuzzy,
+                    mode: QueryMode::Or,
+                };
+                let scored = fts_state
+                    .manager
+                    .lock()
+                    .map_err(|_| LiteError::LockPoisoned)?
+                    .scan_all_with_scores(&collection, &query, &params);
+                let columns = vec!["id".to_string(), score_alias];
+                let rows: Vec<Vec<Value>> = scored
+                    .into_iter()
+                    .map(|(doc_id, score)| vec![Value::String(doc_id), Value::Float(score as f64)])
+                    .collect();
+                Ok(QueryResult {
+                    columns,
+                    rows,
+                    rows_affected: 0,
+                })
+            }))
+        }
 
-        TextOp::PhraseSearch { .. } => Ok(Box::pin(async {
-            unimplemented!(
-                "Lite FTS engine does not yet support TextOp::PhraseSearch; \
-                 add a `phrase_search` method to FtsCollectionManager"
-            )
-        })),
+        TextOp::PhraseSearch {
+            collection,
+            terms,
+            top_k,
+            ..
+        } => {
+            let collection = collection.clone();
+            let terms = terms.clone();
+            let top_k = *top_k;
+            let fts_state = Arc::clone(&engine.fts_state);
+            Ok(Box::pin(async move {
+                let params = TextSearchParams {
+                    fuzzy: false,
+                    mode: QueryMode::Or,
+                };
+                let results = fts_state
+                    .manager
+                    .lock()
+                    .map_err(|_| LiteError::LockPoisoned)?
+                    .phrase_search(&collection, &terms, top_k, &params);
+                let columns = vec!["id".to_string(), "score".to_string()];
+                let rows: Vec<Vec<Value>> = results
+                    .into_iter()
+                    .map(|r| vec![Value::String(r.doc_id), Value::Float(r.score as f64)])
+                    .collect();
+                Ok(QueryResult {
+                    columns,
+                    rows,
+                    rows_affected: 0,
+                })
+            }))
+        }
 
         TextOp::HybridSearch {
             collection,
@@ -197,32 +253,176 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + StorageEngineSync + 'a>(
             }))
         }
 
-        TextOp::HybridSearchTriple { .. } => Ok(Box::pin(async {
-            unimplemented!(
-                "Lite TextOp::HybridSearchTriple requires graph engine access via a \
-                 GraphState extraction (parallel to VectorState/FtsState) — \
-                 add GraphState first"
-            )
-        })),
+        TextOp::HybridSearchTriple {
+            collection,
+            query_vector,
+            query_text,
+            graph_seed_id,
+            graph_depth,
+            graph_edge_label,
+            top_k,
+            fuzzy,
+            rrf_k,
+            rls_filters,
+            score_alias,
+            ..
+        } => {
+            let collection = collection.clone();
+            let query_vector = query_vector.clone();
+            let query_text = query_text.clone();
+            let graph_seed_id = graph_seed_id.clone();
+            let graph_depth = *graph_depth;
+            let graph_edge_label = graph_edge_label.clone();
+            let top_k = *top_k;
+            let fuzzy = *fuzzy;
+            let rrf_k = *rrf_k;
+            let score_alias = score_alias
+                .clone()
+                .unwrap_or_else(|| "rrf_score".to_string());
+            let metadata_filter: Option<nodedb_types::filter::MetadataFilter> =
+                if rls_filters.is_empty() {
+                    None
+                } else {
+                    Some(zerompk::from_msgpack(rls_filters).map_err(|e| {
+                        LiteError::Serialization {
+                            detail: format!("decode MetadataFilter: {e}"),
+                        }
+                    })?)
+                };
+            let fts_state = Arc::clone(&engine.fts_state);
+            let crdt = Arc::clone(&engine.crdt);
+            let vector_state = Arc::clone(&engine.vector_state);
+            let csr = Arc::clone(&engine.csr);
+            Ok(Box::pin(async move {
+                let text_params = TextSearchParams {
+                    fuzzy,
+                    mode: QueryMode::Or,
+                };
+                // Leg 1: text search.
+                let text_results = run_text_search(
+                    &fts_state,
+                    &crdt,
+                    &collection,
+                    &query_text,
+                    top_k * 3,
+                    &text_params,
+                )
+                .map_err(|e| LiteError::Query(e.to_string()))?;
+
+                // Leg 2: vector search.
+                let vector_results = run_vector_search(
+                    &vector_state,
+                    &crdt,
+                    &collection,
+                    &collection,
+                    &query_vector,
+                    top_k * 3,
+                    metadata_filter.as_ref(),
+                    &[],
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                )
+                .await
+                .map_err(|e| LiteError::Query(e.to_string()))?;
+
+                // Leg 3: graph BFS from seed node.
+                let graph_ranked: Vec<RankedResult> = if graph_depth > 0 {
+                    let csr_guard = csr.lock().map_err(|_| LiteError::LockPoisoned)?;
+                    if let Some(csr_idx) = csr_guard.get(&collection) {
+                        let edge_label = graph_edge_label.as_deref();
+                        let max_vis = graph_depth
+                            .saturating_mul(top_k * 3)
+                            .max(DEFAULT_MAX_VISITED);
+                        let expanded = csr_idx.traverse_bfs(
+                            &[graph_seed_id.as_str()],
+                            edge_label,
+                            Direction::Out,
+                            graph_depth,
+                            max_vis,
+                            None,
+                        );
+                        expanded
+                            .into_iter()
+                            .enumerate()
+                            .map(|(rank, id)| RankedResult {
+                                document_id: id,
+                                rank,
+                                score: 0.0,
+                                source: "graph",
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+
+                let text_ranked: Vec<RankedResult> = text_results
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| RankedResult {
+                        document_id: r.id.clone(),
+                        rank: i,
+                        score: 1.0 - r.distance,
+                        source: "text",
+                    })
+                    .collect();
+
+                let vector_ranked: Vec<RankedResult> = vector_results
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| RankedResult {
+                        document_id: r.id.clone(),
+                        rank: i,
+                        score: 1.0 - r.distance,
+                        source: "vector",
+                    })
+                    .collect();
+
+                let (kv, kt, kg) = rrf_k;
+                let fused: Vec<FusedResult> = reciprocal_rank_fusion_weighted(
+                    &[vector_ranked, text_ranked, graph_ranked],
+                    &[kv, kt, kg],
+                    top_k,
+                );
+
+                let columns = vec!["id".to_string(), score_alias];
+                let rows: Vec<Vec<Value>> = fused
+                    .into_iter()
+                    .map(|f| vec![Value::String(f.document_id), Value::Float(f.rrf_score)])
+                    .collect();
+                Ok(QueryResult {
+                    columns,
+                    rows,
+                    rows_affected: 0,
+                })
+            }))
+        }
 
         TextOp::FtsIndexDoc {
             collection,
-            surrogate: _,
+            surrogate,
             text,
         } => {
             let collection = collection.clone();
             let text = text.clone();
+            let surrogate = *surrogate;
             let fts_state = Arc::clone(&engine.fts_state);
             Ok(Box::pin(async move {
-                // On Lite the surrogate is managed internally by FtsCollectionManager,
-                // so we index using the text as both key and content.
-                // The sync path on Lite routes via document_put, not this op — this arm
-                // covers the case where Origin dispatches an FtsIndexDoc frame to Lite.
-                fts_state
+                // On Lite the surrogate space is internal to FtsCollectionManager.
+                // We use `text` as the string doc_id (stable across frames for the
+                // same document). We also register the Origin surrogate → Lite doc_id
+                // mapping so FtsDeleteDoc can resolve it precisely.
+                let mut mgr = fts_state
                     .manager
                     .lock()
-                    .map_err(|_| LiteError::LockPoisoned)?
-                    .index_document(&collection, &text, &text);
+                    .map_err(|_| LiteError::LockPoisoned)?;
+                mgr.index_document(&collection, &text, &text);
+                mgr.register_origin_surrogate(surrogate, &text);
                 Ok(QueryResult {
                     columns: vec![],
                     rows: vec![],
@@ -233,25 +433,21 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + StorageEngineSync + 'a>(
 
         TextOp::FtsDeleteDoc {
             collection,
-            surrogate: _,
+            surrogate,
         } => {
             let collection = collection.clone();
+            let surrogate = *surrogate;
             let fts_state = Arc::clone(&engine.fts_state);
             Ok(Box::pin(async move {
-                // Lite FtsCollectionManager uses string doc_ids, not u32 surrogates.
-                // The Origin-side surrogate cannot be mapped back to a string doc_id
-                // without a reverse lookup that Lite does not maintain across processes.
-                // Documents are removed via document_delete on the CRDT path instead.
-                // Drop the collection's entire index as a conservative fallback.
-                fts_state
+                let mut mgr = fts_state
                     .manager
                     .lock()
-                    .map_err(|_| LiteError::LockPoisoned)?
-                    .drop_collection(&collection);
+                    .map_err(|_| LiteError::LockPoisoned)?;
+                let found = mgr.remove_by_origin_surrogate(&collection, surrogate);
                 Ok(QueryResult {
                     columns: vec![],
                     rows: vec![],
-                    rows_affected: 0,
+                    rows_affected: if found { 1 } else { 0 },
                 })
             }))
         }
