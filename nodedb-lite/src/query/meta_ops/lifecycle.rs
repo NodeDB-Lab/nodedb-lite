@@ -9,39 +9,34 @@ use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
-/// `CreateSnapshot` — not supported on Lite.
+/// `CreateSnapshot` dispatch target.
 ///
-/// The Lite executor's `StorageEngine` trait does not expose a snapshot or
-/// page-flush API, so there is no way to produce a durable, point-in-time
-/// snapshot artifact here. Returning a fabricated "snapshot_entries" count
-/// would mislead callers into thinking a snapshot exists; surface the
-/// limitation honestly instead.
+/// `MetaOp::CreateSnapshot` is a maintenance op issued by Origin's WAL manager
+/// or administrative CLI. Lite's `PlanVisitor` has no `create_snapshot` trait
+/// method and exposes no SQL syntax that produces this variant. The `StorageEngine`
+/// trait has no snapshot API. No valid Lite deployment-shape code path reaches here.
 pub async fn handle_create_snapshot<S: StorageEngine + StorageEngineSync>(
     _engine: &LiteQueryEngine<S>,
 ) -> Result<QueryResult, LiteError> {
-    Err(LiteError::Unsupported {
-        detail: "CreateSnapshot requires a backend snapshot/checkpoint API; \
-                 the Lite StorageEngine trait exposes none. Use Origin or copy \
-                 the underlying database file out-of-band."
-            .into(),
-    })
+    unreachable!(
+        "MetaOp::CreateSnapshot is an Origin WAL-manager op; Lite's PlanVisitor \
+         exposes no SQL that produces this variant and StorageEngine has no snapshot API"
+    )
 }
 
-/// `Compact` — not supported on Lite.
+/// `Compact` dispatch target.
 ///
-/// The Lite `StorageEngine` trait has no compact / defrag entry point. The
-/// previous implementation returned a count from `storage.count(ns)` and
-/// labeled it `compacted_entries`, which made callers believe compaction
-/// had occurred. Returning `Unsupported` is more honest.
+/// `MetaOp::Compact` is a maintenance op issued by Origin's compaction manager.
+/// Lite's `PlanVisitor` has no `compact` trait method and exposes no SQL syntax
+/// that produces this variant. The `StorageEngine` trait has no compact entry
+/// point. No valid Lite deployment-shape code path reaches here.
 pub async fn handle_compact<S: StorageEngine + StorageEngineSync>(
     _engine: &LiteQueryEngine<S>,
 ) -> Result<QueryResult, LiteError> {
-    Err(LiteError::Unsupported {
-        detail: "Compact requires a backend compact/defrag API; the Lite \
-                 StorageEngine trait exposes none. Use Origin for explicit \
-                 compaction."
-            .into(),
-    })
+    unreachable!(
+        "MetaOp::Compact is an Origin compaction-manager op; Lite's PlanVisitor \
+         exposes no SQL that produces this variant and StorageEngine has no compact API"
+    )
 }
 
 /// `Checkpoint` — report a logical LSN of 0 (Lite is single-node, no WAL LSN).

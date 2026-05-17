@@ -186,6 +186,9 @@ mod tests {
         let vector_state = Arc::new(VectorState::new(Arc::clone(&storage), 50));
         let array_state = Arc::new(Mutex::new(ArrayEngineState::new()));
         let fts_state = Arc::new(FtsState::new());
+        let spatial = Arc::new(Mutex::new(
+            crate::engine::spatial::SpatialIndexManager::new(),
+        ));
         LiteQueryEngine::new(
             crdt,
             strict,
@@ -196,6 +199,8 @@ mod tests {
             vector_state,
             array_state,
             fts_state,
+            spatial,
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
         )
     }
 

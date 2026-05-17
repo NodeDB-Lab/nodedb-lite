@@ -337,7 +337,7 @@ fn crdt_value_to_msgpack(val: &loro::LoroValue) -> Result<Vec<u8>, LiteError> {
     })
 }
 
-pub(super) fn loro_value_to_ndb_value(v: &loro::LoroValue) -> Value {
+pub(crate) fn loro_value_to_ndb_value(v: &loro::LoroValue) -> Value {
     match v {
         loro::LoroValue::Null => Value::Null,
         loro::LoroValue::Bool(b) => Value::Bool(*b),

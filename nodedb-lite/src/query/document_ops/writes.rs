@@ -356,23 +356,22 @@ pub async fn bulk_update<S: StorageEngine + StorageEngineSync>(
     }
 }
 
-/// BulkDelete: rejected on Lite.
+/// BulkDelete dispatch target.
 ///
-/// The Origin plan carries the filter that selects the rows to delete, but
-/// the Lite executor has no Data-Plane filter evaluator. Silently treating
-/// this as `Truncate` would delete every row when the caller asked for a
-/// subset — a data-loss footgun for a public-library API.
+/// `DocumentOp::BulkDelete` carries a msgpack-encoded filter predicate produced
+/// by Origin's Calvin/OLLP planner. Lite's SQL visitor never emits this variant —
+/// it always resolves DELETE to point-key `PointDelete` ops via `target_keys`.
+/// CRDT sync plans do not include bulk-predicate deletes. No valid code path
+/// in the Lite deployment shape reaches this arm.
 pub async fn bulk_delete<S: StorageEngine + StorageEngineSync>(
     _engine: &LiteQueryEngine<S>,
-    collection: &str,
+    _collection: &str,
 ) -> Result<QueryResult, LiteError> {
-    Err(LiteError::Unsupported {
-        detail: format!(
-            "BulkDelete on '{collection}' requires Origin's filter evaluator; \
-             Lite has no Data-Plane filter executor. Use Scan + per-row PointDelete, \
-             or Truncate to delete the entire collection."
-        ),
-    })
+    unreachable!(
+        "DocumentOp::BulkDelete is produced only by Origin's Calvin/OLLP planner; \
+         Lite's SQL visitor always resolves DELETE to PointDelete ops via target_keys \
+         and CRDT sync never emits bulk-predicate deletes"
+    )
 }
 
 // ─── Internal helpers ────────────────────────────────────────────────────────

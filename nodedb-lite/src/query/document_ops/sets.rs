@@ -403,6 +403,22 @@ fn encode_materialize_payload(next_cursor: &[u8], pairs: &[(String, Vec<u8>)]) -
 }
 
 /// Scan a collection and return all document IDs.
+pub(in crate::query) async fn collect_ids_pub<S: StorageEngine + StorageEngineSync>(
+    engine: &LiteQueryEngine<S>,
+    collection: &str,
+) -> Result<Vec<String>, LiteError> {
+    collect_ids(engine, collection).await
+}
+
+/// Fetch a document as a field map — public for query-layer callers.
+pub(in crate::query) async fn fetch_document_value_pub<S: StorageEngine + StorageEngineSync>(
+    engine: &LiteQueryEngine<S>,
+    collection: &str,
+    doc_id: &str,
+) -> Result<HashMap<String, Value>, LiteError> {
+    fetch_document_value(engine, collection, doc_id).await
+}
+
 async fn collect_ids<S: StorageEngine + StorageEngineSync>(
     engine: &LiteQueryEngine<S>,
     collection: &str,

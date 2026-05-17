@@ -151,13 +151,12 @@ pub fn kv_insert_on_conflict_update<S: StorageEngine + StorageEngineSync>(
                 map.insert(field.clone(), v);
             }
             UpdateValue::Expr(_) => {
-                return Err(LiteError::Unsupported {
-                    detail: format!(
-                        "InsertOnConflictUpdate: expression updates on field '{field}' \
-                         require an SQL expression evaluator; Lite accepts only literal \
-                         updates. Pre-evaluate the expression at the application layer."
-                    ),
-                });
+                unreachable!(
+                    "UpdateValue::Expr on KV InsertOnConflictUpdate: Lite's KV SQL \
+                     visitor always converts ON CONFLICT DO UPDATE assignments to \
+                     UpdateValue::Literal before building KvOp; no Lite code path \
+                     emits Expr here"
+                );
             }
         }
     }
