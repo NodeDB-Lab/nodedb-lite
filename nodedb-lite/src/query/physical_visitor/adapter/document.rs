@@ -256,30 +256,76 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             }))
         }
 
-        DocumentOp::UpdateFromJoin { .. } => Ok(Box::pin(async move {
-            Err(LiteError::Unsupported {
-                detail: "UpdateFromJoin requires Origin's Data Plane join executor; \
-                         Lite is single-node with no cross-collection join evaluator. \
-                         Decompose into Scan + per-row PointUpdate at the application layer."
-                    .into(),
-            })
-        })),
+        DocumentOp::UpdateFromJoin {
+            target_collection,
+            source_collection,
+            source_alias,
+            target_join_col,
+            source_join_col,
+            updates,
+            ..
+        } => {
+            let target = target_collection.clone();
+            let source = source_collection.clone();
+            let alias = source_alias.clone();
+            let target_join = target_join_col.clone();
+            let source_join = source_join_col.clone();
+            let updates = updates.clone();
+            Ok(Box::pin(async move {
+                document_ops::sets::update_from_join(
+                    engine,
+                    &target,
+                    &source,
+                    &alias,
+                    &target_join,
+                    &source_join,
+                    &updates,
+                )
+                .await
+            }))
+        }
 
-        DocumentOp::Merge { .. } => Ok(Box::pin(async move {
-            Err(LiteError::Unsupported {
-                detail: "Merge requires Origin's Data Plane WHEN-arm executor; \
-                         Lite has no join-map materializer or per-row action dispatcher. \
-                         Decompose into Scan + per-row PointInsert/PointUpdate/PointDelete."
-                    .into(),
-            })
-        })),
+        DocumentOp::Merge {
+            target_collection,
+            source_collection,
+            source_alias,
+            target_join_col,
+            source_join_col,
+            clauses,
+            ..
+        } => {
+            let target = target_collection.clone();
+            let source = source_collection.clone();
+            let alias = source_alias.clone();
+            let target_join = target_join_col.clone();
+            let source_join = source_join_col.clone();
+            let clauses = clauses.clone();
+            Ok(Box::pin(async move {
+                document_ops::sets::merge(
+                    engine,
+                    &target,
+                    &source,
+                    &alias,
+                    &target_join,
+                    &source_join,
+                    &clauses,
+                )
+                .await
+            }))
+        }
 
-        DocumentOp::MaterializeScan { .. } => Ok(Box::pin(async move {
-            Err(LiteError::Unsupported {
-                detail: "MaterializeScan requires Origin's distributed scan executor; \
-                         Lite is single-node — use Scan + client-side materialization."
-                    .into(),
-            })
-        })),
+        DocumentOp::MaterializeScan {
+            collection,
+            cursor,
+            count,
+            ..
+        } => {
+            let col = collection.clone();
+            let cursor = cursor.clone();
+            let count = *count;
+            Ok(Box::pin(async move {
+                document_ops::sets::materialize_scan(engine, &col, &cursor, count).await
+            }))
+        }
     }
 }
