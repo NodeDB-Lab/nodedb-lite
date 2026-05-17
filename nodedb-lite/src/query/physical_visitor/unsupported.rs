@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Macro that expands to 10 PhysicalTaskVisitor method stubs returning `LiteError::Unsupported`.
-//! Invoked once from `adapter.rs` inside the single `impl PhysicalTaskVisitor for LiteDataPlaneVisitor` block.
+//! Macro that expands to the remaining `PhysicalTaskVisitor` method stubs
+//! returning `LiteError::Unsupported`. Invoked from `adapter/mod.rs` inside
+//! the `impl PhysicalTaskVisitor for LiteDataPlaneVisitor` block.
 
 macro_rules! impl_unsupported_lite_physical_visitor_methods {
     () => {
@@ -9,20 +10,6 @@ macro_rules! impl_unsupported_lite_physical_visitor_methods {
             _op: &nodedb_physical::physical_plan::GraphOp,
         ) -> Result<LitePhysicalFut<'a>, LiteError> {
             u_phys!("Graph")
-        }
-
-        fn document(
-            &mut self,
-            _op: &nodedb_physical::physical_plan::DocumentOp,
-        ) -> Result<LitePhysicalFut<'a>, LiteError> {
-            u_phys!("Document")
-        }
-
-        fn kv(
-            &mut self,
-            _op: &nodedb_physical::physical_plan::KvOp,
-        ) -> Result<LitePhysicalFut<'a>, LiteError> {
-            u_phys!("Kv")
         }
 
         fn columnar(
@@ -46,25 +33,11 @@ macro_rules! impl_unsupported_lite_physical_visitor_methods {
             u_phys!("Spatial")
         }
 
-        fn crdt(
-            &mut self,
-            _op: &nodedb_physical::physical_plan::CrdtOp,
-        ) -> Result<LitePhysicalFut<'a>, LiteError> {
-            u_phys!("Crdt")
-        }
-
         fn query(
             &mut self,
             _op: &nodedb_physical::physical_plan::QueryOp,
         ) -> Result<LitePhysicalFut<'a>, LiteError> {
             u_phys!("Query")
-        }
-
-        fn meta(
-            &mut self,
-            _op: &nodedb_physical::physical_plan::MetaOp,
-        ) -> Result<LitePhysicalFut<'a>, LiteError> {
-            u_phys!("Meta")
         }
 
         fn cluster_array(
