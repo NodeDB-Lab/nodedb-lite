@@ -12,13 +12,6 @@ macro_rules! impl_unsupported_lite_physical_visitor_methods {
             u_phys!("Graph")
         }
 
-        fn columnar(
-            &mut self,
-            _op: &nodedb_physical::physical_plan::ColumnarOp,
-        ) -> Result<LitePhysicalFut<'a>, LiteError> {
-            u_phys!("Columnar")
-        }
-
         fn timeseries(
             &mut self,
             _op: &nodedb_physical::physical_plan::TimeseriesOp,

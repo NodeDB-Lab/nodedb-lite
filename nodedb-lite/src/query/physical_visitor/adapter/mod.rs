@@ -14,7 +14,9 @@ use nodedb_array::query::slice::Slice;
 use roaring;
 
 use nodedb_physical::PhysicalTaskVisitor;
-use nodedb_physical::physical_plan::{ArrayOp, CrdtOp, DocumentOp, KvOp, MetaOp, TextOp, VectorOp};
+use nodedb_physical::physical_plan::{
+    ArrayOp, ColumnarOp, CrdtOp, DocumentOp, KvOp, MetaOp, TextOp, VectorOp,
+};
 use nodedb_types::result::QueryResult;
 
 use crate::engine::array::ops::util::time::now_ms;
@@ -27,6 +29,7 @@ use super::unsupported::impl_unsupported_lite_physical_visitor_methods;
 use super::vector_op::execute_vector_op;
 
 mod array;
+mod columnar;
 mod crdt;
 mod document;
 mod kv;
@@ -103,6 +106,10 @@ impl<'a, S: StorageEngine + StorageEngineSync + 'a> PhysicalTaskVisitor
 
     fn meta(&mut self, op: &MetaOp) -> Result<LitePhysicalFut<'a>, LiteError> {
         meta::dispatch(self.engine, op)
+    }
+
+    fn columnar(&mut self, op: &ColumnarOp) -> Result<LitePhysicalFut<'a>, LiteError> {
+        columnar::dispatch(self.engine, op)
     }
 
     impl_unsupported_lite_physical_visitor_methods!();
