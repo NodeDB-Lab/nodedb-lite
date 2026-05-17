@@ -40,7 +40,7 @@ impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
         };
 
         self.columnar
-            .create_collection(&name, schema, profile)
+            .create_collection(&name, schema, profile, false)
             .await?;
 
         self.register_columnar_collection(&name);

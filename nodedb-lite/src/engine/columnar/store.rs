@@ -23,6 +23,7 @@ use nodedb_types::Namespace;
 use nodedb_types::columnar::{ColumnarProfile, ColumnarSchema};
 use nodedb_types::value::Value;
 
+use crate::engine::array::ops::util::time::now_ms;
 use crate::error::LiteError;
 use crate::storage::engine::{StorageEngine, WriteOp};
 #[cfg(not(target_arch = "wasm32"))]
@@ -47,13 +48,27 @@ const META_COLUMNAR_COLLECTIONS: &[u8] = b"meta:columnar_collections";
 struct SegmentMeta {
     segment_id: u32,
     row_count: u64,
+    /// Milliseconds since Unix epoch when this segment was first written.
+    /// Used by bitemporal purge to determine which superseded segments are
+    /// eligible for deletion.
+    #[serde(default)]
+    system_time_from_ms: i64,
+    /// For bitemporal collections: the millisecond timestamp when the last
+    /// live row in this segment was deleted (compacted away). `None` means
+    /// the segment still has live rows. Segments with `Some(t)` where
+    /// `t < cutoff_ms` are eligible for physical deletion by `purge_bitemporal_before`.
+    #[serde(default)]
+    fully_deleted_at_ms: Option<i64>,
 }
 
 /// Per-collection state. Wrapped in `Mutex` inside `ColumnarEngine`.
 struct CollectionState {
     mutation: MutationEngine,
     profile: ColumnarProfile,
-    /// Ordered list of flushed segments.
+    /// Whether this collection has bitemporal system-time tracking.
+    bitemporal: bool,
+    /// Ordered list of flushed segments (including fully-deleted tombstones for
+    /// bitemporal collections — they persist until `purge_bitemporal_before` clears them).
     segments: Vec<SegmentMeta>,
     /// Next segment ID to assign.
     next_segment_id: u32,
@@ -132,6 +147,8 @@ impl<S: StorageEngine> ColumnarEngine<S> {
             struct StoredSchema {
                 schema: ColumnarSchema,
                 profile: ColumnarProfile,
+                #[serde(default)]
+                bitemporal: bool,
             }
             if let Some(schema_bytes) = storage.get(Namespace::Meta, meta_key.as_bytes()).await?
                 && let Ok(stored) = zerompk::from_msgpack::<StoredSchema>(&schema_bytes)
@@ -148,6 +165,11 @@ impl<S: StorageEngine> ColumnarEngine<S> {
                 let mut mutation = MutationEngine::new(name.clone(), stored.schema.clone());
 
                 for seg_meta in &segments {
+                    // Skip fully-deleted segments — they have no physical segment file.
+                    if seg_meta.fully_deleted_at_ms.is_some() {
+                        continue;
+                    }
+
                     let seg_key = format!("{name}:seg:{}", seg_meta.segment_id);
                     if let Some(seg_bytes) =
                         storage.get(Namespace::Columnar, seg_key.as_bytes()).await?
@@ -173,6 +195,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
                     Arc::new(Mutex::new(CollectionState {
                         mutation,
                         profile: stored.profile,
+                        bitemporal: stored.bitemporal,
                         segments,
                         next_segment_id: next_id,
                     })),
@@ -215,6 +238,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         name: &str,
         schema: ColumnarSchema,
         profile: ColumnarProfile,
+        bitemporal: bool,
     ) -> Result<(), LiteError> {
         // Snapshot existing names + dup check under read lock.
         let mut names: Vec<String> = {
@@ -236,11 +260,13 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         struct StoredSchema<'a> {
             schema: &'a ColumnarSchema,
             profile: &'a ColumnarProfile,
+            bitemporal: bool,
         }
         let meta_key = format!("{META_COLUMNAR_SCHEMA_PREFIX}{name}");
         let schema_bytes = zerompk::to_msgpack_vec(&StoredSchema {
             schema: &schema,
             profile: &profile,
+            bitemporal,
         })
         .map_err(|e| LiteError::Serialization {
             detail: e.to_string(),
@@ -270,6 +296,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         let state = CollectionState {
             mutation,
             profile,
+            bitemporal,
             segments: Vec::new(),
             next_segment_id: 1,
         };
@@ -546,9 +573,12 @@ impl<S: StorageEngine> ColumnarEngine<S> {
                 .map_err(columnar_err_to_lite)?;
 
             let seg_key = format!("{collection}:seg:{segment_id}");
+            let system_time_from_ms = if s.bitemporal { now_ms() } else { 0 };
             s.segments.push(SegmentMeta {
                 segment_id,
                 row_count: row_count as u64,
+                system_time_from_ms,
+                fully_deleted_at_ms: None,
             });
             let meta_key = format!("{collection}:meta");
             let meta_bytes =
@@ -640,6 +670,10 @@ impl<S: StorageEngine> ColumnarEngine<S> {
             let s = Self::lock_state(&state_arc)?;
             let mut to_compact = Vec::new();
             for seg_meta in &s.segments {
+                // Skip tombstoned segments — their physical file is already gone.
+                if seg_meta.fully_deleted_at_ms.is_some() {
+                    continue;
+                }
                 if let Some(bitmap) = s.mutation.delete_bitmap(seg_meta.segment_id as u64)
                     && bitmap.should_compact(seg_meta.row_count, 0.2)
                 {
@@ -712,7 +746,15 @@ impl<S: StorageEngine> ColumnarEngine<S> {
                     .delete(Namespace::Columnar, del_key.as_bytes())
                     .await?;
             } else {
-                // All rows deleted — remove segment entirely.
+                // All rows deleted. For bitemporal collections, tombstone the
+                // segment meta (retain the entry with fully_deleted_at_ms set)
+                // so `purge_bitemporal_before` can physically remove it later.
+                // For non-bitemporal collections, remove immediately.
+                let is_bitemporal = {
+                    let s = Self::lock_state(&state_arc)?;
+                    s.bitemporal
+                };
+
                 self.storage
                     .delete(Namespace::Columnar, seg_key.as_bytes())
                     .await?;
@@ -723,7 +765,16 @@ impl<S: StorageEngine> ColumnarEngine<S> {
 
                 {
                     let mut s = Self::lock_state(&state_arc)?;
-                    s.segments.retain(|m| m.segment_id != *seg_id);
+                    if is_bitemporal {
+                        // Mark as fully deleted instead of removing from the list.
+                        if let Some(meta) = s.segments.iter_mut().find(|m| m.segment_id == *seg_id)
+                        {
+                            meta.row_count = 0;
+                            meta.fully_deleted_at_ms = Some(now_ms());
+                        }
+                    } else {
+                        s.segments.retain(|m| m.segment_id != *seg_id);
+                    }
                 }
             }
         }
@@ -772,8 +823,12 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         all_rows.extend(snap.memtable_rows);
 
         // Read each flushed segment from storage (lock dropped) and transpose
-        // the columnar layout back to row-major Values.
+        // the columnar layout back to row-major Values. Skip fully-deleted
+        // tombstones (their physical segment file has already been removed).
         for seg_meta in &snap.seg_metas {
+            if seg_meta.fully_deleted_at_ms.is_some() {
+                continue;
+            }
             let seg_key = format!("{collection}:seg:{}", seg_meta.segment_id);
             let seg_bytes = match self
                 .storage
@@ -833,6 +888,9 @@ impl<S: StorageEngine> ColumnarEngine<S> {
 
         let mut segments = Vec::with_capacity(seg_metas.len());
         for seg_meta in &seg_metas {
+            if seg_meta.fully_deleted_at_ms.is_some() {
+                continue;
+            }
             let seg_key = format!("{collection}:seg:{}", seg_meta.segment_id);
             if let Some(bytes) = self
                 .storage
@@ -865,8 +923,83 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         let Ok(s) = state_arc.lock() else {
             return 0;
         };
-        let seg_rows: u64 = s.segments.iter().map(|m| m.row_count).sum();
+        let seg_rows: u64 = s
+            .segments
+            .iter()
+            .filter(|m| m.fully_deleted_at_ms.is_none())
+            .map(|m| m.row_count)
+            .sum();
         seg_rows as usize + s.mutation.memtable().row_count()
+    }
+
+    /// Whether a collection has bitemporal tracking enabled.
+    pub fn is_bitemporal(&self, collection: &str) -> bool {
+        let Ok(guard) = self.collections.read() else {
+            return false;
+        };
+        let Some(state_arc) = guard.get(collection) else {
+            return false;
+        };
+        let Ok(s) = state_arc.lock() else {
+            return false;
+        };
+        s.bitemporal
+    }
+
+    /// Purge fully-deleted segment tombstones for a bitemporal collection where
+    /// `fully_deleted_at_ms < cutoff_ms`. Non-bitemporal collections always
+    /// return `rows_affected: 0` — they have no tombstones.
+    ///
+    /// Returns the number of tombstoned segment entries removed.
+    pub async fn purge_bitemporal_before(
+        &self,
+        collection: &str,
+        cutoff_ms: i64,
+    ) -> Result<u64, LiteError> {
+        let state_arc = self.lookup(collection)?;
+
+        let (is_bitemporal, to_purge): (bool, Vec<u32>) = {
+            let s = Self::lock_state(&state_arc)?;
+            let purge: Vec<u32> = s
+                .segments
+                .iter()
+                .filter(|m| {
+                    m.fully_deleted_at_ms
+                        .map(|t| t < cutoff_ms)
+                        .unwrap_or(false)
+                })
+                .map(|m| m.segment_id)
+                .collect();
+            (s.bitemporal, purge)
+        };
+
+        if !is_bitemporal {
+            return Ok(0);
+        }
+
+        if to_purge.is_empty() {
+            return Ok(0);
+        }
+
+        // Remove purged segment IDs from the in-memory list.
+        {
+            let mut s = Self::lock_state(&state_arc)?;
+            s.segments.retain(|m| !to_purge.contains(&m.segment_id));
+        }
+
+        // Persist the updated segment metadata list.
+        let meta_bytes = {
+            let s = Self::lock_state(&state_arc)?;
+            zerompk::to_msgpack_vec(&s.segments).map_err(|e| LiteError::Serialization {
+                detail: e.to_string(),
+            })?
+        };
+        let meta_key = format!("{collection}:meta");
+        self.storage
+            .put(Namespace::Columnar, meta_key.as_bytes(), &meta_bytes)
+            .await?;
+
+        Ok(to_purge.len() as u64)
     }
 }
 

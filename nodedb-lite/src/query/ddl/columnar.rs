@@ -54,8 +54,15 @@ impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
             nodedb_types::columnar::ColumnarProfile::Plain
         };
 
+        // Check for WITH (bitemporal=true) in the DDL.
+        let bitemporal = {
+            let u = sql.to_uppercase();
+            u.contains("BITEMPORAL")
+                && (u.contains("TRUE") || u.contains("=TRUE") || u.contains("= TRUE"))
+        };
+
         self.columnar
-            .create_collection(&name, columnar_schema, profile)
+            .create_collection(&name, columnar_schema, profile, bitemporal)
             .await?;
 
         self.register_columnar_collection(&name);
