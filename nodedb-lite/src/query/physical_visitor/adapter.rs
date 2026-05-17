@@ -11,6 +11,9 @@ use std::sync::Arc;
 use nodedb_array::query::slice::Slice;
 use nodedb_array::types::cell_value::value::CellValue;
 use nodedb_array::types::coord::value::CoordValue;
+
+use crate::engine::array::ops::util::cell::cell_value_to_value;
+use crate::engine::array::ops::util::time::now_ms;
 use nodedb_physical::PhysicalTaskVisitor;
 use nodedb_physical::physical_plan::{ArrayOp, VectorOp};
 use roaring;
@@ -41,16 +44,6 @@ struct PutCellWire {
     valid_until_ms: i64,
 }
 
-fn cell_value_to_value(cv: CellValue) -> Value {
-    match cv {
-        CellValue::Int64(i) => Value::Integer(i),
-        CellValue::Float64(f) => Value::Float(f),
-        CellValue::String(s) => Value::String(s),
-        CellValue::Bytes(b) => Value::Bytes(b),
-        CellValue::Null => Value::Null,
-    }
-}
-
 use super::unsupported::impl_unsupported_lite_physical_visitor_methods;
 
 /// Decode a msgpack-encoded `Slice` for array `name` and run a surrogate
@@ -70,10 +63,7 @@ pub(crate) fn execute_surrogate_scan<S: StorageEngine + StorageEngineSync>(
         zerompk::from_msgpack(slice_bytes).map_err(|e| LiteError::Serialization {
             detail: format!("decode Slice predicate: {e}"),
         })?;
-    let system_as_of = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
+    let system_as_of = now_ms();
     let mut state = array_state.lock().map_err(|_| LiteError::LockPoisoned)?;
     state.surrogate_bitmap_scan(storage, name, slice.dim_ranges, system_as_of)
 }
@@ -188,14 +178,11 @@ impl<'a, S: StorageEngine + StorageEngineSync + 'a> PhysicalTaskVisitor
                         .map_err(|e| LiteError::Serialization {
                             detail: format!("decode Delete coords: {e}"),
                         })?;
-                    let now_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as i64;
+                    let now = now_ms();
                     let mut state = array_state.lock().map_err(|_| LiteError::LockPoisoned)?;
                     let mut rows_affected: u64 = 0;
                     for coord in coords {
-                        state.delete_cell(&name, coord, now_ms)?;
+                        state.delete_cell(&name, coord, now)?;
                         rows_affected += 1;
                     }
                     Ok(QueryResult {
@@ -281,29 +268,89 @@ impl<'a, S: StorageEngine + StorageEngineSync + 'a> PhysicalTaskVisitor
                 }))
             }
 
-            ArrayOp::Project { .. } => Err(LiteError::Unsupported {
-                detail: "ArrayOp::Project is not yet implemented on Lite; \
-                         add the `project` method to ArrayEngineState"
-                    .to_string(),
-            }),
+            ArrayOp::Project {
+                array_id,
+                attr_indices,
+            } => {
+                let name = array_id.name.clone();
+                let indices = attr_indices.clone();
+                let array_state = Arc::clone(&engine.array_state);
+                let storage = Arc::clone(&engine.storage);
+                Ok(Box::pin(async move {
+                    crate::engine::array::ops::project::project(
+                        &array_state,
+                        &storage,
+                        &name,
+                        &indices,
+                    )
+                    .await
+                }))
+            }
 
-            ArrayOp::Aggregate { .. } => Err(LiteError::Unsupported {
-                detail: "ArrayOp::Aggregate is not yet implemented on Lite; \
-                         add the `aggregate` method to ArrayEngineState"
-                    .to_string(),
-            }),
+            ArrayOp::Aggregate {
+                array_id,
+                attr_idx,
+                reducer,
+                group_by_dim,
+                ..
+            } => {
+                let name = array_id.name.clone();
+                let attr_idx = *attr_idx;
+                let reducer = *reducer;
+                let group_by_dim = *group_by_dim;
+                let array_state = Arc::clone(&engine.array_state);
+                let storage = Arc::clone(&engine.storage);
+                Ok(Box::pin(async move {
+                    crate::engine::array::ops::aggregate::aggregate(
+                        &array_state,
+                        &storage,
+                        &name,
+                        attr_idx,
+                        reducer,
+                        group_by_dim,
+                    )
+                    .await
+                }))
+            }
 
-            ArrayOp::Elementwise { .. } => Err(LiteError::Unsupported {
-                detail: "ArrayOp::Elementwise is not yet implemented on Lite; \
-                         add the `elementwise` method to ArrayEngineState"
-                    .to_string(),
-            }),
+            ArrayOp::Elementwise {
+                left, right, op, ..
+            } => {
+                let left_name = left.name.clone();
+                let right_name = right.name.clone();
+                let op = *op;
+                let array_state = Arc::clone(&engine.array_state);
+                let storage = Arc::clone(&engine.storage);
+                Ok(Box::pin(async move {
+                    crate::engine::array::ops::elementwise::elementwise_op(
+                        &array_state,
+                        &storage,
+                        &left_name,
+                        &right_name,
+                        op,
+                    )
+                    .await
+                }))
+            }
 
-            ArrayOp::Compact { .. } => Err(LiteError::Unsupported {
-                detail: "ArrayOp::Compact is not yet implemented on Lite; \
-                         add the `compact` method to ArrayEngineState"
-                    .to_string(),
-            }),
+            ArrayOp::Compact {
+                array_id,
+                audit_retain_ms,
+            } => {
+                let name = array_id.name.clone();
+                let retain_ms = *audit_retain_ms;
+                let array_state = Arc::clone(&engine.array_state);
+                let storage = Arc::clone(&engine.storage);
+                Ok(Box::pin(async move {
+                    crate::engine::array::ops::compact::compact(
+                        &array_state,
+                        &storage,
+                        &name,
+                        retain_ms,
+                    )
+                    .await
+                }))
+            }
 
             ArrayOp::SurrogateBitmapScan {
                 array_id,
