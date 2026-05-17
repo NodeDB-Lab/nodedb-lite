@@ -7,6 +7,7 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
+use crate::query::msgpack_helpers::{write_array_header, write_bin};
 use crate::query::value_utils::now_ms_u64;
 use crate::storage::engine::{StorageEngine, StorageEngineSync};
 
@@ -270,7 +271,82 @@ pub fn kv_scan<S: StorageEngine + StorageEngineSync>(
     })
 }
 
+/// MaterializeScan: cursor-paginated raw KV scan for the clone materializer.
+///
+/// Lite is single-node — no distributed cursor executor is needed. The scan
+/// iterates the redb KV table for `collection`, resuming from `cursor` if
+/// provided, returning at most `count` live (non-expired) entries per call.
+///
+/// Response payload is msgpack-encoded as a 2-element array:
+///   `[ next_cursor: bytes, entries: [[key: bytes, value: bytes], ...] ]`
+/// `next_cursor` is empty when the scan is complete.
+///
+/// `surrogate_ceiling` is accepted for plan-shape compatibility with Origin
+/// but unused — see [`kv_get`] for the rationale.
+pub fn kv_materialize_scan<S: StorageEngine + StorageEngineSync>(
+    engine: &LiteQueryEngine<S>,
+    collection: &str,
+    cursor: &[u8],
+    count: usize,
+    _surrogate_ceiling: Option<u32>,
+) -> Result<QueryResult, LiteError> {
+    let start = redb_key(collection, cursor);
+    let raw_entries = engine
+        .storage
+        .scan_range_sync(Namespace::Kv, &start, count + 1)
+        .map_err(|e| LiteError::Storage {
+            detail: e.to_string(),
+        })?;
+
+    let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(count.min(raw_entries.len()));
+    for (composite_key, raw_value) in &raw_entries {
+        if pairs.len() >= count {
+            break;
+        }
+        let Some((coll, user_key_bytes)) = split_redb_key(composite_key) else {
+            continue;
+        };
+        if coll != collection {
+            break;
+        }
+        let Some((deadline, user_bytes)) = decode_value(raw_value) else {
+            continue;
+        };
+        if is_expired(deadline) {
+            continue;
+        }
+        pairs.push((user_key_bytes.to_vec(), user_bytes.to_vec()));
+    }
+
+    let next_cursor: Vec<u8> = if pairs.len() < count {
+        Vec::new()
+    } else {
+        pairs.last().map(|(k, _)| k.clone()).unwrap_or_default()
+    };
+
+    let payload = encode_materialize_payload(&next_cursor, &pairs);
+
+    Ok(QueryResult {
+        columns: vec!["payload".into()],
+        rows: vec![vec![Value::Bytes(payload)]],
+        rows_affected: 0,
+    })
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+fn encode_materialize_payload(next_cursor: &[u8], pairs: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_array_header(&mut out, 2);
+    write_bin(&mut out, next_cursor);
+    write_array_header(&mut out, pairs.len());
+    for (key, value) in pairs {
+        write_array_header(&mut out, 2);
+        write_bin(&mut out, key);
+        write_bin(&mut out, value);
+    }
+    out
+}
 
 fn glob_matches(pattern: &str, input: &str) -> bool {
     let pat = pattern.as_bytes();
