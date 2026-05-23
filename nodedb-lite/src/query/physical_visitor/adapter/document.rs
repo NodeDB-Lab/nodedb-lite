@@ -6,11 +6,11 @@ use nodedb_physical::physical_plan::DocumentOp;
 use crate::error::LiteError;
 use crate::query::document_ops;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::LitePhysicalFut;
 
-pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     op: &DocumentOp,
 ) -> Result<LitePhysicalFut<'a>, LiteError> {
@@ -91,7 +91,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let path = path.clone();
             let value = value.clone();
             Ok(Box::pin(async move {
-                document_ops::reads::index_lookup(engine, &col, &path, &value)
+                document_ops::reads::index_lookup(engine, &col, &path, &value).await
             }))
         }
 
@@ -228,7 +228,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let col = collection.clone();
             let field = field.clone();
             Ok(Box::pin(async move {
-                document_ops::indexes::drop_index(engine, &col, &field)
+                document_ops::indexes::drop_index(engine, &col, &field).await
             }))
         }
 

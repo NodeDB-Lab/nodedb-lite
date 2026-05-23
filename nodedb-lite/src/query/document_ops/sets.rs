@@ -13,7 +13,7 @@ use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::msgpack_helpers::{write_array_header, write_bin, write_str, write_u32};
 use crate::query::value_utils::value_to_string;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::is_strict;
 use super::reads::loro_value_to_ndb_value;
@@ -27,7 +27,7 @@ type UpdateValue = nodedb_physical::physical_plan::document::types::UpdateValue;
 /// batch-inserts them into `target_collection`. Source filters are not
 /// evaluated — all documents are copied. Callers that need filtered
 /// copying should apply a Scan + BatchInsert composition.
-pub async fn insert_select<S: StorageEngine + StorageEngineSync>(
+pub async fn insert_select<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     target_collection: &str,
     source_collection: &str,
@@ -110,7 +110,7 @@ pub async fn insert_select<S: StorageEngine + StorageEngineSync>(
 /// The response payload is msgpack-encoded as a 2-element array:
 /// `[next_cursor: bin, entries: [[doc_id: str, surrogate: u32, value_bytes: bin], ...]]`
 /// packed into `QueryResult { columns: ["payload"], rows: [[Value::Bytes(payload)]] }`.
-pub async fn materialize_scan<S: StorageEngine + StorageEngineSync>(
+pub async fn materialize_scan<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     cursor: &[u8],
@@ -232,7 +232,7 @@ pub async fn materialize_scan<S: StorageEngine + StorageEngineSync>(
 ///    apply the `updates` assignments (merged document: target fields + source
 ///    fields qualified as `<source_alias>.<field>`).
 /// 4. All writes go through `point_update` so CRDT vs strict routing is preserved.
-pub async fn update_from_join<S: StorageEngine + StorageEngineSync>(
+pub async fn update_from_join<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     target_collection: &str,
     source_collection: &str,
@@ -284,7 +284,7 @@ pub async fn update_from_join<S: StorageEngine + StorageEngineSync>(
 /// 4. For each target row with no source match: apply WHEN NOT MATCHED BY SOURCE arm.
 ///
 /// All writes are within the same logical operation (per-row calls to point_*).
-pub async fn merge<S: StorageEngine + StorageEngineSync>(
+pub async fn merge<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     target_collection: &str,
     source_collection: &str,
@@ -403,7 +403,7 @@ fn encode_materialize_payload(next_cursor: &[u8], pairs: &[(String, Vec<u8>)]) -
 }
 
 /// Scan a collection and return all document IDs.
-pub(in crate::query) async fn collect_ids_pub<S: StorageEngine + StorageEngineSync>(
+pub(in crate::query) async fn collect_ids_pub<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
 ) -> Result<Vec<String>, LiteError> {
@@ -411,7 +411,7 @@ pub(in crate::query) async fn collect_ids_pub<S: StorageEngine + StorageEngineSy
 }
 
 /// Fetch a document as a field map — public for query-layer callers.
-pub(in crate::query) async fn fetch_document_value_pub<S: StorageEngine + StorageEngineSync>(
+pub(in crate::query) async fn fetch_document_value_pub<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     doc_id: &str,
@@ -419,7 +419,7 @@ pub(in crate::query) async fn fetch_document_value_pub<S: StorageEngine + Storag
     fetch_document_value(engine, collection, doc_id).await
 }
 
-async fn collect_ids<S: StorageEngine + StorageEngineSync>(
+async fn collect_ids<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
 ) -> Result<Vec<String>, LiteError> {
@@ -449,7 +449,7 @@ async fn collect_ids<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Fetch a document as a field map (String → Value).
-async fn fetch_document_value<S: StorageEngine + StorageEngineSync>(
+async fn fetch_document_value<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     doc_id: &str,
@@ -487,7 +487,7 @@ async fn fetch_document_value<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Build a join map: join_col_value → document field map.
-async fn build_join_map<S: StorageEngine + StorageEngineSync>(
+async fn build_join_map<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     join_col: &str,
@@ -542,7 +542,7 @@ fn build_insert_map(
 }
 
 /// Apply a single MERGE arm action to a target document.
-async fn apply_merge_action<S: StorageEngine + StorageEngineSync>(
+async fn apply_merge_action<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     doc_id: &str,
@@ -576,10 +576,10 @@ async fn apply_merge_action<S: StorageEngine + StorageEngineSync>(
 #[cfg(test)]
 mod tests {
     use crate::NodeDbLite;
-    use crate::RedbStorage;
+    use crate::PagedbStorageMem;
 
-    async fn make_db() -> NodeDbLite<RedbStorage> {
-        let storage = RedbStorage::open_in_memory().unwrap();
+    async fn make_db() -> NodeDbLite<PagedbStorageMem> {
+        let storage = PagedbStorageMem::open_in_memory().await.unwrap();
         NodeDbLite::open(storage, 1).await.unwrap()
     }
 

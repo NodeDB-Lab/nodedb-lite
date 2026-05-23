@@ -9,7 +9,7 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync, WriteOp};
+use crate::storage::engine::{StorageEngine, WriteOp};
 
 use super::is_strict;
 use super::reads::{loro_value_to_ndb_value, msgpack_bytes_to_crdt_fields, ndb_value_to_loro};
@@ -17,7 +17,7 @@ use super::reads::{loro_value_to_ndb_value, msgpack_bytes_to_crdt_fields, ndb_va
 type UpdateValue = nodedb_physical::physical_plan::document::types::UpdateValue;
 
 /// PointPut: unconditional overwrite (upsert semantics).
-pub async fn point_put<S: StorageEngine + StorageEngineSync>(
+pub async fn point_put<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     document_id: &str,
@@ -53,7 +53,7 @@ pub async fn point_put<S: StorageEngine + StorageEngineSync>(
 }
 
 /// PointInsert: insert-only, fail on duplicate PK (or skip if `if_absent`).
-pub async fn point_insert<S: StorageEngine + StorageEngineSync>(
+pub async fn point_insert<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     document_id: &str,
@@ -102,7 +102,7 @@ pub async fn point_insert<S: StorageEngine + StorageEngineSync>(
 }
 
 /// PointUpdate: read-modify-write with field-level changes.
-pub async fn point_update<S: StorageEngine + StorageEngineSync>(
+pub async fn point_update<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     document_id: &str,
@@ -157,7 +157,7 @@ pub async fn point_update<S: StorageEngine + StorageEngineSync>(
 }
 
 /// PointDelete: remove a document by ID.
-pub async fn point_delete<S: StorageEngine + StorageEngineSync>(
+pub async fn point_delete<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     document_id: &str,
@@ -180,7 +180,7 @@ pub async fn point_delete<S: StorageEngine + StorageEngineSync>(
 }
 
 /// BatchInsert: insert N documents in a single transaction.
-pub async fn batch_insert<S: StorageEngine + StorageEngineSync>(
+pub async fn batch_insert<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     documents: &[(String, Vec<u8>)],
@@ -224,7 +224,7 @@ pub async fn batch_insert<S: StorageEngine + StorageEngineSync>(
 
 /// Upsert: insert or update. When `on_conflict_updates` is non-empty, applies
 /// those assignments on conflict instead of merging the new value.
-pub async fn upsert<S: StorageEngine + StorageEngineSync>(
+pub async fn upsert<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     document_id: &str,
@@ -267,7 +267,7 @@ pub async fn upsert<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Truncate: delete ALL documents in a collection.
-pub async fn truncate<S: StorageEngine + StorageEngineSync>(
+pub async fn truncate<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
 ) -> Result<QueryResult, LiteError> {
@@ -305,7 +305,7 @@ pub async fn truncate<S: StorageEngine + StorageEngineSync>(
 /// Lite does not yet evaluate residual scan filters — every document in the
 /// collection receives the update. Callers that need filtered bulk updates
 /// should compose `Scan` + per-row `PointUpdate` at the application layer.
-pub async fn bulk_update<S: StorageEngine + StorageEngineSync>(
+pub async fn bulk_update<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     updates: &[(String, UpdateValue)],
@@ -363,7 +363,7 @@ pub async fn bulk_update<S: StorageEngine + StorageEngineSync>(
 /// it always resolves DELETE to point-key `PointDelete` ops via `target_keys`.
 /// CRDT sync plans do not include bulk-predicate deletes. No valid code path
 /// in the Lite deployment shape reaches this arm.
-pub async fn bulk_delete<S: StorageEngine + StorageEngineSync>(
+pub async fn bulk_delete<S: StorageEngine>(
     _engine: &LiteQueryEngine<S>,
     _collection: &str,
 ) -> Result<QueryResult, LiteError> {
@@ -384,7 +384,7 @@ fn affected(n: u64) -> QueryResult {
     }
 }
 
-fn strict_schema<S: StorageEngine + StorageEngineSync>(
+fn strict_schema<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
 ) -> Result<nodedb_types::columnar::StrictSchema, LiteError> {

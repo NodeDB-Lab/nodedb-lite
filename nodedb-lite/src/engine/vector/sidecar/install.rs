@@ -307,6 +307,25 @@ mod tests {
         async fn count(&self, _ns: Namespace) -> Result<u64, LiteError> {
             Ok(0)
         }
+
+        async fn scan_range(
+            &self,
+            _ns: Namespace,
+            _start: &[u8],
+            _limit: usize,
+        ) -> Result<Vec<KvPair>, LiteError> {
+            Ok(Vec::new())
+        }
+
+        async fn scan_range_bounded(
+            &self,
+            _ns: Namespace,
+            _start: Option<&[u8]>,
+            _end: Option<&[u8]>,
+            _limit: Option<usize>,
+        ) -> Result<Vec<KvPair>, LiteError> {
+            Ok(Vec::new())
+        }
     }
 
     fn make_state() -> VectorState<MemStore> {

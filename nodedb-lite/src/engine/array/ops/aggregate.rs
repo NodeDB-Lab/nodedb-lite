@@ -9,7 +9,7 @@
 //! the same filter applied in `engine.rs::slice`.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use nodedb_array::query::aggregate::{
     AggregateResult, GroupAggregate, Reducer, aggregate_attr, group_by_dim,
@@ -23,7 +23,7 @@ use nodedb_types::value::Value;
 use crate::engine::array::engine::ArrayEngineState;
 use crate::engine::array::ops::util::time::now_ms;
 use crate::error::LiteError;
-use crate::storage::engine::StorageEngineSync;
+use crate::storage::engine::StorageEngine;
 
 fn map_reducer(r: ArrayReducer) -> Reducer {
     match r {
@@ -106,8 +106,8 @@ fn accumulate_tile(
 }
 
 /// Execute `ArrayOp::Aggregate` for the Lite engine.
-pub async fn aggregate<S: StorageEngineSync>(
-    array_state: &Arc<Mutex<ArrayEngineState>>,
+pub async fn aggregate<S: StorageEngine>(
+    array_state: &Arc<tokio::sync::Mutex<ArrayEngineState>>,
     storage: &Arc<S>,
     name: &str,
     attr_idx: u32,
@@ -123,7 +123,7 @@ pub async fn aggregate<S: StorageEngineSync>(
     };
 
     let (seg_ids, schema, attr_count, dim_count) = {
-        let state = array_state.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let state = array_state.lock().await;
         let arr = state
             .arrays
             .get(name)
@@ -160,7 +160,7 @@ pub async fn aggregate<S: StorageEngineSync>(
 
     // Segments.
     for seg_id in &seg_ids {
-        let bytes = crate::engine::array::segments::load_segment(storage, name, *seg_id)?;
+        let bytes = crate::engine::array::segments::load_segment(storage, name, *seg_id).await?;
         let reader = SegmentReader::open(&bytes).map_err(|e| LiteError::Storage {
             detail: format!("open segment {seg_id}: {e}"),
         })?;
@@ -188,7 +188,7 @@ pub async fn aggregate<S: StorageEngineSync>(
 
     // Memtable.
     {
-        let mut state = array_state.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let mut state = array_state.lock().await;
         let arr = state
             .arrays
             .get_mut(name)

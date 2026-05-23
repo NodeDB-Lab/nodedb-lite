@@ -14,7 +14,7 @@ use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::filter_convert::sql_filters_to_metadata;
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::adapter::LiteFut;
 
@@ -54,7 +54,7 @@ fn map_spatial_predicate(p: &SqlSpatialPredicate) -> PhysSpatialPredicate {
 /// shared HNSW index is exactly that mismatch — callers targeting a
 /// vector-primary collection with multiple embedding fields must route to
 /// Origin.
-pub(super) fn lower_multi_vector_search<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_multi_vector_search<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     query_vector: &[f32],
@@ -78,7 +78,7 @@ pub(super) fn lower_multi_vector_search<'a, S: StorageEngine + StorageEngineSync
 
 /// Lower `SqlPlan::HybridSearch` to `TextOp::HybridSearch`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn lower_hybrid_search<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_hybrid_search<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     query_vector: &[f32],
@@ -110,7 +110,7 @@ pub(super) fn lower_hybrid_search<'a, S: StorageEngine + StorageEngineSync + 'a>
 
 /// Lower `SqlPlan::HybridSearchTriple` to `TextOp::HybridSearchTriple`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn lower_hybrid_search_triple<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_hybrid_search_triple<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     query_vector: &[f32],
@@ -148,7 +148,7 @@ pub(super) fn lower_hybrid_search_triple<'a, S: StorageEngine + StorageEngineSyn
 
 /// Lower `SqlPlan::SpatialScan` to `SpatialOp::Scan`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn lower_spatial_scan<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_spatial_scan<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     field: &str,
@@ -193,12 +193,16 @@ mod tests {
     use nodedb_sql::types::query::SpatialPredicate as SqlSpatialPredicate;
     use nodedb_types::geometry::Geometry;
 
+    use crate::PagedbStorageMem;
     use crate::query::engine::LiteQueryEngine;
-    use crate::storage::redb_storage::RedbStorage;
 
-    fn make_engine() -> LiteQueryEngine<RedbStorage> {
+    async fn make_engine() -> LiteQueryEngine<PagedbStorageMem> {
         use std::sync::Mutex;
-        let storage = Arc::new(RedbStorage::open_in_memory().expect("in-memory redb"));
+        let storage = Arc::new(
+            PagedbStorageMem::open_in_memory()
+                .await
+                .expect("in-memory pagedb"),
+        );
         let crdt = Arc::new(Mutex::new(
             crate::engine::crdt::CrdtEngine::new(1).expect("crdt"),
         ));
@@ -216,8 +220,10 @@ mod tests {
             Arc::clone(&storage),
             100,
         ));
-        let array_state = Arc::new(Mutex::new(
-            crate::engine::array::engine::ArrayEngineState::open(&storage).expect("array"),
+        let array_state = Arc::new(tokio::sync::Mutex::new(
+            crate::engine::array::engine::ArrayEngineState::open(&storage)
+                .await
+                .expect("array"),
         ));
         let fts_state = Arc::new(crate::engine::fts::FtsState::new());
         let spatial = Arc::new(Mutex::new(
@@ -240,7 +246,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_hybrid_search_returns_result() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         let result = super::lower_hybrid_search(
             &engine,
             "test_col",
@@ -259,7 +265,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_spatial_scan_returns_result() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         let point = Geometry::point(0.0, 0.0);
         let result = super::lower_spatial_scan(
             &engine,
@@ -277,7 +283,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_hybrid_search_triple_returns_result() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         let result = super::lower_hybrid_search_triple(
             &engine,
             "test_col",

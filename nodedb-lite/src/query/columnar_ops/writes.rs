@@ -9,7 +9,7 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::reads::row_to_object;
 
@@ -31,7 +31,7 @@ pub struct InsertParams<'a> {
 /// Decodes the payload per `format` ("json", "msgpack", "ilp"), respects
 /// `intent` (Insert / InsertIfAbsent / Put), and assigns surrogates from the
 /// provided list falling back to 0 when the list is shorter than the row count.
-pub fn insert<S: StorageEngine + StorageEngineSync>(
+pub fn insert<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     params: InsertParams<'_>,
@@ -133,7 +133,7 @@ pub fn insert<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Update rows matching filter predicates.
-pub fn update<S: StorageEngine + StorageEngineSync>(
+pub fn update<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     filters_bytes: &[u8],
@@ -221,7 +221,7 @@ pub fn update<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Delete rows matching filter predicates.
-pub fn delete<S: StorageEngine + StorageEngineSync>(
+pub fn delete<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     filters_bytes: &[u8],
@@ -504,7 +504,7 @@ fn value_object_to_row(obj: Value, col_names: &[String]) -> Result<Vec<Value>, L
 ///
 /// Uses `list_rows` synchronously via the current tokio handle. Lite's columnar
 /// engine is in-memory so this is cheap.
-fn pk_exists<S: StorageEngine + StorageEngineSync>(
+fn pk_exists<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     pk: &Value,
@@ -533,7 +533,7 @@ fn pk_exists<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Find a specific row by PK.
-fn find_row<S: StorageEngine + StorageEngineSync>(
+fn find_row<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     pk: &Value,

@@ -43,7 +43,7 @@ pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_nativeArrayCreate(
         Err(_) => return NODEDB_ERR_FAILED,
     };
 
-    match h.db.create_array(&name_str, schema) {
+    match h.rt.block_on(h.db.create_array(&name_str, schema)) {
         Ok(()) => NODEDB_OK,
         Err(_) => NODEDB_ERR_FAILED,
     }
@@ -95,14 +95,14 @@ pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_nativeArrayPutCell(
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    match h.db.array_put_cell(
+    match h.rt.block_on(h.db.array_put_cell(
         &name_str,
         coord,
         attrs,
         system_from_ms,
         valid_from_ms,
         valid_until_ms,
-    ) {
+    )) {
         Ok(()) => NODEDB_OK,
         Err(_) => NODEDB_ERR_FAILED,
     }
@@ -145,7 +145,7 @@ pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_nativeArraySlice(
         Some(as_of_ms)
     };
 
-    let cells = match h.db.array_slice(&name_str, ranges, as_of) {
+    let cells = match h.rt.block_on(h.db.array_slice(&name_str, ranges, as_of)) {
         Ok(c) => c,
         Err(_) => return std::ptr::null_mut(),
     };
@@ -202,7 +202,10 @@ pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_nativeArrayReadCoord(
         Some(as_of_ms)
     };
 
-    let cell = match h.db.array_read_coord(&name_str, &coord, as_of) {
+    let cell = match h
+        .rt
+        .block_on(h.db.array_read_coord(&name_str, &coord, as_of))
+    {
         Ok(c) => c,
         Err(_) => return std::ptr::null_mut(),
     };
@@ -258,7 +261,10 @@ pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_nativeArrayDeleteCell(
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    match h.db.array_delete_cell(&name_str, coord, system_from_ms) {
+    match h
+        .rt
+        .block_on(h.db.array_delete_cell(&name_str, coord, system_from_ms))
+    {
         Ok(()) => NODEDB_OK,
         Err(_) => NODEDB_ERR_FAILED,
     }
@@ -297,7 +303,10 @@ pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_nativeArrayGdprEraseCell(
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    match h.db.array_gdpr_erase_cell(&name_str, coord, system_from_ms) {
+    match h
+        .rt
+        .block_on(h.db.array_gdpr_erase_cell(&name_str, coord, system_from_ms))
+    {
         Ok(()) => NODEDB_OK,
         Err(_) => NODEDB_ERR_FAILED,
     }

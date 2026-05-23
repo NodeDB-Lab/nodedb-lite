@@ -9,9 +9,9 @@ use nodedb_types::value::Value;
 
 use crate::engine::fts::run_text_search;
 use crate::nodedb::NodeDbLite;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
-impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
+impl<S: StorageEngine> NodeDbLite<S> {
     /// Execute a SQL statement against the embedded query engine.
     ///
     /// `params` is accepted for API parity with Origin's prepared-statement

@@ -5,11 +5,11 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::parser::parse_column_def;
 
-impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
+impl<S: StorageEngine> LiteQueryEngine<S> {
     /// Handle: ALTER TABLE <name> ADD [COLUMN] <name> <type> [NOT NULL] [DEFAULT ...]
     pub(in crate::query) async fn handle_alter_add_column(
         &self,

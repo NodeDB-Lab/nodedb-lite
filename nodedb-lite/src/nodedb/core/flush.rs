@@ -2,7 +2,7 @@
 
 //! `NodeDbLite::flush` — persist all in-memory state to storage.
 
-use crate::storage::engine::{StorageEngine, StorageEngineSync, WriteOp};
+use crate::storage::engine::{StorageEngine, WriteOp};
 use nodedb_types::Namespace;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 
@@ -14,7 +14,7 @@ use super::types::{
     META_LAST_FLUSHED_MID, NodeDbLite,
 };
 
-impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
+impl<S: StorageEngine> NodeDbLite<S> {
     /// Persist all in-memory state to storage (call before shutdown).
     pub async fn flush(&self) -> NodeDbResult<()> {
         let mut ops = Vec::new();

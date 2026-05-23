@@ -4,12 +4,12 @@ use nodedb_array::sync::op_codec;
 use nodedb_types::sync::wire::array::{ArrayDeltaBatchMsg, ArrayDeltaMsg};
 
 use crate::error::LiteError;
-use crate::storage::engine::StorageEngineSync;
+use crate::storage::engine::StorageEngine;
 
 use super::dispatcher::{ArrayInbound, map_apply_outcome};
 use super::outcome::InboundOutcome;
 
-impl<S: StorageEngineSync> ArrayInbound<S> {
+impl<S: StorageEngine> ArrayInbound<S> {
     /// Apply a single delta message from Origin.
     ///
     /// Decodes the op payload, observes the HLC, then delegates to
@@ -59,16 +59,20 @@ mod tests {
     use super::super::fixtures::{hlc, make_inbound, put_op, simple_schema};
     use super::super::outcome::InboundOutcome;
 
-    #[test]
-    fn handle_delta_applies_put() {
-        let (inbound, schemas, _pending, storage) = make_inbound();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_delta_applies_put() {
+        let (inbound, schemas, _pending, storage) = make_inbound().await;
 
         // Register schema in both the schemas registry AND the engine's catalog.
-        schemas.put_schema("arr", &simple_schema("arr")).unwrap();
+        schemas
+            .put_schema("arr", &simple_schema("arr"))
+            .await
+            .unwrap();
         {
-            let mut state = inbound.engine.array_state.lock().unwrap();
+            let mut state = inbound.engine.array_state.lock().await;
             state
                 .create_array(&storage, "arr", simple_schema("arr"))
+                .await
                 .unwrap();
         }
         let schema_hlc = schemas.schema_hlc("arr").unwrap();
@@ -96,14 +100,18 @@ mod tests {
         assert_eq!(outcome, InboundOutcome::Applied);
     }
 
-    #[test]
-    fn handle_delta_idempotent() {
-        let (inbound, schemas, _pending, storage) = make_inbound();
-        schemas.put_schema("arr", &simple_schema("arr")).unwrap();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_delta_idempotent() {
+        let (inbound, schemas, _pending, storage) = make_inbound().await;
+        schemas
+            .put_schema("arr", &simple_schema("arr"))
+            .await
+            .unwrap();
         {
-            let mut state = inbound.engine.array_state.lock().unwrap();
+            let mut state = inbound.engine.array_state.lock().await;
             state
                 .create_array(&storage, "arr", simple_schema("arr"))
+                .await
                 .unwrap();
         }
         let schema_hlc = schemas.schema_hlc("arr").unwrap();
@@ -140,9 +148,9 @@ mod tests {
         assert_eq!(o2, InboundOutcome::Idempotent);
     }
 
-    #[test]
-    fn handle_delta_unknown_array_returns_rejected() {
-        let (inbound, _schemas, _pending, _storage) = make_inbound();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_delta_unknown_array_returns_rejected() {
+        let (inbound, _schemas, _pending, _storage) = make_inbound().await;
         // No array registered → ApplyRejection::ArrayUnknown.
         let op = put_op("unknown_arr", 50, 50);
         let payload = op_codec::encode_op(&op).unwrap();
@@ -160,14 +168,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn handle_delta_schema_too_new_returns_rejected() {
-        let (inbound, schemas, _pending, storage) = make_inbound();
-        schemas.put_schema("arr", &simple_schema("arr")).unwrap();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_delta_schema_too_new_returns_rejected() {
+        let (inbound, schemas, _pending, storage) = make_inbound().await;
+        schemas
+            .put_schema("arr", &simple_schema("arr"))
+            .await
+            .unwrap();
         {
-            let mut state = inbound.engine.array_state.lock().unwrap();
+            let mut state = inbound.engine.array_state.lock().await;
             state
                 .create_array(&storage, "arr", simple_schema("arr"))
+                .await
                 .unwrap();
         }
         // Local schema_hlc is hlc(X); op carries schema_hlc far in the future.
@@ -200,14 +212,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn handle_delta_batch_processes_all() {
-        let (inbound, schemas, _pending, storage) = make_inbound();
-        schemas.put_schema("b", &simple_schema("b")).unwrap();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_delta_batch_processes_all() {
+        let (inbound, schemas, _pending, storage) = make_inbound().await;
+        schemas.put_schema("b", &simple_schema("b")).await.unwrap();
         {
-            let mut state = inbound.engine.array_state.lock().unwrap();
+            let mut state = inbound.engine.array_state.lock().await;
             state
                 .create_array(&storage, "b", simple_schema("b"))
+                .await
                 .unwrap();
         }
         let schema_hlc = schemas.schema_hlc("b").unwrap();

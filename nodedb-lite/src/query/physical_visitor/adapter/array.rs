@@ -14,7 +14,7 @@ use crate::engine::array::ops::util::cell::cell_value_to_value;
 use crate::engine::array::ops::util::time::now_ms;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::{LitePhysicalFut, execute_surrogate_scan};
 
@@ -32,7 +32,7 @@ struct PutCellWire {
     valid_until_ms: i64,
 }
 
-pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     op: &ArrayOp,
 ) -> Result<LitePhysicalFut<'a>, LiteError> {
@@ -51,8 +51,8 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
                     zerompk::from_msgpack(&schema_bytes).map_err(|e| LiteError::Serialization {
                         detail: format!("decode ArraySchema: {e}"),
                     })?;
-                let mut state = array_state.lock().map_err(|_| LiteError::LockPoisoned)?;
-                state.create_array(&storage, &name, schema)?;
+                let mut state = array_state.lock().await;
+                state.create_array(&storage, &name, schema).await?;
                 Ok(QueryResult {
                     columns: vec![],
                     rows: vec![],
@@ -75,18 +75,20 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
                     zerompk::from_msgpack(&cells_bytes).map_err(|e| LiteError::Serialization {
                         detail: format!("decode Put cells: {e}"),
                     })?;
-                let mut state = array_state.lock().map_err(|_| LiteError::LockPoisoned)?;
+                let mut state = array_state.lock().await;
                 let mut rows_affected: u64 = 0;
                 for cell in cells {
-                    state.put_cell(
-                        &storage,
-                        &name,
-                        cell.coord,
-                        cell.attrs,
-                        cell.system_from_ms,
-                        cell.valid_from_ms,
-                        cell.valid_until_ms,
-                    )?;
+                    state
+                        .put_cell(
+                            &storage,
+                            &name,
+                            cell.coord,
+                            cell.attrs,
+                            cell.system_from_ms,
+                            cell.valid_from_ms,
+                            cell.valid_until_ms,
+                        )
+                        .await?;
                     rows_affected += 1;
                 }
                 Ok(QueryResult {
@@ -111,7 +113,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
                         detail: format!("decode Delete coords: {e}"),
                     })?;
                 let now = now_ms();
-                let mut state = array_state.lock().map_err(|_| LiteError::LockPoisoned)?;
+                let mut state = array_state.lock().await;
                 let mut rows_affected: u64 = 0;
                 for coord in coords {
                     state.delete_cell(&name, coord, now)?;
@@ -141,8 +143,10 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
                     zerompk::from_msgpack(&slice_bytes).map_err(|e| LiteError::Serialization {
                         detail: format!("decode Slice predicate: {e}"),
                     })?;
-                let mut state = array_state.lock().map_err(|_| LiteError::LockPoisoned)?;
-                let cells = state.slice(&storage, &name, slice.dim_ranges, system_as_of)?;
+                let mut state = array_state.lock().await;
+                let cells = state
+                    .slice(&storage, &name, slice.dim_ranges, system_as_of)
+                    .await?;
                 let columns = vec![
                     "attrs".to_string(),
                     "valid_from_ms".to_string(),
@@ -174,8 +178,8 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let array_state = Arc::clone(&engine.array_state);
             let storage = Arc::clone(&engine.storage);
             Ok(Box::pin(async move {
-                let mut state = array_state.lock().map_err(|_| LiteError::LockPoisoned)?;
-                state.flush(&storage, &name)?;
+                let mut state = array_state.lock().await;
+                state.flush(&storage, &name).await?;
                 Ok(QueryResult {
                     columns: vec![],
                     rows: vec![],
@@ -189,8 +193,8 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let array_state = Arc::clone(&engine.array_state);
             let storage = Arc::clone(&engine.storage);
             Ok(Box::pin(async move {
-                let mut state = array_state.lock().map_err(|_| LiteError::LockPoisoned)?;
-                state.delete_array(&storage, &name)?;
+                let mut state = array_state.lock().await;
+                state.delete_array(&storage, &name).await?;
                 Ok(QueryResult {
                     columns: vec![],
                     rows: vec![],
@@ -287,7 +291,8 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let array_state = Arc::clone(&engine.array_state);
             let storage = Arc::clone(&engine.storage);
             Ok(Box::pin(async move {
-                let bitmap = execute_surrogate_scan(&array_state, &storage, &name, &slice_bytes)?;
+                let bitmap =
+                    execute_surrogate_scan(&array_state, &storage, &name, &slice_bytes).await?;
                 let mut bitmap_bytes = Vec::new();
                 bitmap
                     .serialize_into(&mut bitmap_bytes)

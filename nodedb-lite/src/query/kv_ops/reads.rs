@@ -9,7 +9,7 @@ use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::msgpack_helpers::{write_array_header, write_bin};
 use crate::query::value_utils::now_ms_u64;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 // ─── Encoding helpers ────────────────────────────────────────────────────────
 
@@ -60,7 +60,7 @@ pub(super) fn split_redb_key(composite: &[u8]) -> Option<(&str, &[u8])> {
 /// `surrogate_ceiling` is accepted for plan-shape compatibility with Origin
 /// but unused: Lite is single-node and has no clone-resolver delegation that
 /// would attach a surrogate to KV values.
-pub fn kv_get<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_get<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     key: &[u8],
@@ -69,7 +69,8 @@ pub fn kv_get<S: StorageEngine + StorageEngineSync>(
     let rkey = redb_key(collection, key);
     let stored = engine
         .storage
-        .get_sync(Namespace::Kv, &rkey)
+        .get(Namespace::Kv, &rkey)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -101,7 +102,7 @@ pub fn kv_get<S: StorageEngine + StorageEngineSync>(
 /// - `-2` = key does not exist
 /// - `-1` = key exists but has no TTL
 /// - `>= 0` = remaining ms
-pub fn kv_get_ttl<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_get_ttl<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     key: &[u8],
@@ -109,7 +110,8 @@ pub fn kv_get_ttl<S: StorageEngine + StorageEngineSync>(
     let rkey = redb_key(collection, key);
     let stored = engine
         .storage
-        .get_sync(Namespace::Kv, &rkey)
+        .get(Namespace::Kv, &rkey)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -138,7 +140,7 @@ pub fn kv_get_ttl<S: StorageEngine + StorageEngineSync>(
 }
 
 /// BatchGet: fetch multiple keys in one pass.
-pub fn kv_batch_get<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_batch_get<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     keys: &[Vec<u8>],
@@ -146,13 +148,13 @@ pub fn kv_batch_get<S: StorageEngine + StorageEngineSync>(
     let mut rows: Vec<Vec<Value>> = Vec::with_capacity(keys.len());
     for key in keys {
         let rkey = redb_key(collection, key);
-        let stored =
-            engine
-                .storage
-                .get_sync(Namespace::Kv, &rkey)
-                .map_err(|e| LiteError::Storage {
-                    detail: e.to_string(),
-                })?;
+        let stored = engine
+            .storage
+            .get(Namespace::Kv, &rkey)
+            .await
+            .map_err(|e| LiteError::Storage {
+                detail: e.to_string(),
+            })?;
         let val = match stored {
             None => Value::Null,
             Some(raw) => match decode_value(&raw) {
@@ -176,7 +178,7 @@ pub fn kv_batch_get<S: StorageEngine + StorageEngineSync>(
 }
 
 /// FieldGet: extract named fields from a MessagePack-encoded value.
-pub fn kv_field_get<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_field_get<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     key: &[u8],
@@ -185,7 +187,8 @@ pub fn kv_field_get<S: StorageEngine + StorageEngineSync>(
     let rkey = redb_key(collection, key);
     let stored = engine
         .storage
-        .get_sync(Namespace::Kv, &rkey)
+        .get(Namespace::Kv, &rkey)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -222,7 +225,7 @@ pub fn kv_field_get<S: StorageEngine + StorageEngineSync>(
 ///
 /// `surrogate_ceiling` is accepted for plan-shape compatibility with Origin
 /// but unused — see [`kv_get`] for the rationale.
-pub fn kv_scan<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_scan<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     cursor: &[u8],
@@ -233,7 +236,8 @@ pub fn kv_scan<S: StorageEngine + StorageEngineSync>(
     let start = redb_key(collection, cursor);
     let entries = engine
         .storage
-        .scan_range_sync(Namespace::Kv, &start, count + 1)
+        .scan_range(Namespace::Kv, &start, count + 1)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -283,7 +287,7 @@ pub fn kv_scan<S: StorageEngine + StorageEngineSync>(
 ///
 /// `surrogate_ceiling` is accepted for plan-shape compatibility with Origin
 /// but unused — see [`kv_get`] for the rationale.
-pub fn kv_materialize_scan<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_materialize_scan<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     cursor: &[u8],
@@ -293,7 +297,8 @@ pub fn kv_materialize_scan<S: StorageEngine + StorageEngineSync>(
     let start = redb_key(collection, cursor);
     let raw_entries = engine
         .storage
-        .scan_range_sync(Namespace::Kv, &start, count + 1)
+        .scan_range(Namespace::Kv, &start, count + 1)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;

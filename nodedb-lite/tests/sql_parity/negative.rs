@@ -12,8 +12,7 @@
 use std::sync::Arc;
 
 use nodedb_client::NodeDb;
-use nodedb_lite::NodeDbLite;
-use nodedb_lite::storage::redb_storage::RedbStorage;
+use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 use nodedb_types::document::Document;
 use nodedb_types::value::Value;
 
@@ -22,7 +21,7 @@ use crate::common::sql::open_lite;
 // ── Setup helpers ─────────────────────────────────────────────────────────────
 
 /// Seed a schemaless collection via the Rust API so it appears in the catalog.
-async fn seed_collection(db: &Arc<NodeDbLite<RedbStorage>>, collection: &str, id: &str) {
+async fn seed_collection(db: &Arc<NodeDbLite<PagedbStorageMem>>, collection: &str, id: &str) {
     let mut doc = Document::new(id);
     doc.set("_seed", Value::Bool(true));
     db.document_put(collection, doc)

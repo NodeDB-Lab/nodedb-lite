@@ -6,10 +6,10 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// Read the current CRDT state of a document.
-pub async fn handle_read<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_read<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     document_id: &str,
@@ -33,7 +33,7 @@ pub async fn handle_read<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Read the conflict resolution policy for a collection.
-pub async fn handle_get_policy<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_get_policy<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
 ) -> Result<QueryResult, LiteError> {

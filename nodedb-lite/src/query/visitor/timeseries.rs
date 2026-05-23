@@ -14,7 +14,7 @@ use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::filter_convert::sql_filters_to_metadata;
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::adapter::LiteFut;
 
@@ -67,7 +67,7 @@ fn convert_aggregates(aggregates: &[AggregateExpr]) -> Vec<(String, String)> {
 
 /// Lower `SqlPlan::TimeseriesScan` to `TimeseriesOp::Scan`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn lower_timeseries_scan<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_timeseries_scan<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     time_range: (i64, i64),
@@ -130,7 +130,7 @@ fn extract_temporal(scope: &TemporalScope) -> (Option<i64>, Option<i64>) {
 /// Lite timeseries engine. Each row is a flat `HashMap<String, Value>` encoded
 /// with zerompk; the payload field holds the concatenated msgpack bytes of a
 /// `Vec<HashMap<String, Value>>`.
-pub(super) fn lower_timeseries_ingest<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_timeseries_ingest<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     rows: &[Vec<(String, SqlValue)>],
@@ -171,12 +171,16 @@ pub(super) fn lower_timeseries_ingest<'a, S: StorageEngine + StorageEngineSync +
 mod tests {
     use std::sync::Arc;
 
+    use crate::PagedbStorageMem;
     use crate::query::engine::LiteQueryEngine;
-    use crate::storage::redb_storage::RedbStorage;
 
-    fn make_engine() -> LiteQueryEngine<RedbStorage> {
+    async fn make_engine() -> LiteQueryEngine<PagedbStorageMem> {
         use std::sync::Mutex;
-        let storage = Arc::new(RedbStorage::open_in_memory().expect("in-memory redb"));
+        let storage = Arc::new(
+            PagedbStorageMem::open_in_memory()
+                .await
+                .expect("in-memory pagedb"),
+        );
         let crdt = Arc::new(Mutex::new(
             crate::engine::crdt::CrdtEngine::new(1).expect("crdt"),
         ));
@@ -194,8 +198,10 @@ mod tests {
             Arc::clone(&storage),
             100,
         ));
-        let array_state = Arc::new(Mutex::new(
-            crate::engine::array::engine::ArrayEngineState::open(&storage).expect("array"),
+        let array_state = Arc::new(tokio::sync::Mutex::new(
+            crate::engine::array::engine::ArrayEngineState::open(&storage)
+                .await
+                .expect("array"),
         ));
         let fts_state = Arc::new(crate::engine::fts::FtsState::new());
         let spatial = Arc::new(Mutex::new(
@@ -219,7 +225,7 @@ mod tests {
     #[tokio::test]
     async fn test_timeseries_scan_lower() {
         use nodedb_sql::temporal::TemporalScope;
-        let engine = make_engine();
+        let engine = make_engine().await;
         let result = super::lower_timeseries_scan(
             &engine,
             "metrics",
@@ -240,7 +246,7 @@ mod tests {
     #[tokio::test]
     async fn test_timeseries_ingest_lower() {
         use nodedb_sql::types_expr::SqlValue;
-        let engine = make_engine();
+        let engine = make_engine().await;
         let rows = vec![vec![
             ("ts".to_string(), SqlValue::Int(1_700_000_000_000)),
             ("value".to_string(), SqlValue::Float(42.0)),

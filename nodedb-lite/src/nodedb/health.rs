@@ -1,7 +1,7 @@
 //! Health API — structured status report for NodeDB-Lite.
 //!
 //! `db.health()` returns a `HealthStatus` covering:
-//! - **Storage**: redb accessible, approximate size
+//! - **Storage**: accessible, approximate size
 //! - **Memory**: governor pressure per engine
 //! - **Engines**: HNSW collection count, CSR node/edge count, CRDT doc count, text indices
 //! - **Sync**: connection state, pending delta count/bytes (if sync client available)
@@ -11,7 +11,7 @@
 use serde::Serialize;
 
 use crate::memory::{EngineId, PressureLevel};
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::core::NodeDbLite;
 use super::lock_ext::LockExt;
@@ -115,7 +115,7 @@ fn engine_memory(gov: &crate::memory::MemoryGovernor, id: EngineId) -> EngineMem
     }
 }
 
-impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
+impl<S: StorageEngine> NodeDbLite<S> {
     /// Borrow the underlying storage engine.
     ///
     /// Public so benchmark code can call backend-specific methods like
@@ -200,10 +200,10 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RedbStorage;
+    use crate::PagedbStorageMem;
 
-    async fn make_db() -> NodeDbLite<RedbStorage> {
-        let storage = RedbStorage::open_in_memory().unwrap();
+    async fn make_db() -> NodeDbLite<PagedbStorageMem> {
+        let storage = PagedbStorageMem::open_in_memory().await.unwrap();
         NodeDbLite::open(storage, 1).await.unwrap()
     }
 

@@ -9,7 +9,7 @@
 //! one row per output cell.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use nodedb_array::query::elementwise::{BinaryOp, elementwise};
 use nodedb_array::tile::sparse_tile::SparseTile;
@@ -23,7 +23,7 @@ use crate::engine::array::engine::ArrayEngineState;
 use crate::engine::array::ops::util::cell::cell_value_to_value;
 use crate::engine::array::ops::util::time::now_ms;
 use crate::error::LiteError;
-use crate::storage::engine::StorageEngineSync;
+use crate::storage::engine::StorageEngine;
 
 fn map_binary_op(op: ArrayBinaryOp) -> BinaryOp {
     match op {
@@ -36,14 +36,14 @@ fn map_binary_op(op: ArrayBinaryOp) -> BinaryOp {
 
 /// Collect all sparse tiles from an array's segments + memtable into a map
 /// keyed by Hilbert prefix. The system-time cutoff is `system_as_of`.
-fn collect_tiles_for_array<S: StorageEngineSync>(
-    array_state: &Arc<Mutex<ArrayEngineState>>,
+async fn collect_tiles_for_array<S: StorageEngine>(
+    array_state: &Arc<tokio::sync::Mutex<ArrayEngineState>>,
     storage: &Arc<S>,
     name: &str,
     system_as_of: i64,
 ) -> Result<HashMap<u64, Vec<SparseTile>>, LiteError> {
     let (seg_ids, schema) = {
-        let state = array_state.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let state = array_state.lock().await;
         let arr = state
             .arrays
             .get(name)
@@ -57,7 +57,7 @@ fn collect_tiles_for_array<S: StorageEngineSync>(
     let mut prefix_tiles: HashMap<u64, Vec<SparseTile>> = HashMap::new();
 
     for seg_id in &seg_ids {
-        let bytes = crate::engine::array::segments::load_segment(storage, name, *seg_id)?;
+        let bytes = crate::engine::array::segments::load_segment(storage, name, *seg_id).await?;
         let reader = SegmentReader::open(&bytes).map_err(|e| LiteError::Storage {
             detail: format!("open segment {seg_id}: {e}"),
         })?;
@@ -80,7 +80,7 @@ fn collect_tiles_for_array<S: StorageEngineSync>(
 
     // Memtable.
     {
-        let mut state = array_state.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let mut state = array_state.lock().await;
         let arr = state
             .arrays
             .get_mut(name)
@@ -105,8 +105,8 @@ fn collect_tiles_for_array<S: StorageEngineSync>(
 }
 
 /// Execute `ArrayOp::Elementwise` for the Lite engine.
-pub async fn elementwise_op<S: StorageEngineSync>(
-    array_state: &Arc<Mutex<ArrayEngineState>>,
+pub async fn elementwise_op<S: StorageEngine>(
+    array_state: &Arc<tokio::sync::Mutex<ArrayEngineState>>,
     storage: &Arc<S>,
     left_name: &str,
     right_name: &str,
@@ -116,7 +116,7 @@ pub async fn elementwise_op<S: StorageEngineSync>(
     let binary_op = map_binary_op(op);
 
     let schema = {
-        let state = array_state.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let state = array_state.lock().await;
         let arr = state
             .arrays
             .get(left_name)
@@ -126,8 +126,9 @@ pub async fn elementwise_op<S: StorageEngineSync>(
         arr.schema.clone()
     };
 
-    let left_tiles = collect_tiles_for_array(array_state, storage, left_name, system_as_of)?;
-    let right_tiles = collect_tiles_for_array(array_state, storage, right_name, system_as_of)?;
+    let left_tiles = collect_tiles_for_array(array_state, storage, left_name, system_as_of).await?;
+    let right_tiles =
+        collect_tiles_for_array(array_state, storage, right_name, system_as_of).await?;
 
     // Union of all Hilbert prefixes from both sides.
     let mut all_prefixes: std::collections::HashSet<u64> = std::collections::HashSet::new();

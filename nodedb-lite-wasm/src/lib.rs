@@ -1,6 +1,5 @@
 //! JavaScript/TypeScript bindings for NodeDB-Lite via wasm-bindgen.
 //!
-//! Uses `redb` for storage — same engine as native.
 //! - `open()` — in-memory (no persistence across page reloads)
 //! - `openPersistent()` — OPFS-backed (data survives reloads, Web Worker only)
 //!
@@ -9,8 +8,12 @@
 //! const db = await NodeDbLiteWasm.open(1n);
 //!
 //! // Persistent (must run in a Web Worker):
-//! const db = await NodeDbLiteWasm.openPersistent("mydb.redb", 1n);
+//! const db = await NodeDbLiteWasm.openPersistent("mydb.pagedb", 1n);
 //! ```
+//!
+//! TODO(Stage 4): Replace `RedbStorage` with `PagedbStorage` backed by the pagedb OPFS VFS.
+//! The OPFS VFS is gated on pagedb's OPFS feature and uses an async worker model that needs
+//! to be wired through the wasm-bindgen boundary before the switch can happen.
 
 pub mod array;
 pub mod opfs_backend;
@@ -38,6 +41,7 @@ impl NodeDbLiteWasm {
     /// variable (not available in browser WASM), falling back to 100 MiB.
     #[wasm_bindgen]
     pub async fn open(peer_id: u64) -> Result<NodeDbLiteWasm, JsError> {
+        // TODO(Stage 4): swap to PagedbStorage backed by pagedb MemVfs or OPFS VFS.
         let storage = RedbStorage::open_in_memory().map_err(|e| JsError::new(&e.to_string()))?;
         let db = NodeDbLite::open(storage, peer_id)
             .await
@@ -55,6 +59,7 @@ impl NodeDbLiteWasm {
         memory_mb: Option<u32>,
     ) -> Result<NodeDbLiteWasm, JsError> {
         let config = config_from_memory_mb(memory_mb);
+        // TODO(Stage 4): swap to PagedbStorage backed by pagedb MemVfs or OPFS VFS.
         let storage = RedbStorage::open_in_memory().map_err(|e| JsError::new(&e.to_string()))?;
         let db = NodeDbLite::open_with_config(storage, peer_id, config)
             .await
@@ -105,7 +110,10 @@ impl NodeDbLiteWasm {
             .create_with_backend(backend)
             .map_err(|e| JsError::new(&format!("redb create with OPFS failed: {e}")))?;
 
-        // Wrap in RedbStorage.
+        // TODO(Stage 4): replace redb OPFS backend with pagedb OPFS VFS.
+        // RedbStorage::from_database is the construction path for OPFS; PagedbStorage does not
+        // yet expose a from_opfs_handle constructor. This remains on redb until the pagedb OPFS
+        // VFS is wired through wasm-bindgen (Stage 4).
         let storage = RedbStorage::from_database(db_inner);
         let db = NodeDbLite::open(storage, peer_id)
             .await
@@ -163,7 +171,10 @@ impl NodeDbLiteWasm {
             .create_with_backend(backend)
             .map_err(|e| JsError::new(&format!("redb create with OPFS failed: {e}")))?;
 
-        // Wrap in RedbStorage.
+        // TODO(Stage 4): replace redb OPFS backend with pagedb OPFS VFS.
+        // RedbStorage::from_database is the construction path for OPFS; PagedbStorage does not
+        // yet expose a from_opfs_handle constructor. This remains on redb until the pagedb OPFS
+        // VFS is wired through wasm-bindgen (Stage 4).
         let storage = RedbStorage::from_database(db_inner);
         let db = NodeDbLite::open_with_config(storage, peer_id, config)
             .await

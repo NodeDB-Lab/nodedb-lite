@@ -59,6 +59,7 @@ impl NodeDbLiteWasm {
         let array_schema: ArraySchema = decode_msgpack(schema, "schema")?;
         self.db
             .create_array(name, array_schema)
+            .await
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
@@ -94,6 +95,7 @@ impl NodeDbLiteWasm {
                 valid_from_ms,
                 valid_until_ms,
             )
+            .await
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
@@ -117,6 +119,7 @@ impl NodeDbLiteWasm {
         let cells: Vec<CellPayload> = self
             .db
             .array_slice(name, ranges_vec, as_of_system_ms)
+            .await
             .map_err(|e| JsError::new(&e.to_string()))?;
 
         encode_msgpack(&cells, "cells")
@@ -142,6 +145,7 @@ impl NodeDbLiteWasm {
         let result: Option<CellPayload> = self
             .db
             .array_read_coord(name, &coord_vec, as_of_system_ms)
+            .await
             .map_err(|e| JsError::new(&e.to_string()))?;
 
         match result {
@@ -162,6 +166,7 @@ impl NodeDbLiteWasm {
 
         self.db
             .array_delete_cell(name, coord_vec, system_from_ms)
+            .await
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
@@ -185,6 +190,7 @@ impl NodeDbLiteWasm {
 
         self.db
             .array_gdpr_erase_cell(name, coord_vec, system_from_ms)
+            .await
             .map_err(|e| JsError::new(&e.to_string()))
     }
 }

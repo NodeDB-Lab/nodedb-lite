@@ -6,11 +6,11 @@
 //! aggregation, and that `as_of` is rejected with the expected error.
 
 use nodedb_client::NodeDb;
-use nodedb_lite::{NodeDbLite, RedbStorage};
+use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 use nodedb_types::id::NodeId;
 
-async fn open_test_db() -> NodeDbLite<RedbStorage> {
-    let storage = RedbStorage::open_in_memory().unwrap();
+async fn open_test_db() -> NodeDbLite<PagedbStorageMem> {
+    let storage = PagedbStorageMem::open_in_memory().await.unwrap();
     NodeDbLite::open(storage, 1).await.unwrap()
 }
 
@@ -18,7 +18,7 @@ const N: usize = 10;
 const K: usize = 3;
 
 /// Insert N=10 edges across K=3 labels and return the opened db.
-async fn db_with_edges() -> NodeDbLite<RedbStorage> {
+async fn db_with_edges() -> NodeDbLite<PagedbStorageMem> {
     let db = open_test_db().await;
     let labels = ["KNOWS", "OWNS", "FOLLOWS"];
     for i in 0..N {

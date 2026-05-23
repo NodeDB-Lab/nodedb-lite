@@ -5,13 +5,13 @@ use nodedb_types::result::QueryResult;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// Apply a remote CRDT delta from another peer.
 ///
 /// Imports the raw Loro delta bytes, then acknowledges the mutation on
 /// success or rejects it on import failure.
-pub async fn handle_apply<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_apply<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     delta: &[u8],
     mutation_id: u64,
@@ -40,7 +40,7 @@ pub async fn handle_apply<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Set the conflict resolution policy for a CRDT collection.
-pub async fn handle_set_policy<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_set_policy<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     policy_json: &str,

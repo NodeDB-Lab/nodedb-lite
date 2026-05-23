@@ -1,16 +1,17 @@
 //! `StorageEngine` trait: the async key-value blob interface.
 //!
-//! All persistent storage on the edge goes through this trait. SQLite
-//! (native) and OPFS (WASM) are the two backends. The engines above
-//! (HNSW, CSR, Loro) serialize their data to opaque blobs and store them
-//! here. SQLite/OPFS never interprets the data.
+//! All persistent storage on the edge goes through this trait. pagedb is the
+//! backend on every target — native via platform async I/O and WASM via the
+//! OPFS worker. The engines above (HNSW, CSR, Loro) serialize their data to
+//! opaque blobs and store them here. The storage layer never interprets the
+//! data.
 
 use async_trait::async_trait;
 
 use crate::error::LiteError;
 use nodedb_types::Namespace;
 
-/// Key-value pair returned by scan operations (`scan_prefix`, `scan_range_sync`).
+/// Key-value pair returned by scan operations (`scan_prefix`, `scan_range`).
 ///
 /// First element is the key (without namespace prefix), second is the value.
 /// Defined here (not in `nodedb-types`) because it's specific to the
@@ -70,51 +71,31 @@ pub trait StorageEngine: Send + Sync + 'static {
     ///
     /// Useful for cold-start progress reporting and memory governor decisions.
     async fn count(&self, ns: Namespace) -> Result<u64, LiteError>;
-}
 
-/// Synchronous KV fast path for storage backends that support it.
-///
-/// Bypasses the async runtime for the local-only KV engine. redb
-/// operations are inherently synchronous, so this avoids unnecessary
-/// async overhead on the hot path.
-pub trait StorageEngineSync: StorageEngine {
-    /// Sync get: retrieve a value by namespace and key.
-    fn get_sync(&self, ns: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, LiteError>;
-
-    /// Sync put: insert or overwrite a value.
-    fn put_sync(&self, ns: Namespace, key: &[u8], value: &[u8]) -> Result<(), LiteError>;
-
-    /// Sync delete: remove a key.
-    fn delete_sync(&self, ns: Namespace, key: &[u8]) -> Result<(), LiteError>;
-
-    /// Sync batch write: atomically apply a batch of writes.
-    fn batch_write_sync(&self, ops: &[WriteOp]) -> Result<(), LiteError>;
-
-    /// Sync range scan: return up to `limit` entries where key >= `start`.
-    fn scan_range_sync(
+    /// Range scan: return up to `limit` entries where key >= `start`.
+    ///
+    /// Results are ordered by key (lexicographic byte order).
+    async fn scan_range(
         &self,
         ns: Namespace,
         start: &[u8],
         limit: usize,
     ) -> Result<Vec<KvPair>, LiteError>;
 
-    /// Sync bounded range scan: return entries where `start <= key < end`.
+    /// Bounded range scan: return entries where `start <= key < end`.
     ///
     /// - `start = None` means the beginning of the namespace.
     /// - `end = None` means the end of the namespace.
     /// - `limit = None` means no cap.
     ///
     /// Results are ordered by key (lexicographic byte order).
-    fn scan_range_bounded_sync(
+    async fn scan_range_bounded(
         &self,
         ns: Namespace,
         start: Option<&[u8]>,
         end: Option<&[u8]>,
         limit: Option<usize>,
     ) -> Result<Vec<KvPair>, LiteError>;
-
-    /// Sync count: return the number of entries in a namespace.
-    fn count_sync(&self, ns: Namespace) -> Result<u64, LiteError>;
 }
 
 #[cfg(test)]

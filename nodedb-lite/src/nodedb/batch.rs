@@ -7,9 +7,9 @@ use nodedb_types::vector_dtype::VectorStorageDtype;
 use crate::engine::vector::state::ensure_hnsw;
 
 use super::{LockExt, NodeDbLite};
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
-impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
+impl<S: StorageEngine> NodeDbLite<S> {
     /// Batch insert vectors — O(1) CRDT delta export instead of O(N).
     ///
     /// Use this for bulk loading (cold-start hydration, benchmark setup, imports).

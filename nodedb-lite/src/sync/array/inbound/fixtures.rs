@@ -6,7 +6,7 @@
 
 #![cfg(test)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use nodedb_array::schema::array_schema::ArraySchema;
 use nodedb_array::schema::attr_spec::{AttrSpec, AttrType};
@@ -20,7 +20,7 @@ use nodedb_array::types::coord::value::CoordValue;
 use nodedb_array::types::domain::{Domain, DomainBound};
 
 use crate::engine::array::engine::ArrayEngineState;
-use crate::storage::redb_storage::RedbStorage;
+use crate::storage::pagedb_storage::PagedbStorageMem;
 use crate::sync::array::catchup::CatchupTracker;
 use crate::sync::array::op_log_redb::RedbOpLog;
 use crate::sync::array::pending::PendingQueue;
@@ -70,31 +70,34 @@ pub(crate) fn put_op(array: &str, ms: u64, schema_ms: u64) -> ArrayOp {
 }
 
 pub(crate) type InboundFixture = (
-    ArrayInbound<RedbStorage>,
-    Arc<SchemaRegistry<RedbStorage>>,
-    Arc<PendingQueue<RedbStorage>>,
-    Arc<RedbStorage>,
+    ArrayInbound<PagedbStorageMem>,
+    Arc<SchemaRegistry<PagedbStorageMem>>,
+    Arc<PendingQueue<PagedbStorageMem>>,
+    Arc<PagedbStorageMem>,
 );
 
 /// Build a complete test fixture: storage + all sync sub-components +
 /// [`ArrayInbound`].
-pub(crate) fn make_inbound() -> InboundFixture {
-    let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
-    let replica = Arc::new(ReplicaState::load_or_init(&*storage).unwrap());
+pub(crate) async fn make_inbound() -> InboundFixture {
+    let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+    let replica = Arc::new(ReplicaState::load_or_init(&*storage).await.unwrap());
     let schemas = Arc::new(SchemaRegistry::new(
         Arc::clone(&storage),
         Arc::clone(&replica),
     ));
     let op_log = Arc::new(RedbOpLog::new(Arc::clone(&storage)));
     let pending = Arc::new(PendingQueue::new(Arc::clone(&storage)));
-    let array_state = Arc::new(Mutex::new(ArrayEngineState::new()));
-    let engine = Arc::new(LiteApplyEngine::new(
-        Arc::clone(&storage),
-        Arc::clone(&array_state),
-        Arc::clone(&schemas),
-        Arc::clone(&op_log),
-    ));
-    let catchup = Arc::new(CatchupTracker::load(Arc::clone(&storage)).unwrap());
+    let array_state = Arc::new(tokio::sync::Mutex::new(ArrayEngineState::new()));
+    let engine = Arc::new(
+        LiteApplyEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&array_state),
+            Arc::clone(&schemas),
+            Arc::clone(&op_log),
+        )
+        .await,
+    );
+    let catchup = Arc::new(CatchupTracker::load(Arc::clone(&storage)).await.unwrap());
     let inbound = ArrayInbound::new(
         engine,
         Arc::clone(&schemas),

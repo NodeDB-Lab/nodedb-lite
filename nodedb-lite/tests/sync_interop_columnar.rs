@@ -24,9 +24,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nodedb_client::NodeDb;
-use nodedb_lite::NodeDbLite;
-use nodedb_lite::storage::redb_storage::RedbStorage;
 use nodedb_lite::sync::{SyncClient, SyncConfig, run_sync_loop};
+use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 
 use common::origin::OriginServer;
 use common::sql::OriginPgwire;
@@ -49,8 +48,10 @@ const CREATE_LITE: &str = "CREATE COLLECTION col_sync_test (
 
 // ── Helper: open a Lite DB backed by in-memory redb ─────────────────────────
 
-async fn open_lite() -> Arc<NodeDbLite<RedbStorage>> {
-    let storage = RedbStorage::open_in_memory().expect("open_in_memory");
+async fn open_lite() -> Arc<NodeDbLite<PagedbStorageMem>> {
+    let storage = PagedbStorageMem::open_in_memory()
+        .await
+        .expect("open_in_memory");
     Arc::new(
         NodeDbLite::open(storage, 1)
             .await

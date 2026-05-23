@@ -9,11 +9,11 @@ use nodedb_types::error::{NodeDbError, NodeDbResult};
 use crate::engine::strict::StrictEngine;
 use crate::memory::{EngineId, MemoryGovernor};
 use crate::nodedb::lock_ext::LockExt;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::types::NodeDbLite;
 
-impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
+impl<S: StorageEngine> NodeDbLite<S> {
     /// Rebuild all text indices from CRDT state.
     ///
     /// Called once on cold start after CRDT snapshot restore.

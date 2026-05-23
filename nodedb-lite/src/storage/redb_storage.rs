@@ -564,6 +564,36 @@ impl StorageEngine for RedbStorage {
             .await
             .map_err(join_err)?
     }
+
+    async fn scan_range(
+        &self,
+        ns: Namespace,
+        start: &[u8],
+        limit: usize,
+    ) -> Result<Vec<super::engine::KvPair>, LiteError> {
+        let db = Arc::clone(&self.db);
+        let start = start.to_vec();
+        tokio::task::spawn_blocking(move || Self::scan_range_inner(&db, ns, &start, limit))
+            .await
+            .map_err(join_err)?
+    }
+
+    async fn scan_range_bounded(
+        &self,
+        ns: Namespace,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        limit: Option<usize>,
+    ) -> Result<Vec<super::engine::KvPair>, LiteError> {
+        let db = Arc::clone(&self.db);
+        let start = start.map(|s| s.to_vec());
+        let end = end.map(|e| e.to_vec());
+        tokio::task::spawn_blocking(move || {
+            Self::scan_range_bounded_inner(&db, ns, start.as_deref(), end.as_deref(), limit)
+        })
+        .await
+        .map_err(join_err)?
+    }
 }
 
 // ─── WASM: no blocking pool, call helpers directly ───────────────────────
@@ -598,26 +628,8 @@ impl StorageEngine for RedbStorage {
     async fn count(&self, ns: Namespace) -> Result<u64, LiteError> {
         Self::count_inner(&self.db, ns)
     }
-}
 
-impl crate::storage::engine::StorageEngineSync for RedbStorage {
-    fn batch_write_sync(&self, ops: &[WriteOp]) -> Result<(), LiteError> {
-        Self::batch_write_inner(&self.db, ops)
-    }
-
-    fn get_sync(&self, ns: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, LiteError> {
-        Self::get_inner(&self.db, ns, key)
-    }
-
-    fn put_sync(&self, ns: Namespace, key: &[u8], value: &[u8]) -> Result<(), LiteError> {
-        Self::put_inner(&self.db, ns, key, value)
-    }
-
-    fn delete_sync(&self, ns: Namespace, key: &[u8]) -> Result<(), LiteError> {
-        Self::delete_inner(&self.db, ns, key)
-    }
-
-    fn scan_range_sync(
+    async fn scan_range(
         &self,
         ns: Namespace,
         start: &[u8],
@@ -626,7 +638,7 @@ impl crate::storage::engine::StorageEngineSync for RedbStorage {
         Self::scan_range_inner(&self.db, ns, start, limit)
     }
 
-    fn scan_range_bounded_sync(
+    async fn scan_range_bounded(
         &self,
         ns: Namespace,
         start: Option<&[u8]>,
@@ -634,10 +646,6 @@ impl crate::storage::engine::StorageEngineSync for RedbStorage {
         limit: Option<usize>,
     ) -> Result<Vec<super::engine::KvPair>, LiteError> {
         Self::scan_range_bounded_inner(&self.db, ns, start, end, limit)
-    }
-
-    fn count_sync(&self, ns: Namespace) -> Result<u64, LiteError> {
-        Self::count_inner(&self.db, ns)
     }
 }
 

@@ -258,6 +258,7 @@ mod tests {
 
     use nodedb_graph::Direction;
 
+    use crate::PagedbStorageMem;
     use crate::engine::array::ArrayEngineState;
     use crate::engine::columnar::ColumnarEngine;
     use crate::engine::crdt::CrdtEngine;
@@ -266,10 +267,13 @@ mod tests {
     use crate::engine::strict::StrictEngine;
     use crate::engine::vector::VectorState;
     use crate::query::engine::LiteQueryEngine;
-    use crate::storage::redb_storage::RedbStorage;
 
-    fn make_engine() -> LiteQueryEngine<RedbStorage> {
-        let storage = Arc::new(RedbStorage::open_in_memory().expect("in-memory redb"));
+    async fn make_engine() -> LiteQueryEngine<PagedbStorageMem> {
+        let storage = Arc::new(
+            PagedbStorageMem::open_in_memory()
+                .await
+                .expect("in-memory pagedb"),
+        );
         let crdt = Arc::new(Mutex::new(CrdtEngine::new(1).expect("CrdtEngine init")));
         let strict = Arc::new(StrictEngine::new(Arc::clone(&storage)));
         let columnar = Arc::new(ColumnarEngine::new(Arc::clone(&storage)));
@@ -278,8 +282,10 @@ mod tests {
             crate::engine::timeseries::engine::TimeseriesEngine::new(),
         ));
         let vector_state = Arc::new(VectorState::new(Arc::clone(&storage), 100));
-        let array_state = Arc::new(Mutex::new(
-            ArrayEngineState::open(&storage).expect("ArrayEngineState::open"),
+        let array_state = Arc::new(tokio::sync::Mutex::new(
+            ArrayEngineState::open(&storage)
+                .await
+                .expect("ArrayEngineState::open"),
         ));
         let fts_state = Arc::new(FtsState::new());
         let spatial = Arc::new(Mutex::new(
@@ -304,7 +310,7 @@ mod tests {
     /// With an empty HNSW index the result set is empty — no panic.
     #[tokio::test]
     async fn rag_fusion_pure_vector_empty_index() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         let result = super::rag_fusion(
             &engine.vector_state,
             &engine.crdt,
@@ -332,7 +338,7 @@ mod tests {
     /// Two-source fusion (vector + graph): empty graph gives vector-only result.
     #[tokio::test]
     async fn rag_fusion_two_source_empty_graph() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         let result = super::rag_fusion(
             &engine.vector_state,
             &engine.crdt,
@@ -360,7 +366,7 @@ mod tests {
     /// Three-source fusion: bm25_query set, returns columns correctly.
     #[tokio::test]
     async fn rag_fusion_three_source_returns_correct_columns() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         let result = super::rag_fusion(
             &engine.vector_state,
             &engine.crdt,

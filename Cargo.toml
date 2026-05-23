@@ -1,9 +1,5 @@
 [workspace]
-members = [
-  "nodedb-lite",
-  "nodedb-lite-ffi",
-  "nodedb-lite-wasm",
-]
+members = ["nodedb-lite", "nodedb-lite-ffi", "nodedb-lite-wasm"]
 resolver = "2"
 
 [workspace.package]
@@ -51,6 +47,7 @@ zerompk = { version = "0.5", features = ["std", "derive"] }
 
 # Storage
 redb = "2"
+pagedb = { version = "0", default-features = false }
 roaring = "0.11"
 arrow = { version = "58", default-features = false, features = ["ipc"] }
 crc32c = "0.6"
@@ -59,7 +56,10 @@ crc32c = "0.6"
 loro = "1"
 
 # WASM runtime
-wasmtime = { version = "30", default-features = false, features = ["cranelift", "runtime"] }
+wasmtime = { version = "30", default-features = false, features = [
+  "cranelift",
+  "runtime",
+] }
 
 # Crypto
 aes-gcm = "0.10"

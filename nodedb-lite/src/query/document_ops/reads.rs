@@ -10,12 +10,12 @@ use nodedb_types::value::Value;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::value_utils::value_to_string;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::is_strict;
 
 /// PointGet: fetch a single document by ID.
-pub async fn point_get<S: StorageEngine + StorageEngineSync>(
+pub async fn point_get<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     document_id: &str,
@@ -52,7 +52,7 @@ pub async fn point_get<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Scan: full collection scan with limit/offset.
-pub async fn scan<S: StorageEngine + StorageEngineSync>(
+pub async fn scan<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     limit: usize,
@@ -92,7 +92,7 @@ pub async fn scan<S: StorageEngine + StorageEngineSync>(
 /// PK byte-range — avoiding the N+1 re-fetch that a `scan + get` composition
 /// would incur (the strict-storage value encoding is internal to the strict
 /// engine and not safe to decode here).
-pub async fn range_scan<S: StorageEngine + StorageEngineSync>(
+pub async fn range_scan<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     lower: Option<&[u8]>,
@@ -172,7 +172,7 @@ pub async fn range_scan<S: StorageEngine + StorageEngineSync>(
 }
 
 /// IndexedFetch: fetch docs via secondary index, apply residual filters, and project.
-pub async fn indexed_fetch<S: StorageEngine + StorageEngineSync>(
+pub async fn indexed_fetch<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     path: &str,
@@ -180,7 +180,7 @@ pub async fn indexed_fetch<S: StorageEngine + StorageEngineSync>(
     limit: usize,
     offset: usize,
 ) -> Result<QueryResult, LiteError> {
-    let doc_ids = index_lookup_ids(engine, collection, path, value)?;
+    let doc_ids = index_lookup_ids(engine, collection, path, value).await?;
     if is_strict(engine, collection) {
         let columns = strict_columns(engine, collection);
         let mut rows = Vec::new();
@@ -230,13 +230,13 @@ pub async fn indexed_fetch<S: StorageEngine + StorageEngineSync>(
 }
 
 /// IndexLookup: return doc IDs for all documents matching field=value.
-pub fn index_lookup<S: StorageEngine + StorageEngineSync>(
+pub async fn index_lookup<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     path: &str,
     value: &str,
 ) -> Result<QueryResult, LiteError> {
-    let ids = index_lookup_ids(engine, collection, path, value)?;
+    let ids = index_lookup_ids(engine, collection, path, value).await?;
     let rows: Vec<Vec<Value>> = ids.into_iter().map(|id| vec![Value::String(id)]).collect();
     Ok(QueryResult {
         columns: vec!["document_id".into()],
@@ -246,7 +246,7 @@ pub fn index_lookup<S: StorageEngine + StorageEngineSync>(
 }
 
 /// EstimateCount: exact document count for the collection.
-pub async fn estimate_count<S: StorageEngine + StorageEngineSync>(
+pub async fn estimate_count<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
 ) -> Result<QueryResult, LiteError> {
@@ -265,10 +265,7 @@ pub async fn estimate_count<S: StorageEngine + StorageEngineSync>(
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
-fn strict_columns<S: StorageEngine + StorageEngineSync>(
-    engine: &LiteQueryEngine<S>,
-    collection: &str,
-) -> Vec<String> {
+fn strict_columns<S: StorageEngine>(engine: &LiteQueryEngine<S>, collection: &str) -> Vec<String> {
     engine
         .strict
         .schema(collection)
@@ -277,7 +274,7 @@ fn strict_columns<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Sparse-index lookup: return all doc IDs where `path == value`.
-pub(super) fn index_lookup_ids<S: StorageEngine + StorageEngineSync>(
+pub(super) async fn index_lookup_ids<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     path: &str,
@@ -286,7 +283,11 @@ pub(super) fn index_lookup_ids<S: StorageEngine + StorageEngineSync>(
     let index_key = format!("{collection}:{path}:{value}");
     let stored = engine
         .storage
-        .get_sync(Namespace::Meta, index_key.as_bytes())?;
+        .get(Namespace::Meta, index_key.as_bytes())
+        .await
+        .map_err(|e| LiteError::Storage {
+            detail: e.to_string(),
+        })?;
     match stored {
         Some(bytes) => {
             let ids: Vec<String> =
@@ -300,7 +301,7 @@ pub(super) fn index_lookup_ids<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Write a doc-ID into the sparse index for `(collection, path, value)`.
-pub(super) fn index_insert_id<S: StorageEngine + StorageEngineSync>(
+pub(super) async fn index_insert_id<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     path: &str,
@@ -310,8 +311,11 @@ pub(super) fn index_insert_id<S: StorageEngine + StorageEngineSync>(
     let index_key = format!("{collection}:{path}:{value}");
     let mut ids: Vec<String> = if let Some(bytes) = engine
         .storage
-        .get_sync(Namespace::Meta, index_key.as_bytes())?
-    {
+        .get(Namespace::Meta, index_key.as_bytes())
+        .await
+        .map_err(|e| LiteError::Storage {
+            detail: e.to_string(),
+        })? {
         zerompk::from_msgpack(&bytes).map_err(|e| LiteError::Serialization {
             detail: format!("decode index entry: {e}"),
         })?
@@ -325,7 +329,11 @@ pub(super) fn index_insert_id<S: StorageEngine + StorageEngineSync>(
         })?;
         engine
             .storage
-            .put_sync(Namespace::Meta, index_key.as_bytes(), &bytes)?;
+            .put(Namespace::Meta, index_key.as_bytes(), &bytes)
+            .await
+            .map_err(|e| LiteError::Storage {
+                detail: e.to_string(),
+            })?;
     }
     Ok(())
 }

@@ -6,10 +6,12 @@
 //! Quantization / IVF-PQ / hybrid / distributed are out of scope.
 
 use nodedb_client::NodeDb;
-use nodedb_lite::{NodeDbLite, RedbStorage};
+use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 
-async fn open_db() -> NodeDbLite<RedbStorage> {
-    let storage = RedbStorage::open_in_memory().expect("open in-memory storage");
+async fn open_db() -> NodeDbLite<PagedbStorageMem> {
+    let storage = PagedbStorageMem::open_in_memory()
+        .await
+        .expect("open in-memory storage");
     NodeDbLite::open(storage, 1).await.expect("open NodeDbLite")
 }
 

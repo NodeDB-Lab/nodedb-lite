@@ -75,7 +75,7 @@ pub unsafe extern "C" fn ndb_array_create(
         return NODEDB_ERR_FAILED;
     };
 
-    match h.db.create_array(name_str, schema) {
+    match h.rt.block_on(h.db.create_array(name_str, schema)) {
         Ok(()) => NODEDB_OK,
         Err(_) => NODEDB_ERR_FAILED,
     }
@@ -125,14 +125,14 @@ pub unsafe extern "C" fn ndb_array_put_cell(
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    match h.db.array_put_cell(
+    match h.rt.block_on(h.db.array_put_cell(
         name_str,
         coord,
         attrs,
         system_from_ms,
         valid_from_ms,
         valid_until_ms,
-    ) {
+    )) {
         Ok(()) => NODEDB_OK,
         Err(_) => NODEDB_ERR_FAILED,
     }
@@ -183,7 +183,7 @@ pub unsafe extern "C" fn ndb_array_slice(
         None
     };
 
-    match h.db.array_slice(name_str, ranges, as_of) {
+    match h.rt.block_on(h.db.array_slice(name_str, ranges, as_of)) {
         Ok(cells) => {
             let encoded = match zerompk::to_msgpack_vec(&cells) {
                 Ok(b) => b,
@@ -241,7 +241,10 @@ pub unsafe extern "C" fn ndb_array_read_coord(
         None
     };
 
-    match h.db.array_read_coord(name_str, &coord, as_of) {
+    match h
+        .rt
+        .block_on(h.db.array_read_coord(name_str, &coord, as_of))
+    {
         Ok(Some(cell)) => {
             let encoded = match zerompk::to_msgpack_vec(&cell) {
                 Ok(b) => b,
@@ -291,7 +294,10 @@ pub unsafe extern "C" fn ndb_array_delete_cell(
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    match h.db.array_delete_cell(name_str, coord, system_from_ms) {
+    match h
+        .rt
+        .block_on(h.db.array_delete_cell(name_str, coord, system_from_ms))
+    {
         Ok(()) => NODEDB_OK,
         Err(_) => NODEDB_ERR_FAILED,
     }
@@ -331,7 +337,10 @@ pub unsafe extern "C" fn ndb_array_gdpr_erase_cell(
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    match h.db.array_gdpr_erase_cell(name_str, coord, system_from_ms) {
+    match h
+        .rt
+        .block_on(h.db.array_gdpr_erase_cell(name_str, coord, system_from_ms))
+    {
         Ok(()) => NODEDB_OK,
         Err(_) => NODEDB_ERR_FAILED,
     }

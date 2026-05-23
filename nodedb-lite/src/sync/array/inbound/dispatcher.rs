@@ -13,7 +13,7 @@ use nodedb_array::sync::op::ArrayOp;
 use nodedb_array::sync::snapshot::{SnapshotChunk, SnapshotHeader};
 
 use crate::error::LiteError;
-use crate::storage::engine::StorageEngineSync;
+use crate::storage::engine::StorageEngine;
 use crate::sync::array::catchup::CatchupTracker;
 use crate::sync::array::op_log_redb::RedbOpLog;
 use crate::sync::array::pending::PendingQueue;
@@ -46,7 +46,7 @@ impl SnapshotAssembly {
 ///
 /// Snapshot state is buffered internally in `snapshots` until all chunks for a
 /// given `(array, snapshot_hlc)` have arrived.
-pub struct ArrayInbound<S: StorageEngineSync> {
+pub struct ArrayInbound<S: StorageEngine> {
     pub(super) engine: Arc<LiteApplyEngine<S>>,
     pub(super) schemas: Arc<SchemaRegistry<S>>,
     pub(super) replica: Arc<ReplicaState>,
@@ -60,7 +60,7 @@ pub struct ArrayInbound<S: StorageEngineSync> {
     pub(super) snapshots: Mutex<HashMap<(String, [u8; 18]), SnapshotAssembly>>,
 }
 
-impl<S: StorageEngineSync> ArrayInbound<S> {
+impl<S: StorageEngine> ArrayInbound<S> {
     /// Construct from the component parts shared with `NodeDbLite`.
     pub fn new(
         engine: Arc<LiteApplyEngine<S>>,

@@ -21,14 +21,14 @@ use crate::engine::graph::traversal::DEFAULT_MAX_VISITED;
 use crate::nodedb::LockExt;
 use crate::nodedb::NodeDbLite;
 use crate::nodedb::convert::{loro_value_to_document, value_to_loro};
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// Returns the CRDT collection name for edges belonging to a graph collection.
 fn edge_crdt_collection(collection: &str) -> String {
     format!("__edges__{collection}")
 }
 
-impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
+impl<S: StorageEngine> NodeDbLite<S> {
     /// Breadth-first traversal from `start` up to `depth` hops, returning a
     /// `SubGraph` with node properties and edges materialised from CRDT storage.
     ///

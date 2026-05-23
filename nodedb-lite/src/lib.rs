@@ -18,4 +18,7 @@ pub use nodedb::NodeDbLite;
 pub use nodedb_query;
 pub use nodedb_types::id_gen;
 pub use storage::engine::{StorageEngine, WriteOp};
+#[cfg(not(target_arch = "wasm32"))]
+pub use storage::pagedb_storage::PagedbStorageDefault;
+pub use storage::pagedb_storage::{PagedbStorage, PagedbStorageMem};
 pub use storage::redb_storage::RedbStorage;

@@ -3,8 +3,8 @@
 //! Separates in-memory state from storage access. The state struct is not
 //! generic over the storage backend; instead, callers pass `&Arc<S>` to each
 //! operation that requires storage I/O. This allows `ArrayEngineState` to be
-//! stored in a `Mutex` inside `NodeDbLite<S: StorageEngine>` without adding a
-//! `StorageEngineSync` bound to the struct.
+//! stored in a `tokio::sync::Mutex` inside `NodeDbLite<S: StorageEngine>`
+//! without requiring any synchronous storage trait.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,7 +27,7 @@ use crate::engine::array::manifest::{ArrayManifest, SegmentRef, load_manifest, s
 use crate::engine::array::memtable::{ArrayMemtable, PutCellArgs};
 use crate::engine::array::segments::write_segment;
 use crate::error::LiteError;
-use crate::storage::engine::StorageEngineSync;
+use crate::storage::engine::StorageEngine;
 
 const DEFAULT_FLUSH_THRESHOLD: usize = 4096;
 
@@ -43,9 +43,9 @@ pub(crate) struct ArrayState {
 /// Storage-agnostic in-memory state for the array engine.
 ///
 /// All operations that touch persistent storage take an explicit `storage`
-/// parameter so this struct can be stored in `Mutex<ArrayEngineState>` inside
-/// `NodeDbLite<S: StorageEngine>` without requiring `S: StorageEngineSync` on
-/// the struct bound.
+/// parameter so this struct can be stored in `tokio::sync::Mutex<ArrayEngineState>`
+/// inside `NodeDbLite<S: StorageEngine>` without requiring any synchronous storage
+/// trait bound.
 pub struct ArrayEngineState {
     pub(crate) arrays: HashMap<String, ArrayState>,
     flush_threshold: usize,
@@ -66,8 +66,8 @@ impl ArrayEngineState {
     }
 
     /// Restore array engine from persistent storage.
-    pub fn open<S: StorageEngineSync>(storage: &Arc<S>) -> Result<Self, LiteError> {
-        let catalog = ArrayCatalog::open(Arc::clone(storage))?;
+    pub async fn open<S: StorageEngine>(storage: &Arc<S>) -> Result<Self, LiteError> {
+        let catalog = ArrayCatalog::open(Arc::clone(storage)).await?;
         let mut arrays = HashMap::new();
 
         for name in catalog.names().map(|s| s.to_owned()).collect::<Vec<_>>() {
@@ -78,7 +78,7 @@ impl ArrayEngineState {
                 })?
                 .clone();
             let schema = entry.schema()?;
-            let manifest = load_manifest(storage, &name)?;
+            let manifest = load_manifest(storage, &name).await?;
             arrays.insert(
                 name,
                 ArrayState {
@@ -98,7 +98,7 @@ impl ArrayEngineState {
     }
 
     /// Create a new array. Returns `Err` if an array named `name` already exists.
-    pub fn create_array<S: StorageEngineSync>(
+    pub async fn create_array<S: StorageEngine>(
         &mut self,
         storage: &Arc<S>,
         name: &str,
@@ -121,8 +121,8 @@ impl ArrayEngineState {
             audit_retain_ms: None,
             minimum_audit_retain_ms: None,
         };
-        let mut catalog = ArrayCatalog::open(Arc::clone(storage))?;
-        catalog.insert(entry)?;
+        let mut catalog = ArrayCatalog::open(Arc::clone(storage)).await?;
+        catalog.insert(entry).await?;
         self.arrays.insert(
             name.to_owned(),
             ArrayState {
@@ -137,7 +137,7 @@ impl ArrayEngineState {
     }
 
     /// Delete an array and all its data.
-    pub fn delete_array<S: StorageEngineSync>(
+    pub async fn delete_array<S: StorageEngine>(
         &mut self,
         storage: &Arc<S>,
         name: &str,
@@ -148,15 +148,15 @@ impl ArrayEngineState {
             .ok_or_else(|| LiteError::BadRequest {
                 detail: format!("array '{name}' not found"),
             })?;
-        crate::engine::array::manifest::drop_manifest(storage, name, &state.manifest)?;
-        let mut catalog = ArrayCatalog::open(Arc::clone(storage))?;
-        catalog.remove(name)?;
+        crate::engine::array::manifest::drop_manifest(storage, name, &state.manifest).await?;
+        let mut catalog = ArrayCatalog::open(Arc::clone(storage)).await?;
+        catalog.remove(name).await?;
         Ok(())
     }
 
     /// Write a cell into the array.
     #[allow(clippy::too_many_arguments)]
-    pub fn put_cell<S: StorageEngineSync>(
+    pub async fn put_cell<S: StorageEngine>(
         &mut self,
         storage: &Arc<S>,
         name: &str,
@@ -187,7 +187,7 @@ impl ArrayEngineState {
 
         if state.memtable.stats().cell_count >= self.flush_threshold {
             let name_owned = name.to_owned();
-            self.flush_memtable(storage, &name_owned)?;
+            self.flush_memtable(storage, &name_owned).await?;
         }
 
         Ok(())
@@ -215,7 +215,7 @@ impl ArrayEngineState {
 
     /// GDPR erase a cell — appends the `0xFE` erasure sentinel and immediately
     /// flushes so the sentinel is durably stored on disk.
-    pub fn gdpr_erase_cell<S: StorageEngineSync>(
+    pub async fn gdpr_erase_cell<S: StorageEngine>(
         &mut self,
         storage: &Arc<S>,
         name: &str,
@@ -230,12 +230,12 @@ impl ArrayEngineState {
             })?;
         let schema = state.schema.clone();
         state.memtable.erase_cell(&schema, coord, system_from_ms)?;
-        self.flush_memtable(storage, name)
+        self.flush_memtable(storage, name).await
     }
 
     /// Read the most recent live payload for `coord` at or before `system_as_of`.
     /// Returns `None` for NotFound, Tombstoned, or Erased results.
-    pub fn read_coord<S: StorageEngineSync>(
+    pub async fn read_coord<S: StorageEngine>(
         &self,
         storage: &Arc<S>,
         name: &str,
@@ -266,7 +266,8 @@ impl ArrayEngineState {
             hilbert_prefix,
             system_as_of,
             coord,
-        )?;
+        )
+        .await?;
 
         let mut all_versions: Vec<(TileId, Vec<u8>)> =
             mem_versions.into_iter().chain(seg_versions).collect();
@@ -294,7 +295,7 @@ impl ArrayEngineState {
 
     /// Return all live cells whose coordinates fall within `ranges` at or
     /// before `system_as_of`.
-    pub fn slice<S: StorageEngineSync>(
+    pub async fn slice<S: StorageEngine>(
         &mut self,
         storage: &Arc<S>,
         name: &str,
@@ -317,7 +318,7 @@ impl ArrayEngineState {
 
         // Segments (oldest-first iteration, index from end to get newest-first).
         for &seg_id in &seg_ids {
-            let bytes = crate::engine::array::segments::load_segment(storage, name, seg_id)?;
+            let bytes = crate::engine::array::segments::load_segment(storage, name, seg_id).await?;
             let reader = crate::engine::array::segments::open_reader(&bytes)?;
             for idx in (0..reader.tile_count()).rev() {
                 let entry_tile_id = reader.tiles()[idx].tile_id;
@@ -381,14 +382,14 @@ impl ArrayEngineState {
     /// gates the HNSW candidate set in the vector search path so only
     /// vector records whose array-cell counterpart matches the slice
     /// predicate are considered.
-    pub fn surrogate_bitmap_scan<S: StorageEngineSync>(
+    pub async fn surrogate_bitmap_scan<S: StorageEngine>(
         &mut self,
         storage: &Arc<S>,
         name: &str,
         ranges: Vec<Option<DimRange>>,
         system_as_of: i64,
     ) -> Result<roaring::RoaringBitmap, LiteError> {
-        let cells = self.slice(storage, name, ranges, system_as_of)?;
+        let cells = self.slice(storage, name, ranges, system_as_of).await?;
         let mut bitmap = roaring::RoaringBitmap::new();
         for payload in cells {
             bitmap.insert(payload.surrogate.as_u32());
@@ -397,15 +398,15 @@ impl ArrayEngineState {
     }
 
     /// Flush pending memtable data to a persistent segment.
-    pub fn flush<S: StorageEngineSync>(
+    pub async fn flush<S: StorageEngine>(
         &mut self,
         storage: &Arc<S>,
         name: &str,
     ) -> Result<(), LiteError> {
-        self.flush_memtable(storage, name)
+        self.flush_memtable(storage, name).await
     }
 
-    fn flush_memtable<S: StorageEngineSync>(
+    async fn flush_memtable<S: StorageEngine>(
         &mut self,
         storage: &Arc<S>,
         name: &str,
@@ -432,14 +433,14 @@ impl ArrayEngineState {
         let refs: Vec<_> = tiles.iter().map(|(id, tile)| (*id, tile)).collect();
         let new_id = state.manifest.next_id;
         state.manifest.next_id += 1;
-        let bytes = write_segment(storage, name, new_id, schema_hash, &refs)?;
+        let bytes = write_segment(storage, name, new_id, schema_hash, &refs).await?;
         state.manifest.segments.push(SegmentRef {
             id: new_id,
             byte_len: bytes.len() as u64,
         });
-        save_manifest(storage, name, &state.manifest)?;
+        save_manifest(storage, name, &state.manifest).await?;
 
-        // Retention compaction (synchronous, only if configured).
+        // Retention compaction (only if configured).
         if let Some(retain_ms) = state.audit_retain_ms {
             let now_ms = now_millis();
             crate::engine::array::retention::run_retention(
@@ -450,7 +451,8 @@ impl ArrayEngineState {
                 schema_hash,
                 retain_ms,
                 now_ms,
-            )?;
+            )
+            .await?;
         }
 
         Ok(())
@@ -466,7 +468,7 @@ fn now_millis() -> i64 {
         .as_millis() as i64
 }
 
-fn cell_versions_from_segments<S: StorageEngineSync>(
+async fn cell_versions_from_segments<S: StorageEngine>(
     storage: &Arc<S>,
     name: &str,
     seg_ids: &[u64],
@@ -480,7 +482,8 @@ fn cell_versions_from_segments<S: StorageEngineSync>(
         seg_ids,
         hilbert_prefix,
         system_as_of,
-    )?;
+    )
+    .await?;
     let mut out = Vec::new();
     for (tile_id, payload) in tile_payloads {
         if let TilePayload::Sparse(tile) = &payload
@@ -582,7 +585,7 @@ impl ArrayMemtable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::redb_storage::RedbStorage;
+    use crate::storage::pagedb_storage::PagedbStorageMem;
     use nodedb_array::schema::ArraySchemaBuilder;
     use nodedb_array::schema::attr_spec::{AttrSpec, AttrType};
     use nodedb_array::schema::dim_spec::{DimSpec, DimType};
@@ -604,15 +607,15 @@ mod tests {
             .unwrap()
     }
 
-    fn storage() -> Arc<RedbStorage> {
-        Arc::new(RedbStorage::open_in_memory().unwrap())
+    async fn storage() -> Arc<PagedbStorageMem> {
+        Arc::new(PagedbStorageMem::open_in_memory().await.unwrap())
     }
 
-    #[test]
-    fn create_and_put_and_read() {
-        let s = storage();
-        let mut engine = ArrayEngineState::open(&s).unwrap();
-        engine.create_array(&s, "a", schema()).unwrap();
+    #[tokio::test]
+    async fn create_and_put_and_read() {
+        let s = storage().await;
+        let mut engine = ArrayEngineState::open(&s).await.unwrap();
+        engine.create_array(&s, "a", schema()).await.unwrap();
         engine
             .put_cell(
                 &s,
@@ -623,20 +626,22 @@ mod tests {
                 0,
                 OPEN_UPPER,
             )
+            .await
             .unwrap();
-        engine.flush(&s, "a").unwrap();
+        engine.flush(&s, "a").await.unwrap();
         let result = engine
             .read_coord(&s, "a", &[CoordValue::Int64(1)], 200)
+            .await
             .unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().attrs[0], CellValue::Int64(42));
     }
 
-    #[test]
-    fn delete_returns_none() {
-        let s = storage();
-        let mut engine = ArrayEngineState::open(&s).unwrap();
-        engine.create_array(&s, "b", schema()).unwrap();
+    #[tokio::test]
+    async fn delete_returns_none() {
+        let s = storage().await;
+        let mut engine = ArrayEngineState::open(&s).await.unwrap();
+        engine.create_array(&s, "b", schema()).await.unwrap();
         engine
             .put_cell(
                 &s,
@@ -647,33 +652,35 @@ mod tests {
                 0,
                 OPEN_UPPER,
             )
+            .await
             .unwrap();
         engine
             .delete_cell("b", vec![CoordValue::Int64(2)], 20)
             .unwrap();
-        engine.flush(&s, "b").unwrap();
+        engine.flush(&s, "b").await.unwrap();
         let result = engine
             .read_coord(&s, "b", &[CoordValue::Int64(2)], 100)
+            .await
             .unwrap();
         assert!(result.is_none());
     }
 
-    #[test]
-    fn open_restores_catalog() {
-        let s = storage();
+    #[tokio::test]
+    async fn open_restores_catalog() {
+        let s = storage().await;
         {
-            let mut engine = ArrayEngineState::open(&s).unwrap();
-            engine.create_array(&s, "persist", schema()).unwrap();
+            let mut engine = ArrayEngineState::open(&s).await.unwrap();
+            engine.create_array(&s, "persist", schema()).await.unwrap();
         }
-        let engine2 = ArrayEngineState::open(&s).unwrap();
+        let engine2 = ArrayEngineState::open(&s).await.unwrap();
         assert!(engine2.arrays.contains_key("persist"));
     }
 
-    #[test]
-    fn bitemporal_as_of() {
-        let s = storage();
-        let mut engine = ArrayEngineState::open(&s).unwrap();
-        engine.create_array(&s, "bt", schema()).unwrap();
+    #[tokio::test]
+    async fn bitemporal_as_of() {
+        let s = storage().await;
+        let mut engine = ArrayEngineState::open(&s).await.unwrap();
+        engine.create_array(&s, "bt", schema()).await.unwrap();
         engine
             .put_cell(
                 &s,
@@ -684,6 +691,7 @@ mod tests {
                 0,
                 OPEN_UPPER,
             )
+            .await
             .unwrap();
         engine
             .put_cell(
@@ -695,15 +703,18 @@ mod tests {
                 0,
                 OPEN_UPPER,
             )
+            .await
             .unwrap();
-        engine.flush(&s, "bt").unwrap();
+        engine.flush(&s, "bt").await.unwrap();
         let r = engine
             .read_coord(&s, "bt", &[CoordValue::Int64(0)], 150)
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(r.attrs[0], CellValue::Int64(10));
         let r2 = engine
             .read_coord(&s, "bt", &[CoordValue::Int64(0)], 300)
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(r2.attrs[0], CellValue::Int64(20));

@@ -10,7 +10,7 @@ use nodedb_types::Namespace;
 use serde::{Deserialize, Serialize};
 
 use crate::error::LiteError;
-use crate::storage::engine::{StorageEngineSync, WriteOp};
+use crate::storage::engine::{StorageEngine, WriteOp};
 
 const MANIFEST_PREFIX: &str = "manifest:";
 
@@ -73,7 +73,7 @@ pub fn segment_key(name: &str, id: u64) -> Vec<u8> {
 }
 
 /// Persist the manifest for `name` to storage.
-pub fn save_manifest<S: StorageEngineSync>(
+pub async fn save_manifest<S: StorageEngine>(
     storage: &Arc<S>,
     name: &str,
     manifest: &ArrayManifest,
@@ -81,16 +81,18 @@ pub fn save_manifest<S: StorageEngineSync>(
     let bytes = zerompk::to_msgpack_vec(manifest).map_err(|e| LiteError::Serialization {
         detail: format!("encode ArrayManifest: {e}"),
     })?;
-    storage.put_sync(Namespace::Array, &manifest_key(name), &bytes)
+    storage
+        .put(Namespace::Array, &manifest_key(name), &bytes)
+        .await
 }
 
 /// Load the manifest for `name` from storage. Returns an empty manifest
 /// when the key is absent (first open of a freshly created array).
-pub fn load_manifest<S: StorageEngineSync>(
+pub async fn load_manifest<S: StorageEngine>(
     storage: &Arc<S>,
     name: &str,
 ) -> Result<ArrayManifest, LiteError> {
-    match storage.get_sync(Namespace::Array, &manifest_key(name))? {
+    match storage.get(Namespace::Array, &manifest_key(name)).await? {
         Some(bytes) => zerompk::from_msgpack(&bytes).map_err(|e| LiteError::Serialization {
             detail: format!("decode ArrayManifest: {e}"),
         }),
@@ -100,7 +102,7 @@ pub fn load_manifest<S: StorageEngineSync>(
 
 /// Remove the manifest and all segment blobs for `name` from storage.
 /// Used by `delete_array`.
-pub fn drop_manifest<S: StorageEngineSync>(
+pub async fn drop_manifest<S: StorageEngine>(
     storage: &Arc<S>,
     name: &str,
     manifest: &ArrayManifest,
@@ -117,55 +119,65 @@ pub fn drop_manifest<S: StorageEngineSync>(
         ns: Namespace::Array,
         key: manifest_key(name),
     });
-    storage.batch_write_sync(&ops)
+    storage.batch_write(&ops).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::redb_storage::RedbStorage;
+    use crate::storage::pagedb_storage::PagedbStorageMem;
     use std::sync::Arc;
 
-    #[test]
-    fn manifest_push_and_persist() {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
+    use crate::storage::engine::StorageEngine;
+
+    #[tokio::test]
+    async fn manifest_push_and_persist() {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
         let mut m = ArrayManifest::new();
         m.push_segment(128);
         m.push_segment(256);
-        save_manifest(&storage, "a", &m).unwrap();
+        save_manifest(&storage, "a", &m).await.unwrap();
 
-        let m2 = load_manifest(&storage, "a").unwrap();
+        let m2 = load_manifest(&storage, "a").await.unwrap();
         assert_eq!(m2.segments.len(), 2);
         assert_eq!(m2.segments[0].id, 0);
         assert_eq!(m2.segments[1].id, 1);
         assert_eq!(m2.next_id, 2);
     }
 
-    #[test]
-    fn load_missing_returns_empty() {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
-        let m = load_manifest(&storage, "no_such").unwrap();
+    #[tokio::test]
+    async fn load_missing_returns_empty() {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+        let m = load_manifest(&storage, "no_such").await.unwrap();
         assert!(m.segments.is_empty());
         assert_eq!(m.next_id, 0);
     }
 
-    #[test]
-    fn drop_removes_manifest_and_segments() {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
+    #[tokio::test]
+    async fn drop_removes_manifest_and_segments() {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
         let mut m = ArrayManifest::new();
         let id = m.push_segment(64);
         let seg_bytes = b"fake_segment_bytes";
         storage
-            .put_sync(Namespace::Array, &segment_key("b", id), seg_bytes)
+            .put(Namespace::Array, &segment_key("b", id), seg_bytes)
+            .await
             .unwrap();
-        save_manifest(&storage, "b", &m).unwrap();
+        save_manifest(&storage, "b", &m).await.unwrap();
 
-        drop_manifest(&storage, "b", &m).unwrap();
+        drop_manifest(&storage, "b", &m).await.unwrap();
 
-        assert!(load_manifest(&storage, "b").unwrap().segments.is_empty());
+        assert!(
+            load_manifest(&storage, "b")
+                .await
+                .unwrap()
+                .segments
+                .is_empty()
+        );
         assert!(
             storage
-                .get_sync(Namespace::Array, &segment_key("b", id))
+                .get(Namespace::Array, &segment_key("b", id))
+                .await
                 .unwrap()
                 .is_none()
         );

@@ -237,6 +237,22 @@ fn cmp_with_nulls(a: &Value, b: &Value, nulls_first: bool) -> std::cmp::Ordering
 fn row_to_json(columns: &[String], row: &[Value]) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     for (col, val) in columns.iter().zip(row.iter()) {
+        // For schemaless document rows the physical scan serialises the whole
+        // document payload into a single "document" JSON-string column.  Inline
+        // its fields into the filter context so that WHERE predicates on
+        // user-defined fields (e.g. `tier = 'gold'`) can match them directly.
+        if col == "document" {
+            if let Value::String(json_str) = val {
+                if let Ok(serde_json::Value::Object(inner)) =
+                    serde_json::from_str::<serde_json::Value>(json_str)
+                {
+                    for (k, v) in inner {
+                        map.entry(k).or_insert(v);
+                    }
+                    continue;
+                }
+            }
+        }
         map.insert(col.clone(), value_to_json(val));
     }
     serde_json::Value::Object(map)
@@ -272,7 +288,47 @@ fn value_to_json(v: &Value) -> serde_json::Value {
 fn row_to_typed_value(columns: &[String], row: &[Value]) -> Value {
     let mut map = std::collections::HashMap::new();
     for (col, val) in columns.iter().zip(row.iter()) {
+        // For schemaless document rows the physical scan serialises the whole
+        // document payload into a single "document" JSON-string column.  Inline
+        // its fields so that QExpr predicates on user-defined fields work.
+        if col == "document" {
+            if let Value::String(json_str) = val {
+                if let Ok(serde_json::Value::Object(inner)) =
+                    serde_json::from_str::<serde_json::Value>(json_str)
+                {
+                    for (k, v) in inner {
+                        map.entry(k).or_insert_with(|| json_value_to_value(&v));
+                    }
+                    continue;
+                }
+            }
+        }
         map.insert(col.clone(), val.clone());
     }
     Value::Object(map)
+}
+
+fn json_value_to_value(v: &serde_json::Value) -> Value {
+    match v {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Integer(i)
+            } else {
+                Value::Float(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        serde_json::Value::String(s) => Value::String(s.clone()),
+        serde_json::Value::Array(arr) => {
+            Value::Array(arr.iter().map(json_value_to_value).collect())
+        }
+        serde_json::Value::Object(obj) => {
+            let mut m = std::collections::HashMap::new();
+            for (k, val) in obj {
+                m.insert(k.clone(), json_value_to_value(val));
+            }
+            Value::Object(m)
+        }
+    }
 }

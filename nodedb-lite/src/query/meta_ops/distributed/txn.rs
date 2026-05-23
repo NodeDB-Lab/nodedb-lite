@@ -18,14 +18,14 @@ use nodedb_types::result::QueryResult;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// Execute `plans` in order, stopping on the first error.
 ///
 /// This shared helper is used by `TransactionBatch`, `CalvinExecuteStatic`,
 /// and `CalvinExecuteActive`. Each plan is dispatched through the full
 /// `LiteDataPlaneVisitor` so every engine family is handled correctly.
-pub async fn execute_plans_in_order<S: StorageEngine + StorageEngineSync>(
+pub async fn execute_plans_in_order<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     plans: &[PhysicalPlan],
 ) -> Result<QueryResult, LiteError> {
@@ -39,7 +39,7 @@ pub async fn execute_plans_in_order<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Handle `MetaOp::TransactionBatch { plans }`.
-pub async fn handle_txn_batch<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_txn_batch<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     plans: &[PhysicalPlan],
 ) -> Result<QueryResult, LiteError> {
@@ -51,7 +51,7 @@ pub async fn handle_txn_batch<S: StorageEngine + StorageEngineSync>(
 /// Static-set Calvin means the read/write set was fully known at submission
 /// time. On Lite, determinism is guaranteed by single-node serialised
 /// execution — no sequencer required.
-pub async fn handle_calvin_static<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_calvin_static<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     plans: &[PhysicalPlan],
 ) -> Result<QueryResult, LiteError> {
@@ -79,7 +79,7 @@ pub async fn handle_calvin_passive() -> Result<QueryResult, LiteError> {
 /// `injected_reads` is never populated by a remote shard. We execute the plans
 /// directly — the injected reads are ignored because the handlers already read
 /// from the local engine.
-pub async fn handle_calvin_active<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_calvin_active<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     plans: &[PhysicalPlan],
 ) -> Result<QueryResult, LiteError> {

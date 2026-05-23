@@ -6,11 +6,11 @@ use nodedb_physical::physical_plan::ColumnarOp;
 use crate::error::LiteError;
 use crate::query::columnar_ops;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::LitePhysicalFut;
 
-pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     op: &ColumnarOp,
 ) -> Result<LitePhysicalFut<'a>, LiteError> {

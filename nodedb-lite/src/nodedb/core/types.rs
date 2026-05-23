@@ -13,7 +13,7 @@ use crate::engine::htap::HtapBridge;
 use crate::engine::strict::StrictEngine;
 use crate::engine::vector::VectorState;
 use crate::memory::MemoryGovernor;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// Storage key constants.
 pub(crate) const META_HNSW_COLLECTIONS: &[u8] = b"meta:hnsw_collections";
@@ -30,7 +30,7 @@ pub(crate) const META_LAST_FLUSHED_MID: &[u8] = b"meta:last_flushed_mid";
 ///
 /// Fully capable of vector search, graph traversal, and document CRUD
 /// entirely offline. Optional sync to Origin via WebSocket.
-pub struct NodeDbLite<S: StorageEngine + StorageEngineSync> {
+pub struct NodeDbLite<S: StorageEngine> {
     pub(crate) storage: Arc<S>,
     /// Shared HNSW runtime state (indices, ID map, search_ef).
     pub(crate) vector_state: Arc<VectorState<S>>,
@@ -65,7 +65,7 @@ pub struct NodeDbLite<S: StorageEngine + StorageEngineSync> {
     ///
     /// `Arc`-wrapped so it can be shared with [`crate::sync::array::LiteApplyEngine`]
     /// for the inbound receive path without borrowing `NodeDbLite`.
-    pub(crate) array_state: Arc<std::sync::Mutex<crate::engine::array::engine::ArrayEngineState>>,
+    pub(crate) array_state: Arc<tokio::sync::Mutex<crate::engine::array::engine::ArrayEngineState>>,
     /// Stable per-replica identity + HLC generator for array CRDT sync.
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)]
@@ -98,9 +98,9 @@ pub struct NodeDbLite<S: StorageEngine + StorageEngineSync> {
     /// Outbound queue for timeseries-profile columnar insert sync. `None` when sync is disabled.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) timeseries_outbound: Option<Arc<crate::sync::TimeseriesOutbound>>,
-    /// When `false`, KV operations go directly to redb, bypassing Loro.
+    /// When `false`, KV operations go directly to storage, bypassing Loro.
     pub(crate) sync_enabled: bool,
-    /// Buffered KV writes awaiting batch commit to redb.
+    /// Buffered KV writes awaiting batch commit to storage.
     /// Flushed on `kv_flush()`, threshold (1000 ops), or `flush()`.
     /// The HashMap overlay lets reads see uncommitted writes.
     pub(crate) kv_write_buf: Mutex<KvWriteBuffer>,
@@ -119,6 +119,6 @@ pub(crate) struct KvWriteBuffer {
     /// Pending write operations for batch commit.
     pub ops: Vec<crate::storage::engine::WriteOp>,
     /// Read overlay: maps redb composite key → value (None = deleted).
-    /// Lets `kv_get` see uncommitted writes without hitting redb.
+    /// Lets `kv_get` see uncommitted writes without hitting storage.
     pub overlay: HashMap<Vec<u8>, Option<Vec<u8>>>,
 }

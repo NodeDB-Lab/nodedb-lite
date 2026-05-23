@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use crate::storage::engine::StorageEngineSync;
+use crate::storage::engine::StorageEngine;
 
 use super::inbound::apply::LiteApplyEngine;
 use super::schema_registry::SchemaRegistry;
@@ -41,7 +41,7 @@ pub const DEFAULT_ACK_INTERVAL: Duration = Duration::from_secs(30);
 /// Spawned on session connect and cancelled on disconnect. The returned
 /// `JoinHandle` should be stored by the session and aborted (via
 /// `handle.abort()`) on session teardown.
-pub fn spawn<S: StorageEngineSync + Send + Sync + 'static>(
+pub fn spawn<S: StorageEngine + 'static>(
     schemas: Arc<SchemaRegistry<S>>,
     engine: Arc<LiteApplyEngine<S>>,
     replica_id: ReplicaId,
@@ -68,7 +68,7 @@ pub fn spawn<S: StorageEngineSync + Send + Sync + 'static>(
 }
 
 /// Build and send `ArrayAckMsg` frames for all known arrays.
-async fn send_acks<S: StorageEngineSync>(
+async fn send_acks<S: StorageEngine>(
     schemas: &SchemaRegistry<S>,
     engine: &LiteApplyEngine<S>,
     replica_id: ReplicaId,

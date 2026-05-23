@@ -10,10 +10,12 @@
 //! share the same public `kv_put` / `kv_get` / `kv_delete` surface tested
 //! below.
 
-use nodedb_lite::{NodeDbLite, RedbStorage};
+use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 
-async fn open_db() -> NodeDbLite<RedbStorage> {
-    let storage = RedbStorage::open_in_memory().expect("open in-memory storage");
+async fn open_db() -> NodeDbLite<PagedbStorageMem> {
+    let storage = PagedbStorageMem::open_in_memory()
+        .await
+        .expect("open in-memory storage");
     NodeDbLite::open(storage, 1).await.expect("open NodeDbLite")
 }
 
@@ -38,15 +40,15 @@ async fn kv_put_get_delete_roundtrip() {
 
     // Insert all 5 keys.
     for (k, v) in pairs {
-        db.kv_put(col, k, v).expect("kv_put");
+        db.kv_put(col, k, v).await.expect("kv_put");
     }
 
     // Flush to redb to ensure persistence layer is exercised.
-    db.kv_flush().expect("kv_flush");
+    db.kv_flush().await.expect("kv_flush");
 
     // Get each key back and assert value matches.
     for (k, expected) in pairs {
-        let got = db.kv_get(col, k).expect("kv_get");
+        let got = db.kv_get(col, k).await.expect("kv_get");
         assert_eq!(
             got.as_deref(),
             Some(*expected),
@@ -55,15 +57,21 @@ async fn kv_put_get_delete_roundtrip() {
     }
 
     // Delete key2 and key4.
-    db.kv_delete(col, "key2").expect("kv_delete key2");
-    db.kv_delete(col, "key4").expect("kv_delete key4");
-    db.kv_flush().expect("kv_flush after deletes");
+    db.kv_delete(col, "key2").await.expect("kv_delete key2");
+    db.kv_delete(col, "key4").await.expect("kv_delete key4");
+    db.kv_flush().await.expect("kv_flush after deletes");
 
     // Deleted keys must be absent.
-    let gone2 = db.kv_get(col, "key2").expect("kv_get key2 after delete");
+    let gone2 = db
+        .kv_get(col, "key2")
+        .await
+        .expect("kv_get key2 after delete");
     assert!(gone2.is_none(), "key2 should be absent after delete");
 
-    let gone4 = db.kv_get(col, "key4").expect("kv_get key4 after delete");
+    let gone4 = db
+        .kv_get(col, "key4")
+        .await
+        .expect("kv_get key4 after delete");
     assert!(gone4.is_none(), "key4 should be absent after delete");
 
     // Remaining keys must still be present.
@@ -73,7 +81,7 @@ async fn kv_put_get_delete_roundtrip() {
             .find(|(pk, _)| *pk == k)
             .map(|(_, v)| *v)
             .expect("pair exists");
-        let got = db.kv_get(col, k).expect("kv_get remaining");
+        let got = db.kv_get(col, k).await.expect("kv_get remaining");
         assert_eq!(
             got.as_deref(),
             Some(expected),
@@ -96,6 +104,7 @@ async fn kv_get_missing_returns_none_or_error() {
     // Query a key that was never inserted.
     let result = db
         .kv_get(col, "never_inserted_key")
+        .await
         .expect("kv_get should not error for missing key");
 
     assert!(
@@ -104,9 +113,10 @@ async fn kv_get_missing_returns_none_or_error() {
     );
 
     // Also verify that a flush + re-get still returns None (not an error).
-    db.kv_flush().expect("kv_flush");
+    db.kv_flush().await.expect("kv_flush");
     let result2 = db
         .kv_get(col, "never_inserted_key")
+        .await
         .expect("kv_get after flush should not error");
 
     assert!(

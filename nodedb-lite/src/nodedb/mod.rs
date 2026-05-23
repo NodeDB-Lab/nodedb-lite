@@ -25,12 +25,12 @@ mod tests {
     use nodedb_types::id::NodeId;
     use nodedb_types::value::Value;
 
-    use crate::RedbStorage;
+    use crate::PagedbStorageMem;
 
     use super::*;
 
-    async fn make_db() -> NodeDbLite<RedbStorage> {
-        let storage = RedbStorage::open_in_memory().unwrap();
+    async fn make_db() -> NodeDbLite<PagedbStorageMem> {
+        let storage = PagedbStorageMem::open_in_memory().await.unwrap();
         NodeDbLite::open(storage, 1).await.unwrap()
     }
 
@@ -190,7 +190,7 @@ mod tests {
     #[tokio::test]
     async fn flush_and_reopen() {
         {
-            let s = RedbStorage::open_in_memory().unwrap();
+            let s = PagedbStorageMem::open_in_memory().await.unwrap();
             let db = NodeDbLite::open(s, 1).await.unwrap();
 
             let mut doc = Document::new("d1");

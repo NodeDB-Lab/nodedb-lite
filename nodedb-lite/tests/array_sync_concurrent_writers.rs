@@ -42,11 +42,11 @@ fn put_with_hlc(
 
 /// Two Lite replicas each write the same coord at distinct HLCs.
 /// Both ops land at Origin; AS-OF reads return the correct version.
-#[test]
-fn two_writers_same_coord_both_land() {
+#[tokio::test(flavor = "multi_thread")]
+async fn two_writers_same_coord_both_land() {
     // "Origin" in-process engine receives from both replicas.
-    let origin = common::SyncHarness::new_in_memory();
-    origin.create_array("shared");
+    let origin = common::SyncHarness::new_in_memory().await;
+    origin.create_array("shared").await;
     let schema_hlc = origin.schema_hlc("shared");
 
     let rep_a = common::replica(1);
@@ -62,10 +62,10 @@ fn two_writers_same_coord_both_land() {
     assert_eq!(oa, InboundOutcome::Applied, "replica A op must apply");
     assert_eq!(ob, InboundOutcome::Applied, "replica B op must apply");
 
-    origin.flush("shared");
+    origin.flush("shared").await;
 
     // AS-OF 120 → replica A's write (system=100) is the newest at or before 120.
-    let val_120 = origin.read_coord("shared", 7, 120);
+    let val_120 = origin.read_coord("shared", 7, 120).await;
     assert!(val_120.is_some(), "should see replica A's write AS-OF 120");
     assert_eq!(
         val_120.unwrap(),
@@ -74,7 +74,7 @@ fn two_writers_same_coord_both_land() {
     );
 
     // AS-OF i64::MAX → replica B's write (system=150) is the latest.
-    let val_max = origin.read_coord("shared", 7, i64::MAX);
+    let val_max = origin.read_coord("shared", 7, i64::MAX).await;
     assert!(val_max.is_some(), "should see replica B's write AS-OF MAX");
     assert_eq!(
         val_max.unwrap(),
@@ -84,10 +84,10 @@ fn two_writers_same_coord_both_land() {
 }
 
 /// Idempotent re-delivery of a replica's op does not change the state.
-#[test]
-fn duplicate_op_from_replica_is_idempotent() {
-    let origin = common::SyncHarness::new_in_memory();
-    origin.create_array("dedup");
+#[tokio::test(flavor = "multi_thread")]
+async fn duplicate_op_from_replica_is_idempotent() {
+    let origin = common::SyncHarness::new_in_memory().await;
+    origin.create_array("dedup").await;
     let schema_hlc = origin.schema_hlc("dedup");
 
     let rep = common::replica(99);
@@ -100,19 +100,19 @@ fn duplicate_op_from_replica_is_idempotent() {
         "second delivery must be Idempotent"
     );
 
-    origin.flush("dedup");
+    origin.flush("dedup").await;
 
-    let val = origin.read_coord("dedup", 5, i64::MAX);
+    let val = origin.read_coord("dedup", 5, i64::MAX).await;
     assert_eq!(val, Some(CellValue::Float64(77.0)));
 }
 
 /// Two replicas writing the same coord at the same physical ms but different
 /// replica IDs produce distinct HLCs (via replica_id tiebreak). Both ops must
 /// apply and be distinguishable by system time.
-#[test]
-fn same_physical_ms_different_replica_ids_distinct_hlc() {
-    let origin = common::SyncHarness::new_in_memory();
-    origin.create_array("tiebreak");
+#[tokio::test(flavor = "multi_thread")]
+async fn same_physical_ms_different_replica_ids_distinct_hlc() {
+    let origin = common::SyncHarness::new_in_memory().await;
+    origin.create_array("tiebreak").await;
     let schema_hlc = origin.schema_hlc("tiebreak");
 
     let rep_a = common::replica(1);

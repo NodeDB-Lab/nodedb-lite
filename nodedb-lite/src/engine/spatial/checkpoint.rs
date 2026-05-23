@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use nodedb_types::Namespace;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 
-use crate::storage::engine::{StorageEngine, StorageEngineSync, WriteOp};
+use crate::storage::engine::{StorageEngine, WriteOp};
 
 /// Flush the full spatial state to storage.
 ///
@@ -35,7 +35,7 @@ pub(crate) async fn flush_spatial<S>(
     next_id: u64,
 ) -> NodeDbResult<()>
 where
-    S: StorageEngine + StorageEngineSync,
+    S: StorageEngine,
 {
     let mut ops: Vec<WriteOp> = Vec::new();
 
@@ -114,7 +114,7 @@ pub(crate) async fn restore_spatial<S>(
     u64,
 )>
 where
-    S: StorageEngine + StorageEngineSync,
+    S: StorageEngine,
 {
     // ── Read collection list ──────────────────────────────────────────────────
     let Some(keys_bytes) = storage

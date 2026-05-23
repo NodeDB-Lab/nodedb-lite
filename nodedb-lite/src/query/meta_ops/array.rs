@@ -6,13 +6,13 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// `AlterArray` — update the bitemporal retention policy for an array.
 ///
 /// The new `audit_retain_ms` is persisted to `Namespace::Meta` under the key
 /// `array_retain/<array_id>` so that subsequent compact calls can read it.
-pub async fn handle_alter_array<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_alter_array<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     array_id: &str,
     audit_retain_ms: Option<Option<i64>>,

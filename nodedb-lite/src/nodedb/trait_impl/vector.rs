@@ -14,7 +14,7 @@ use crate::engine::vector::state::ensure_hnsw;
 use crate::nodedb::LockExt;
 use crate::nodedb::NodeDbLite;
 use crate::nodedb::convert::value_to_loro;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// Internal fields stripped from search-result metadata for a single-vector collection.
 pub(super) const INTERNAL_FIELDS_BASE: &[&str] = &["embedding_dim"];
@@ -22,7 +22,7 @@ pub(super) const INTERNAL_FIELDS_BASE: &[&str] = &["embedding_dim"];
 /// (adds `__field` which records which named vector the row belongs to).
 pub(super) const INTERNAL_FIELDS_NAMED: &[&str] = &["embedding_dim", "__field"];
 
-impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
+impl<S: StorageEngine> NodeDbLite<S> {
     /// Shared vector search implementation.
     pub(super) async fn vector_search_internal(
         &self,

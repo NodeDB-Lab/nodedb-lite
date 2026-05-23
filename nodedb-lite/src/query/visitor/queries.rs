@@ -22,7 +22,7 @@ use crate::query::filter_convert::{sql_filters_to_metadata, sql_value_to_value};
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
 use crate::query::query_ops::aggregate::execute_aggregate;
 use crate::query::query_ops::joins::inline_hash::execute_inline_hash_join;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::adapter::LiteFut;
 use super::having_eval::{apply_having_result, make_agg_alias_map};
@@ -120,7 +120,7 @@ fn sql_value_to_index_str(v: &SqlValue) -> String {
 // ── Aggregate ────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn lower_aggregate<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_aggregate<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     input: &SqlPlan,
     group_by: &[SqlExpr],
@@ -165,7 +165,7 @@ pub(super) fn lower_aggregate<'a, S: StorageEngine + StorageEngineSync + 'a>(
 // ── Join ─────────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn lower_join<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_join<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     left: &SqlPlan,
     right: &SqlPlan,
@@ -220,7 +220,7 @@ pub(super) fn lower_join<'a, S: StorageEngine + StorageEngineSync + 'a>(
 // ── DocumentIndexLookup ──────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn lower_document_index_lookup<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_document_index_lookup<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     _alias: Option<&str>,
@@ -291,7 +291,7 @@ pub(super) fn lower_document_index_lookup<'a, S: StorageEngine + StorageEngineSy
 
 // ── RangeScan ────────────────────────────────────────────────────────────────
 
-pub(super) fn lower_range_scan<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_range_scan<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     field: &str,
@@ -336,7 +336,7 @@ pub(super) fn lower_range_scan<'a, S: StorageEngine + StorageEngineSync + 'a>(
 /// non-recursive CTEs into the outer plan, so the outer query is always
 /// self-contained; the definition executions here serve as an eager
 /// validation pass.
-pub(super) fn lower_cte<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_cte<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     definitions: &[(String, SqlPlan)],
     outer: &SqlPlan,

@@ -21,8 +21,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use nodedb_client::NodeDb;
-use nodedb_lite::NodeDbLite;
-use nodedb_lite::storage::redb_storage::RedbStorage;
+use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 use nodedb_types::document::Document;
 use nodedb_types::value::Value;
 
@@ -38,7 +37,7 @@ use crate::common::sql::{OriginPgwire, open_lite};
 ///
 /// The bootstrap document is written with id "__bootstrap__" and is
 /// immediately deleted so it doesn't pollute the parity comparison.
-async fn lite_register_collection(db: &Arc<NodeDbLite<RedbStorage>>, name: &str) {
+async fn lite_register_collection(db: &Arc<NodeDbLite<PagedbStorageMem>>, name: &str) {
     let mut doc = Document::new("__bootstrap__");
     doc.set("_init", Value::Bool(true));
     db.document_put(name, doc)
@@ -67,7 +66,7 @@ async fn origin_insert(pg: &OriginPgwire, coll: &str, id: &str, name: &str, age:
 }
 
 async fn lite_insert(
-    db: &Arc<NodeDbLite<RedbStorage>>,
+    db: &Arc<NodeDbLite<PagedbStorageMem>>,
     coll: &str,
     id: &str,
     name: &str,
@@ -82,7 +81,7 @@ async fn lite_insert(
 }
 
 /// Collect IDs visible in a Lite schemaless SELECT.
-async fn lite_ids(db: &Arc<NodeDbLite<RedbStorage>>, coll: &str) -> HashSet<String> {
+async fn lite_ids(db: &Arc<NodeDbLite<PagedbStorageMem>>, coll: &str) -> HashSet<String> {
     let result = db
         .execute_sql(&format!("SELECT id, document FROM {coll}"), &[])
         .await

@@ -46,10 +46,10 @@ fn build_ops(array: &str, schema_hlc: Hlc, count: u64) -> Vec<ArrayOp> {
 
 /// CatchupTracker recognises that an array needs catch-up when no
 /// `last_seen_hlc` is stored (first connect scenario).
-#[test]
-fn first_connect_requires_catchup() {
-    let harness = common::SyncHarness::new_in_memory();
-    harness.create_array("fresh");
+#[tokio::test(flavor = "multi_thread")]
+async fn first_connect_requires_catchup() {
+    let harness = common::SyncHarness::new_in_memory().await;
+    harness.create_array("fresh").await;
 
     let local_hlc = common::hlc1(1000);
     let needs = harness.catchup.should_request_catchup("fresh", local_hlc);
@@ -69,14 +69,15 @@ fn first_connect_requires_catchup() {
 
 /// After `record_reject_retention_floor`, the array is flagged as needing
 /// catch-up. After a simulated snapshot apply, the flag can be cleared.
-#[test]
-fn retention_floor_reject_then_catchup_clears_flag() {
-    let harness = common::SyncHarness::new_in_memory();
-    harness.create_array("rcf");
+#[tokio::test(flavor = "multi_thread")]
+async fn retention_floor_reject_then_catchup_clears_flag() {
+    let harness = common::SyncHarness::new_in_memory().await;
+    harness.create_array("rcf").await;
 
     harness
         .catchup
         .record_reject_retention_floor("rcf")
+        .await
         .expect("record_retention_floor");
 
     assert!(
@@ -88,12 +89,14 @@ fn retention_floor_reject_then_catchup_clears_flag() {
     harness
         .catchup
         .clear_catchup_needed("rcf")
+        .await
         .expect("clear_catchup_needed");
 
     // Record a last_seen_hlc so the "first connect" branch doesn't fire.
     harness
         .catchup
         .record("rcf", common::hlc1(500))
+        .await
         .expect("record");
 
     assert!(
@@ -106,10 +109,10 @@ fn retention_floor_reject_then_catchup_clears_flag() {
 
 /// Deliver a multi-op snapshot via handle_snapshot_header + handle_snapshot_chunk.
 /// All ops in the snapshot must be applied to the local engine.
-#[test]
-fn snapshot_stream_applies_all_ops() {
-    let harness = common::SyncHarness::new_in_memory();
-    harness.create_array("snap");
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_stream_applies_all_ops() {
+    let harness = common::SyncHarness::new_in_memory().await;
+    harness.create_array("snap").await;
     let schema_hlc = harness.schema_hlc("snap");
 
     let ops = build_ops("snap", schema_hlc, 5);
@@ -172,11 +175,11 @@ fn snapshot_stream_applies_all_ops() {
         "expected SnapshotApplied{{ops_applied: 5}}, got: {last_out:?}"
     );
 
-    harness.flush("snap");
+    harness.flush("snap").await;
 
     // All 5 cells must be readable.
     for i in 1..=5i64 {
-        let val = harness.read_coord("snap", i, i64::MAX);
+        let val = harness.read_coord("snap", i, i64::MAX).await;
         assert!(
             val.is_some(),
             "coord {i} must be present after snapshot apply"
@@ -190,26 +193,30 @@ fn snapshot_stream_applies_all_ops() {
 }
 
 /// `CatchupTracker::record` persists across a reload from the same storage.
-#[test]
-fn catchup_last_seen_persists_across_reload() {
-    use nodedb_lite::storage::redb_storage::RedbStorage;
+#[tokio::test(flavor = "multi_thread")]
+async fn catchup_last_seen_persists_across_reload() {
+    use nodedb_lite::PagedbStorageDefault;
     use nodedb_lite::sync::array::catchup::CatchupTracker;
     use std::sync::Arc;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("catchup_persist.redb");
+    let path = dir.path().join("catchup_persist.pagedb");
 
     let target_hlc = common::hlc1(77_000);
 
     {
-        let storage = Arc::new(RedbStorage::open(&path).expect("open"));
-        let tracker = CatchupTracker::load(Arc::clone(&storage)).expect("load");
-        tracker.record("arr", target_hlc).expect("record");
+        let storage = Arc::new(PagedbStorageDefault::open(&path).await.expect("open"));
+        let tracker = CatchupTracker::load(Arc::clone(&storage))
+            .await
+            .expect("load");
+        tracker.record("arr", target_hlc).await.expect("record");
     }
 
     {
-        let storage = Arc::new(RedbStorage::open(&path).expect("reopen"));
-        let tracker = CatchupTracker::load(storage).expect("load after restart");
+        let storage = Arc::new(PagedbStorageDefault::open(&path).await.expect("reopen"));
+        let tracker = CatchupTracker::load(storage)
+            .await
+            .expect("load after restart");
         assert_eq!(
             tracker.last_seen("arr"),
             target_hlc,

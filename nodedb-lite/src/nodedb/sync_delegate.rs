@@ -1,14 +1,14 @@
 //! `SyncDelegate` implementation — bridges the sync transport to NodeDbLite's engines.
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 #[cfg(not(target_arch = "wasm32"))]
 use super::core::NodeDbLite;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
-impl<S: StorageEngine + StorageEngineSync> crate::sync::SyncDelegate for NodeDbLite<S> {
+impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
     fn pending_deltas(&self) -> Vec<crate::engine::crdt::engine::PendingDelta> {
         self.pending_crdt_deltas().unwrap_or_default()
     }
@@ -177,13 +177,17 @@ impl<S: StorageEngine + StorageEngineSync> crate::sync::SyncDelegate for NodeDbL
     }
 
     fn handle_array_reject(&self, msg: &nodedb_types::sync::wire::ArrayRejectMsg) {
-        if let Err(e) = self.array_inbound.handle_reject(msg) {
-            tracing::warn!(
-                array = %msg.array,
-                error = %e,
-                "SyncDelegate::handle_array_reject: failed"
-            );
-        }
+        let inbound = std::sync::Arc::clone(&self.array_inbound);
+        let msg_owned = msg.clone();
+        tokio::spawn(async move {
+            if let Err(e) = inbound.handle_reject(&msg_owned).await {
+                tracing::warn!(
+                    array = %msg_owned.array,
+                    error = %e,
+                    "SyncDelegate::handle_array_reject: failed"
+                );
+            }
+        });
     }
 
     fn pending_columnar_batches(

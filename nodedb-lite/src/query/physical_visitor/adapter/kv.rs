@@ -6,11 +6,11 @@ use nodedb_physical::physical_plan::KvOp;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::kv_ops;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::LitePhysicalFut;
 
-pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     op: &KvOp,
 ) -> Result<LitePhysicalFut<'a>, LiteError> {
@@ -25,7 +25,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let k = key.clone();
             let ceiling = *surrogate_ceiling;
             Ok(Box::pin(async move {
-                kv_ops::reads::kv_get(engine, &col, &k, ceiling)
+                kv_ops::reads::kv_get(engine, &col, &k, ceiling).await
             }))
         }
 
@@ -43,7 +43,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let pattern = match_pattern.clone();
             let ceiling = *surrogate_ceiling;
             Ok(Box::pin(async move {
-                kv_ops::reads::kv_scan(engine, &col, &cur, cnt, pattern.as_deref(), ceiling)
+                kv_ops::reads::kv_scan(engine, &col, &cur, cnt, pattern.as_deref(), ceiling).await
             }))
         }
 
@@ -51,7 +51,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let col = collection.clone();
             let k = key.clone();
             Ok(Box::pin(async move {
-                kv_ops::reads::kv_get_ttl(engine, &col, &k)
+                kv_ops::reads::kv_get_ttl(engine, &col, &k).await
             }))
         }
 
@@ -59,7 +59,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let col = collection.clone();
             let ks = keys.clone();
             Ok(Box::pin(async move {
-                kv_ops::reads::kv_batch_get(engine, &col, &ks)
+                kv_ops::reads::kv_batch_get(engine, &col, &ks).await
             }))
         }
 
@@ -72,7 +72,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let k = key.clone();
             let flds = fields.clone();
             Ok(Box::pin(async move {
-                kv_ops::reads::kv_field_get(engine, &col, &k, &flds)
+                kv_ops::reads::kv_field_get(engine, &col, &k, &flds).await
             }))
         }
 
@@ -85,7 +85,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let cur = cursor.clone();
             let cnt = *count;
             Ok(Box::pin(async move {
-                kv_ops::reads::kv_materialize_scan(engine, &col, &cur, cnt, None)
+                kv_ops::reads::kv_materialize_scan(engine, &col, &cur, cnt, None).await
             }))
         }
 
@@ -101,7 +101,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let v = value.clone();
             let ttl = *ttl_ms;
             Ok(Box::pin(async move {
-                kv_ops::writes::kv_put(engine, &col, &k, &v, ttl)
+                kv_ops::writes::kv_put(engine, &col, &k, &v, ttl).await
             }))
         }
 
@@ -117,7 +117,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let v = value.clone();
             let ttl = *ttl_ms;
             Ok(Box::pin(async move {
-                kv_ops::writes::kv_insert(engine, &col, &k, &v, ttl)
+                kv_ops::writes::kv_insert(engine, &col, &k, &v, ttl).await
             }))
         }
 
@@ -133,7 +133,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let v = value.clone();
             let ttl = *ttl_ms;
             Ok(Box::pin(async move {
-                kv_ops::writes::kv_insert_if_absent(engine, &col, &k, &v, ttl)
+                kv_ops::writes::kv_insert_if_absent(engine, &col, &k, &v, ttl).await
             }))
         }
 
@@ -151,7 +151,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let ttl = *ttl_ms;
             let upd = updates.clone();
             Ok(Box::pin(async move {
-                kv_ops::writes::kv_insert_on_conflict_update(engine, &col, &k, &v, ttl, &upd)
+                kv_ops::writes::kv_insert_on_conflict_update(engine, &col, &k, &v, ttl, &upd).await
             }))
         }
 
@@ -159,7 +159,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let col = collection.clone();
             let ks = keys.clone();
             Ok(Box::pin(async move {
-                kv_ops::writes::kv_delete(engine, &col, &ks)
+                kv_ops::writes::kv_delete(engine, &col, &ks).await
             }))
         }
 
@@ -172,7 +172,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let ents = entries.clone();
             let ttl = *ttl_ms;
             Ok(Box::pin(async move {
-                kv_ops::writes::kv_batch_put(engine, &col, &ents, ttl)
+                kv_ops::writes::kv_batch_put(engine, &col, &ents, ttl).await
             }))
         }
 
@@ -185,7 +185,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let k = key.clone();
             let ttl = *ttl_ms;
             Ok(Box::pin(async move {
-                kv_ops::writes::kv_expire(engine, &col, &k, ttl)
+                kv_ops::writes::kv_expire(engine, &col, &k, ttl).await
             }))
         }
 
@@ -193,14 +193,14 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let col = collection.clone();
             let k = key.clone();
             Ok(Box::pin(async move {
-                kv_ops::writes::kv_persist(engine, &col, &k)
+                kv_ops::writes::kv_persist(engine, &col, &k).await
             }))
         }
 
         KvOp::Truncate { collection } => {
             let col = collection.clone();
             Ok(Box::pin(async move {
-                kv_ops::writes::kv_truncate(engine, &col)
+                kv_ops::writes::kv_truncate(engine, &col).await
             }))
         }
 
@@ -215,7 +215,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let d = *delta;
             let ttl = *ttl_ms;
             Ok(Box::pin(async move {
-                kv_ops::writes::kv_incr(engine, &col, &k, d, ttl)
+                kv_ops::writes::kv_incr(engine, &col, &k, d, ttl).await
             }))
         }
 
@@ -228,7 +228,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let k = key.clone();
             let d = *delta;
             Ok(Box::pin(async move {
-                kv_ops::writes::kv_incr_float(engine, &col, &k, d)
+                kv_ops::writes::kv_incr_float(engine, &col, &k, d).await
             }))
         }
 
@@ -243,7 +243,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let exp = expected.clone();
             let nv = new_value.clone();
             Ok(Box::pin(async move {
-                kv_ops::writes::kv_cas(engine, &col, &k, &exp, &nv)
+                kv_ops::writes::kv_cas(engine, &col, &k, &exp, &nv).await
             }))
         }
 
@@ -256,7 +256,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let k = key.clone();
             let nv = new_value.clone();
             Ok(Box::pin(async move {
-                kv_ops::writes::kv_get_set(engine, &col, &k, &nv)
+                kv_ops::writes::kv_get_set(engine, &col, &k, &nv).await
             }))
         }
 
@@ -269,7 +269,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let k = key.clone();
             let upd = updates.clone();
             Ok(Box::pin(async move {
-                kv_ops::writes::kv_field_set(engine, &col, &k, &upd)
+                kv_ops::writes::kv_field_set(engine, &col, &k, &upd).await
             }))
         }
 
@@ -286,7 +286,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let fld = field.clone();
             let amt = *amount;
             Ok(Box::pin(async move {
-                kv_ops::writes::kv_transfer(engine, &col, &src, &dst, &fld, amt)
+                kv_ops::writes::kv_transfer(engine, &col, &src, &dst, &fld, amt).await
             }))
         }
 
@@ -301,7 +301,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let ik = item_key.clone();
             let dk = dest_key.clone();
             Ok(Box::pin(async move {
-                kv_ops::writes::kv_transfer_item(engine, &src_col, &dst_col, &ik, &dk)
+                kv_ops::writes::kv_transfer_item(engine, &src_col, &dst_col, &ik, &dk).await
             }))
         }
 
@@ -315,7 +315,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let fld = field.clone();
             let bf = *backfill;
             Ok(Box::pin(async move {
-                kv_ops::indexes::kv_register_index(engine, &col, &fld, bf)
+                kv_ops::indexes::kv_register_index(engine, &col, &fld, bf).await
             }))
         }
 
@@ -323,7 +323,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let col = collection.clone();
             let fld = field.clone();
             Ok(Box::pin(async move {
-                kv_ops::indexes::kv_drop_index(engine, &col, &fld)
+                kv_ops::indexes::kv_drop_index(engine, &col, &fld).await
             }))
         }
 
@@ -341,14 +341,14 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let ws = *window_start_ms;
             let we = *window_end_ms;
             Ok(Box::pin(async move {
-                kv_ops::sorted::kv_register_sorted_index(engine, &name, &wt, &ts_col, ws, we)
+                kv_ops::sorted::kv_register_sorted_index(engine, &name, &wt, &ts_col, ws, we).await
             }))
         }
 
         KvOp::DropSortedIndex { index_name } => {
             let name = index_name.clone();
             Ok(Box::pin(async move {
-                kv_ops::sorted::kv_drop_sorted_index(engine, &name)
+                kv_ops::sorted::kv_drop_sorted_index(engine, &name).await
             }))
         }
 
@@ -359,7 +359,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let name = index_name.clone();
             let pk = primary_key.clone();
             Ok(Box::pin(async move {
-                kv_ops::sorted::kv_sorted_index_rank(engine, &name, &pk)
+                kv_ops::sorted::kv_sorted_index_rank(engine, &name, &pk).await
             }))
         }
 
@@ -367,7 +367,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let name = index_name.clone();
             let k = *k;
             Ok(Box::pin(async move {
-                kv_ops::sorted::kv_sorted_index_top_k(engine, &name, k)
+                kv_ops::sorted::kv_sorted_index_top_k(engine, &name, k).await
             }))
         }
 
@@ -386,13 +386,14 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
                     smin.as_deref(),
                     smax.as_deref(),
                 )
+                .await
             }))
         }
 
         KvOp::SortedIndexCount { index_name } => {
             let name = index_name.clone();
             Ok(Box::pin(async move {
-                kv_ops::sorted::kv_sorted_index_count(engine, &name)
+                kv_ops::sorted::kv_sorted_index_count(engine, &name).await
             }))
         }
 
@@ -403,7 +404,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
             let name = index_name.clone();
             let pk = primary_key.clone();
             Ok(Box::pin(async move {
-                kv_ops::sorted::kv_sorted_index_score(engine, &name, &pk)
+                kv_ops::sorted::kv_sorted_index_score(engine, &name, &pk).await
             }))
         }
     }

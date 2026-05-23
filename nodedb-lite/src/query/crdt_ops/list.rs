@@ -5,13 +5,13 @@ use nodedb_types::result::QueryResult;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// Insert a block into a document's LoroMovableList at the given index.
 ///
 /// `fields_json` is a JSON object; each key-value pair becomes a field on
 /// a new LoroMap container inserted at `index`.
-pub async fn handle_list_insert<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_list_insert<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     document_id: &str,
@@ -38,7 +38,7 @@ pub async fn handle_list_insert<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Delete a block from a document's LoroMovableList at the given index.
-pub async fn handle_list_delete<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_list_delete<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     document_id: &str,
@@ -59,7 +59,7 @@ pub async fn handle_list_delete<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Move a block within a document's LoroMovableList from one index to another.
-pub async fn handle_list_move<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_list_move<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     document_id: &str,

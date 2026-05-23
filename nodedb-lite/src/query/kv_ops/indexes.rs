@@ -10,7 +10,7 @@ use nodedb_types::result::QueryResult;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::value_utils::value_to_string;
-use crate::storage::engine::{StorageEngine, StorageEngineSync, WriteOp};
+use crate::storage::engine::{StorageEngine, WriteOp};
 
 use super::reads::{decode_value, is_expired, split_redb_key};
 
@@ -25,7 +25,7 @@ fn meta_key(collection: &str, field: &str, field_value: &str) -> String {
 }
 
 /// RegisterIndex: register a secondary index and optionally backfill it.
-pub fn kv_register_index<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_register_index<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     field: &str,
@@ -47,7 +47,8 @@ pub fn kv_register_index<S: StorageEngine + StorageEngineSync>(
     };
     let entries = engine
         .storage
-        .scan_range_bounded_sync(Namespace::Kv, Some(&col_prefix), None, None)
+        .scan_range_bounded(Namespace::Kv, Some(&col_prefix), None, None)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -77,7 +78,7 @@ pub fn kv_register_index<S: StorageEngine + StorageEngineSync>(
         if let Some(field_val) = map.get(field) {
             let field_str = value_to_string(field_val);
             let pk = String::from_utf8_lossy(user_key_bytes).into_owned();
-            index_insert_pk(engine, collection, field, &field_str, &pk)?;
+            index_insert_pk(engine, collection, field, &field_str, &pk).await?;
             indexed += 1;
         }
     }
@@ -90,7 +91,7 @@ pub fn kv_register_index<S: StorageEngine + StorageEngineSync>(
 }
 
 /// DropIndex: remove all index entries for a given field on a collection.
-pub fn kv_drop_index<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_drop_index<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     field: &str,
@@ -98,7 +99,8 @@ pub fn kv_drop_index<S: StorageEngine + StorageEngineSync>(
     let prefix = meta_prefix(collection, field);
     let entries = engine
         .storage
-        .scan_range_bounded_sync(Namespace::Meta, Some(prefix.as_bytes()), None, None)
+        .scan_range_bounded(Namespace::Meta, Some(prefix.as_bytes()), None, None)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -116,7 +118,8 @@ pub fn kv_drop_index<S: StorageEngine + StorageEngineSync>(
     if !ops.is_empty() {
         engine
             .storage
-            .batch_write_sync(&ops)
+            .batch_write(&ops)
+            .await
             .map_err(|e| LiteError::Storage {
                 detail: e.to_string(),
             })?;
@@ -131,7 +134,7 @@ pub fn kv_drop_index<S: StorageEngine + StorageEngineSync>(
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Insert a primary key into the inverted index for (collection, field, field_value).
-fn index_insert_pk<S: StorageEngine + StorageEngineSync>(
+async fn index_insert_pk<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     field: &str,
@@ -139,14 +142,19 @@ fn index_insert_pk<S: StorageEngine + StorageEngineSync>(
     pk: &str,
 ) -> Result<(), LiteError> {
     let mk = meta_key(collection, field, field_value);
-    let mut ids: Vec<String> =
-        if let Some(bytes) = engine.storage.get_sync(Namespace::Meta, mk.as_bytes())? {
-            zerompk::from_msgpack(&bytes).map_err(|e| LiteError::Serialization {
-                detail: format!("decode KV index entry: {e}"),
-            })?
-        } else {
-            Vec::new()
-        };
+    let mut ids: Vec<String> = if let Some(bytes) = engine
+        .storage
+        .get(Namespace::Meta, mk.as_bytes())
+        .await
+        .map_err(|e| LiteError::Storage {
+            detail: e.to_string(),
+        })? {
+        zerompk::from_msgpack(&bytes).map_err(|e| LiteError::Serialization {
+            detail: format!("decode KV index entry: {e}"),
+        })?
+    } else {
+        Vec::new()
+    };
     if !ids.contains(&pk.to_string()) {
         ids.push(pk.to_string());
         let bytes = zerompk::to_msgpack_vec(&ids).map_err(|e| LiteError::Serialization {
@@ -154,7 +162,11 @@ fn index_insert_pk<S: StorageEngine + StorageEngineSync>(
         })?;
         engine
             .storage
-            .put_sync(Namespace::Meta, mk.as_bytes(), &bytes)?;
+            .put(Namespace::Meta, mk.as_bytes(), &bytes)
+            .await
+            .map_err(|e| LiteError::Storage {
+                detail: e.to_string(),
+            })?;
     }
     Ok(())
 }

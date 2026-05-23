@@ -7,14 +7,14 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync, WriteOp};
+use crate::storage::engine::{StorageEngine, WriteOp};
 
 use super::reads::{decode_value, encode_value, is_expired, now_ms, redb_key, split_redb_key};
 
 // ─── Point writes ────────────────────────────────────────────────────────────
 
 /// Put: unconditional upsert.
-pub fn kv_put<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_put<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     key: &[u8],
@@ -30,7 +30,8 @@ pub fn kv_put<S: StorageEngine + StorageEngineSync>(
     let encoded = encode_value(deadline, value);
     engine
         .storage
-        .put_sync(Namespace::Kv, &rkey, &encoded)
+        .put(Namespace::Kv, &rkey, &encoded)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -42,7 +43,7 @@ pub fn kv_put<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Insert: write only if key absent; error on duplicate.
-pub fn kv_insert<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_insert<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     key: &[u8],
@@ -50,13 +51,13 @@ pub fn kv_insert<S: StorageEngine + StorageEngineSync>(
     ttl_ms: u64,
 ) -> Result<QueryResult, LiteError> {
     let rkey = redb_key(collection, key);
-    let existing =
-        engine
-            .storage
-            .get_sync(Namespace::Kv, &rkey)
-            .map_err(|e| LiteError::Storage {
-                detail: e.to_string(),
-            })?;
+    let existing = engine
+        .storage
+        .get(Namespace::Kv, &rkey)
+        .await
+        .map_err(|e| LiteError::Storage {
+            detail: e.to_string(),
+        })?;
     if let Some(raw) = existing
         && let Some((deadline, _)) = decode_value(&raw)
         && !is_expired(deadline)
@@ -65,11 +66,11 @@ pub fn kv_insert<S: StorageEngine + StorageEngineSync>(
             detail: format!("unique_violation: key already exists in collection '{collection}'"),
         });
     }
-    kv_put(engine, collection, key, value, ttl_ms)
+    kv_put(engine, collection, key, value, ttl_ms).await
 }
 
 /// InsertIfAbsent: write if absent, silently no-op on duplicate.
-pub fn kv_insert_if_absent<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_insert_if_absent<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     key: &[u8],
@@ -77,13 +78,13 @@ pub fn kv_insert_if_absent<S: StorageEngine + StorageEngineSync>(
     ttl_ms: u64,
 ) -> Result<QueryResult, LiteError> {
     let rkey = redb_key(collection, key);
-    let existing =
-        engine
-            .storage
-            .get_sync(Namespace::Kv, &rkey)
-            .map_err(|e| LiteError::Storage {
-                detail: e.to_string(),
-            })?;
+    let existing = engine
+        .storage
+        .get(Namespace::Kv, &rkey)
+        .await
+        .map_err(|e| LiteError::Storage {
+            detail: e.to_string(),
+        })?;
     if let Some(raw) = existing
         && let Some((deadline, _)) = decode_value(&raw)
         && !is_expired(deadline)
@@ -94,11 +95,11 @@ pub fn kv_insert_if_absent<S: StorageEngine + StorageEngineSync>(
             rows_affected: 0,
         });
     }
-    kv_put(engine, collection, key, value, ttl_ms)
+    kv_put(engine, collection, key, value, ttl_ms).await
 }
 
 /// InsertOnConflictUpdate: write if absent; on conflict apply field updates.
-pub fn kv_insert_on_conflict_update<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_insert_on_conflict_update<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     key: &[u8],
@@ -110,20 +111,20 @@ pub fn kv_insert_on_conflict_update<S: StorageEngine + StorageEngineSync>(
     )],
 ) -> Result<QueryResult, LiteError> {
     let rkey = redb_key(collection, key);
-    let existing =
-        engine
-            .storage
-            .get_sync(Namespace::Kv, &rkey)
-            .map_err(|e| LiteError::Storage {
-                detail: e.to_string(),
-            })?;
+    let existing = engine
+        .storage
+        .get(Namespace::Kv, &rkey)
+        .await
+        .map_err(|e| LiteError::Storage {
+            detail: e.to_string(),
+        })?;
 
     let raw = match existing {
-        None => return kv_put(engine, collection, key, value, ttl_ms),
+        None => return kv_put(engine, collection, key, value, ttl_ms).await,
         Some(raw) => match decode_value(&raw) {
-            None => return kv_put(engine, collection, key, value, ttl_ms),
+            None => return kv_put(engine, collection, key, value, ttl_ms).await,
             Some((deadline, _)) if is_expired(deadline) => {
-                return kv_put(engine, collection, key, value, ttl_ms);
+                return kv_put(engine, collection, key, value, ttl_ms).await;
             }
             Some(_) => raw,
         },
@@ -174,7 +175,8 @@ pub fn kv_insert_on_conflict_update<S: StorageEngine + StorageEngineSync>(
     let encoded = encode_value(keep_deadline, &new_user_bytes);
     engine
         .storage
-        .put_sync(Namespace::Kv, &rkey, &encoded)
+        .put(Namespace::Kv, &rkey, &encoded)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -187,7 +189,7 @@ pub fn kv_insert_on_conflict_update<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Delete: remove keys by primary key list.
-pub fn kv_delete<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_delete<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     keys: &[Vec<u8>],
@@ -203,7 +205,8 @@ pub fn kv_delete<S: StorageEngine + StorageEngineSync>(
     if !ops.is_empty() {
         engine
             .storage
-            .batch_write_sync(&ops)
+            .batch_write(&ops)
+            .await
             .map_err(|e| LiteError::Storage {
                 detail: e.to_string(),
             })?;
@@ -216,7 +219,7 @@ pub fn kv_delete<S: StorageEngine + StorageEngineSync>(
 }
 
 /// BatchPut: atomically insert/update multiple key-value pairs.
-pub fn kv_batch_put<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_batch_put<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     entries: &[(Vec<u8>, Vec<u8>)],
@@ -238,7 +241,8 @@ pub fn kv_batch_put<S: StorageEngine + StorageEngineSync>(
     let count = ops.len() as u64;
     engine
         .storage
-        .batch_write_sync(&ops)
+        .batch_write(&ops)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -250,7 +254,7 @@ pub fn kv_batch_put<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Expire: set or update TTL on an existing key.
-pub fn kv_expire<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_expire<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     key: &[u8],
@@ -259,7 +263,8 @@ pub fn kv_expire<S: StorageEngine + StorageEngineSync>(
     let rkey = redb_key(collection, key);
     let stored = engine
         .storage
-        .get_sync(Namespace::Kv, &rkey)
+        .get(Namespace::Kv, &rkey)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -278,7 +283,8 @@ pub fn kv_expire<S: StorageEngine + StorageEngineSync>(
             let encoded = encode_value(deadline, user_bytes);
             engine
                 .storage
-                .put_sync(Namespace::Kv, &rkey, &encoded)
+                .put(Namespace::Kv, &rkey, &encoded)
+                .await
                 .map_err(|e| LiteError::Storage {
                     detail: e.to_string(),
                 })?;
@@ -292,7 +298,7 @@ pub fn kv_expire<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Persist: remove TTL from an existing key (make it permanent).
-pub fn kv_persist<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_persist<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     key: &[u8],
@@ -300,7 +306,8 @@ pub fn kv_persist<S: StorageEngine + StorageEngineSync>(
     let rkey = redb_key(collection, key);
     let stored = engine
         .storage
-        .get_sync(Namespace::Kv, &rkey)
+        .get(Namespace::Kv, &rkey)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -318,7 +325,8 @@ pub fn kv_persist<S: StorageEngine + StorageEngineSync>(
             let encoded = encode_value(0, user_bytes);
             engine
                 .storage
-                .put_sync(Namespace::Kv, &rkey, &encoded)
+                .put(Namespace::Kv, &rkey, &encoded)
+                .await
                 .map_err(|e| LiteError::Storage {
                     detail: e.to_string(),
                 })?;
@@ -332,7 +340,7 @@ pub fn kv_persist<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Truncate: delete ALL entries in a KV collection.
-pub fn kv_truncate<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_truncate<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
 ) -> Result<QueryResult, LiteError> {
@@ -343,7 +351,8 @@ pub fn kv_truncate<S: StorageEngine + StorageEngineSync>(
     };
     let entries = engine
         .storage
-        .scan_range_bounded_sync(Namespace::Kv, Some(&col_prefix), None, None)
+        .scan_range_bounded(Namespace::Kv, Some(&col_prefix), None, None)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -365,7 +374,8 @@ pub fn kv_truncate<S: StorageEngine + StorageEngineSync>(
     if !ops.is_empty() {
         engine
             .storage
-            .batch_write_sync(&ops)
+            .batch_write(&ops)
+            .await
             .map_err(|e| LiteError::Storage {
                 detail: e.to_string(),
             })?;
@@ -382,7 +392,7 @@ pub fn kv_truncate<S: StorageEngine + StorageEngineSync>(
 /// Initialises to 0 if the key does not exist, then adds delta.
 /// Returns the new value. Fails with TypeMismatch if the stored value is
 /// not a plain i64.
-pub fn kv_incr<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_incr<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     key: &[u8],
@@ -392,7 +402,8 @@ pub fn kv_incr<S: StorageEngine + StorageEngineSync>(
     let rkey = redb_key(collection, key);
     let stored = engine
         .storage
-        .get_sync(Namespace::Kv, &rkey)
+        .get(Namespace::Kv, &rkey)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -435,7 +446,8 @@ pub fn kv_incr<S: StorageEngine + StorageEngineSync>(
     let encoded = encode_value(deadline, &new_user_bytes);
     engine
         .storage
-        .put_sync(Namespace::Kv, &rkey, &encoded)
+        .put(Namespace::Kv, &rkey, &encoded)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -448,7 +460,7 @@ pub fn kv_incr<S: StorageEngine + StorageEngineSync>(
 }
 
 /// IncrFloat: atomic f64 increment.
-pub fn kv_incr_float<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_incr_float<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     key: &[u8],
@@ -457,7 +469,8 @@ pub fn kv_incr_float<S: StorageEngine + StorageEngineSync>(
     let rkey = redb_key(collection, key);
     let stored = engine
         .storage
-        .get_sync(Namespace::Kv, &rkey)
+        .get(Namespace::Kv, &rkey)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -488,7 +501,8 @@ pub fn kv_incr_float<S: StorageEngine + StorageEngineSync>(
     let encoded = encode_value(old_deadline, &new_user_bytes);
     engine
         .storage
-        .put_sync(Namespace::Kv, &rkey, &encoded)
+        .put(Namespace::Kv, &rkey, &encoded)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -504,7 +518,7 @@ pub fn kv_incr_float<S: StorageEngine + StorageEngineSync>(
 ///
 /// Sets `new_value` only if current bytes equal `expected`.
 /// If key doesn't exist and `expected` is empty, creates the key.
-pub fn kv_cas<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_cas<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     key: &[u8],
@@ -514,7 +528,8 @@ pub fn kv_cas<S: StorageEngine + StorageEngineSync>(
     let rkey = redb_key(collection, key);
     let stored = engine
         .storage
-        .get_sync(Namespace::Kv, &rkey)
+        .get(Namespace::Kv, &rkey)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -538,7 +553,8 @@ pub fn kv_cas<S: StorageEngine + StorageEngineSync>(
         let encoded = encode_value(old_deadline, new_value);
         engine
             .storage
-            .put_sync(Namespace::Kv, &rkey, &encoded)
+            .put(Namespace::Kv, &rkey, &encoded)
+            .await
             .map_err(|e| LiteError::Storage {
                 detail: e.to_string(),
             })?;
@@ -552,7 +568,7 @@ pub fn kv_cas<S: StorageEngine + StorageEngineSync>(
 }
 
 /// GetSet: atomically set new value and return old value.
-pub fn kv_get_set<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_get_set<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     key: &[u8],
@@ -561,7 +577,8 @@ pub fn kv_get_set<S: StorageEngine + StorageEngineSync>(
     let rkey = redb_key(collection, key);
     let stored = engine
         .storage
-        .get_sync(Namespace::Kv, &rkey)
+        .get(Namespace::Kv, &rkey)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -584,7 +601,8 @@ pub fn kv_get_set<S: StorageEngine + StorageEngineSync>(
     let encoded = encode_value(old_deadline, new_value);
     engine
         .storage
-        .put_sync(Namespace::Kv, &rkey, &encoded)
+        .put(Namespace::Kv, &rkey, &encoded)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -597,7 +615,7 @@ pub fn kv_get_set<S: StorageEngine + StorageEngineSync>(
 }
 
 /// FieldSet: read-modify-write on named fields of a MessagePack map value.
-pub fn kv_field_set<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_field_set<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     key: &[u8],
@@ -606,7 +624,8 @@ pub fn kv_field_set<S: StorageEngine + StorageEngineSync>(
     let rkey = redb_key(collection, key);
     let stored = engine
         .storage
-        .get_sync(Namespace::Kv, &rkey)
+        .get(Namespace::Kv, &rkey)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -649,7 +668,8 @@ pub fn kv_field_set<S: StorageEngine + StorageEngineSync>(
     let encoded = encode_value(old_deadline, &new_user_bytes);
     engine
         .storage
-        .put_sync(Namespace::Kv, &rkey, &encoded)
+        .put(Namespace::Kv, &rkey, &encoded)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -664,7 +684,7 @@ pub fn kv_field_set<S: StorageEngine + StorageEngineSync>(
 /// Transfer: atomic fungible transfer between two keys in the same collection.
 ///
 /// Reads source and dest, validates source.field >= amount, writes both back.
-pub fn kv_transfer<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_transfer<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     source_key: &[u8],
@@ -677,7 +697,8 @@ pub fn kv_transfer<S: StorageEngine + StorageEngineSync>(
 
     let src_raw = engine
         .storage
-        .get_sync(Namespace::Kv, &src_rkey)
+        .get(Namespace::Kv, &src_rkey)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?
@@ -711,7 +732,8 @@ pub fn kv_transfer<S: StorageEngine + StorageEngineSync>(
 
     let dst_raw = engine
         .storage
-        .get_sync(Namespace::Kv, &dst_rkey)
+        .get(Namespace::Kv, &dst_rkey)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -765,7 +787,8 @@ pub fn kv_transfer<S: StorageEngine + StorageEngineSync>(
     ];
     engine
         .storage
-        .batch_write_sync(&ops)
+        .batch_write(&ops)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -780,7 +803,7 @@ pub fn kv_transfer<S: StorageEngine + StorageEngineSync>(
 /// TransferItem: atomic non-fungible item transfer between two collections.
 ///
 /// Deletes item from source collection and inserts at dest collection key.
-pub fn kv_transfer_item<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_transfer_item<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     source_collection: &str,
     dest_collection: &str,
@@ -790,7 +813,8 @@ pub fn kv_transfer_item<S: StorageEngine + StorageEngineSync>(
     let src_rkey = redb_key(source_collection, item_key);
     let src_raw = engine
         .storage
-        .get_sync(Namespace::Kv, &src_rkey)
+        .get(Namespace::Kv, &src_rkey)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?
@@ -825,7 +849,8 @@ pub fn kv_transfer_item<S: StorageEngine + StorageEngineSync>(
     ];
     engine
         .storage
-        .batch_write_sync(&ops)
+        .batch_write(&ops)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;

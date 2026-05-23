@@ -84,11 +84,15 @@ impl<S: StorageEngine> VectorState<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::redb_storage::RedbStorage;
+    use crate::storage::pagedb_storage::PagedbStorageMem;
 
-    #[test]
-    fn per_index_config_starts_empty() {
-        let storage = Arc::new(RedbStorage::open_in_memory().expect("in-memory redb"));
+    #[tokio::test]
+    async fn per_index_config_starts_empty() {
+        let storage = Arc::new(
+            PagedbStorageMem::open_in_memory()
+                .await
+                .expect("in-memory pagedb"),
+        );
         let state = VectorState::new(storage, 100);
         let configs = state.per_index_config.lock().expect("lock");
         assert!(

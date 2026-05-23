@@ -23,24 +23,24 @@ pub use register::{kv_drop_sorted_index, kv_register_sorted_index};
 #[cfg(test)]
 mod tests {
     use crate::NodeDbLite;
-    use crate::RedbStorage;
+    use crate::PagedbStorageMem;
+    use crate::storage::engine::StorageEngine;
 
-    async fn make_db() -> NodeDbLite<RedbStorage> {
-        let storage = RedbStorage::open_in_memory().unwrap();
+    async fn make_db() -> NodeDbLite<PagedbStorageMem> {
+        let storage = PagedbStorageMem::open_in_memory().await.unwrap();
         NodeDbLite::open(storage, 1).await.unwrap()
     }
 
     /// Register a tumbling sorted index, write entries inside and outside the
     /// window, then query and verify out-of-window entries are not visible.
-    #[test]
-    fn tumbling_window_purges_expired_entries() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tumbling_window_purges_expired_entries() {
         use super::keys::{SCORE_TS_SEPARATOR, f64_to_sort_bytes, pk_entry_key, score_prefix};
         use super::window::{WindowDef, purge_outside_window, store_window_def};
-        use crate::storage::engine::{StorageEngineSync, WriteOp};
+        use crate::storage::engine::WriteOp;
         use nodedb_types::Namespace;
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let db = rt.block_on(make_db());
+        let db = make_db().await;
         let engine = &db.query_engine;
 
         // Define a tumbling window: [1000, 2000) ms.
@@ -50,7 +50,7 @@ mod tests {
             window_start_ms: 1000,
             window_end_ms: 2000,
         };
-        store_window_def(engine, "test_idx", &def).unwrap();
+        store_window_def(engine, "test_idx", &def).await.unwrap();
 
         // Write two score entries: one inside the window (ts=1500), one outside (ts=500).
         let inside_ts: u64 = 1500;
@@ -97,16 +97,19 @@ mod tests {
                 value: score_bytes.to_vec(),
             },
         ];
-        engine.storage.batch_write_sync(&ops).unwrap();
+        engine.storage.batch_write(&ops).await.unwrap();
 
         // Purge at now_ms=1500 (inside the window [1000, 2000)).
-        purge_outside_window(engine, "test_idx", 1500).unwrap();
+        purge_outside_window(engine, "test_idx", 1500)
+            .await
+            .unwrap();
 
         // Inside entry must still exist.
         assert!(
             engine
                 .storage
-                .get_sync(Namespace::Meta, &in_key)
+                .get(Namespace::Meta, &in_key)
+                .await
                 .unwrap()
                 .is_some(),
             "inside-window entry must survive purge"
@@ -116,7 +119,8 @@ mod tests {
         assert!(
             engine
                 .storage
-                .get_sync(Namespace::Meta, &out_key)
+                .get(Namespace::Meta, &out_key)
+                .await
                 .unwrap()
                 .is_none(),
             "outside-window entry must be purged"
@@ -126,7 +130,8 @@ mod tests {
         assert!(
             engine
                 .storage
-                .get_sync(Namespace::Meta, &pk_entry_key("test_idx", pk_out))
+                .get(Namespace::Meta, &pk_entry_key("test_idx", pk_out))
+                .await
                 .unwrap()
                 .is_none(),
             "pk reverse entry for outside must be purged"
@@ -134,15 +139,14 @@ mod tests {
     }
 
     /// Non-windowed index: purge_outside_window must be a no-op (no window def stored).
-    #[test]
-    fn non_windowed_purge_is_noop() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_windowed_purge_is_noop() {
         use super::keys::{SCORE_TS_SEPARATOR, f64_to_sort_bytes, score_prefix};
         use super::window::purge_outside_window;
-        use crate::storage::engine::{StorageEngineSync, WriteOp};
+        use crate::storage::engine::WriteOp;
         use nodedb_types::Namespace;
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let db = rt.block_on(make_db());
+        let db = make_db().await;
         let engine = &db.query_engine;
 
         let score_bytes = f64_to_sort_bytes(10.0);
@@ -154,20 +158,24 @@ mod tests {
 
         engine
             .storage
-            .batch_write_sync(&[WriteOp::Put {
+            .batch_write(&[WriteOp::Put {
                 ns: Namespace::Meta,
                 key: key.clone(),
                 value: vec![],
             }])
+            .await
             .unwrap();
 
         // No window def stored → purge is a no-op.
-        purge_outside_window(engine, "nw_idx", 9999999).unwrap();
+        purge_outside_window(engine, "nw_idx", 9999999)
+            .await
+            .unwrap();
 
         assert!(
             engine
                 .storage
-                .get_sync(Namespace::Meta, &key)
+                .get(Namespace::Meta, &key)
+                .await
                 .unwrap()
                 .is_some(),
             "non-windowed entry must not be purged"
@@ -191,9 +199,10 @@ mod tests {
             1_000_000,
             2_000_000,
         )
+        .await
         .unwrap();
 
-        let def = load_window_def(engine, "leaderboard").unwrap();
+        let def = load_window_def(engine, "leaderboard").await.unwrap();
         assert!(def.is_some(), "window def must be persisted");
         let def = def.unwrap();
         assert_eq!(def.window_type, "tumbling");
@@ -209,9 +218,11 @@ mod tests {
         let db = make_db().await;
         let engine = &db.query_engine;
 
-        super::kv_register_sorted_index(engine, "plain_idx", "none", "", 0, 0).unwrap();
+        super::kv_register_sorted_index(engine, "plain_idx", "none", "", 0, 0)
+            .await
+            .unwrap();
 
-        let def = load_window_def(engine, "plain_idx").unwrap();
+        let def = load_window_def(engine, "plain_idx").await.unwrap();
         assert!(def.is_none(), "no window def for non-windowed index");
     }
 }

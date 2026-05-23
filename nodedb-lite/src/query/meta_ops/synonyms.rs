@@ -9,7 +9,7 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// Key prefix for synonym groups in `Namespace::Meta`.
 const SYNONYM_PREFIX: &str = "synonym/";
@@ -18,7 +18,7 @@ const SYNONYM_PREFIX: &str = "synonym/";
 ///
 /// The `record_json` field is stored verbatim under `synonym/<tenant>/<name>`.
 /// The group name is extracted from the JSON `"name"` field.
-pub async fn handle_put_synonym_group<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_put_synonym_group<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     tenant_id: u64,
     record_json: &str,
@@ -37,7 +37,7 @@ pub async fn handle_put_synonym_group<S: StorageEngine + StorageEngineSync>(
 }
 
 /// `DeleteSynonymGroup` — remove a synonym group by tenant + name.
-pub async fn handle_delete_synonym_group<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_delete_synonym_group<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     tenant_id: u64,
     name: &str,

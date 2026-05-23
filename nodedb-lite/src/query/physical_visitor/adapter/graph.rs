@@ -16,13 +16,13 @@ use crate::query::engine::LiteQueryEngine;
 use crate::query::graph_ops::{
     algorithms, edges, fusion, labels, match_engine, stats, temporal, traversal,
 };
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 pub(crate) type GraphFut<'a> =
     Pin<Box<dyn Future<Output = Result<QueryResult, LiteError>> + Send + 'a>>;
 
 /// Dispatch a `GraphOp` to the correct Lite handler.
-pub(crate) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     op: &GraphOp,
 ) -> Result<GraphFut<'a>, LiteError> {

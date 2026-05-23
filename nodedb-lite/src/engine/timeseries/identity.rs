@@ -73,11 +73,11 @@ impl LiteIdentity {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::redb_storage::RedbStorage;
+    use crate::storage::pagedb_storage::PagedbStorageMem;
 
     #[tokio::test]
     async fn first_open_creates_identity() {
-        let storage = RedbStorage::open_in_memory().unwrap();
+        let storage = PagedbStorageMem::open_in_memory().await.unwrap();
         let identity = LiteIdentity::load_or_create(&storage).await.unwrap();
         assert!(!identity.lite_id.is_empty());
         assert_eq!(identity.epoch, 1);
@@ -85,7 +85,7 @@ mod tests {
 
     #[tokio::test]
     async fn second_open_increments_epoch() {
-        let storage = RedbStorage::open_in_memory().unwrap();
+        let storage = PagedbStorageMem::open_in_memory().await.unwrap();
         let id1 = LiteIdentity::load_or_create(&storage).await.unwrap();
         let id2 = LiteIdentity::load_or_create(&storage).await.unwrap();
         assert_eq!(id1.lite_id, id2.lite_id); // Same ID.
@@ -94,7 +94,7 @@ mod tests {
 
     #[tokio::test]
     async fn regenerate_changes_id() {
-        let storage = RedbStorage::open_in_memory().unwrap();
+        let storage = PagedbStorageMem::open_in_memory().await.unwrap();
         let mut id = LiteIdentity::load_or_create(&storage).await.unwrap();
         let original_id = id.lite_id.clone();
         id.regenerate(&storage).await.unwrap();

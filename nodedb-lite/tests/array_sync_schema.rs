@@ -19,7 +19,7 @@ use nodedb_array::schema::cell_order::{CellOrder, TileOrder};
 use nodedb_array::schema::dim_spec::{DimSpec, DimType};
 use nodedb_array::types::cell_value::value::CellValue;
 use nodedb_array::types::domain::{Domain, DomainBound};
-use nodedb_lite::storage::redb_storage::RedbStorage;
+use nodedb_lite::PagedbStorageMem;
 use nodedb_lite::sync::array::inbound::outcome::InboundOutcome;
 use nodedb_lite::sync::array::replica_state::ReplicaState;
 use nodedb_lite::sync::array::schema_registry::SchemaRegistry;
@@ -46,18 +46,26 @@ fn two_attr_schema(name: &str) -> ArraySchema {
 /// "Origin" registers a schema, exports its Loro snapshot, and ships it to
 /// "Lite B" via an `ArraySchemaSyncMsg`. After import, Lite B can receive ops
 /// that carry that schema_hlc.
-#[test]
-fn schema_import_from_origin_enables_op_apply() {
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_import_from_origin_enables_op_apply() {
     // "Origin" registry — the authoritative schema holder.
-    let origin_storage = Arc::new(RedbStorage::open_in_memory().expect("origin storage"));
-    let origin_replica =
-        Arc::new(ReplicaState::load_or_init(&*origin_storage).expect("origin replica"));
+    let origin_storage = Arc::new(
+        PagedbStorageMem::open_in_memory()
+            .await
+            .expect("origin storage"),
+    );
+    let origin_replica = Arc::new(
+        ReplicaState::load_or_init(&*origin_storage)
+            .await
+            .expect("origin replica"),
+    );
     let origin_schemas =
         SchemaRegistry::new(Arc::clone(&origin_storage), Arc::clone(&origin_replica));
 
     let schema = two_attr_schema("cross");
     origin_schemas
         .put_schema("cross", &schema)
+        .await
         .expect("origin put_schema");
 
     let snapshot_payload = origin_schemas
@@ -69,14 +77,15 @@ fn schema_import_from_origin_enables_op_apply() {
         .expect("origin schema_hlc");
 
     // "Lite B" — receives schema from Origin.
-    let receiver = common::SyncHarness::new_in_memory();
+    let receiver = common::SyncHarness::new_in_memory().await;
 
     // Array created in the engine so the apply can write cells,
     // but schema_hlc is still ZERO until we import.
     {
-        let mut state = receiver.array_state.lock().expect("lock");
+        let mut state = receiver.array_state.lock().await;
         state
             .create_array(&receiver.storage, "cross", two_attr_schema("cross"))
+            .await
             .expect("create_array");
     }
 
@@ -96,6 +105,7 @@ fn schema_import_from_origin_enables_op_apply() {
     let outcome = receiver
         .inbound
         .handle_schema(&schema_msg)
+        .await
         .expect("handle_schema");
     assert_eq!(outcome, InboundOutcome::SchemaImported);
 
@@ -113,15 +123,20 @@ fn schema_import_from_origin_enables_op_apply() {
 }
 
 /// Ops that reference the imported schema_hlc can now apply after import.
-#[test]
-fn ops_with_imported_schema_hlc_apply_correctly() {
-    let origin_storage = Arc::new(RedbStorage::open_in_memory().expect("storage"));
-    let origin_replica = Arc::new(ReplicaState::load_or_init(&*origin_storage).expect("replica"));
+#[tokio::test(flavor = "multi_thread")]
+async fn ops_with_imported_schema_hlc_apply_correctly() {
+    let origin_storage = Arc::new(PagedbStorageMem::open_in_memory().await.expect("storage"));
+    let origin_replica = Arc::new(
+        ReplicaState::load_or_init(&*origin_storage)
+            .await
+            .expect("replica"),
+    );
     let origin_schemas =
         SchemaRegistry::new(Arc::clone(&origin_storage), Arc::clone(&origin_replica));
 
     origin_schemas
         .put_schema("remote", &common::simple_schema("remote"))
+        .await
         .expect("put");
     let origin_hlc = origin_schemas.schema_hlc("remote").expect("hlc");
     let snapshot = origin_schemas
@@ -129,11 +144,12 @@ fn ops_with_imported_schema_hlc_apply_correctly() {
         .expect("export")
         .expect("Some");
 
-    let receiver = common::SyncHarness::new_in_memory();
+    let receiver = common::SyncHarness::new_in_memory().await;
     {
-        let mut state = receiver.array_state.lock().expect("lock");
+        let mut state = receiver.array_state.lock().await;
         state
             .create_array(&receiver.storage, "remote", common::simple_schema("remote"))
+            .await
             .expect("create");
     }
 
@@ -146,6 +162,7 @@ fn ops_with_imported_schema_hlc_apply_correctly() {
             schema_hlc_bytes: origin_hlc.to_bytes(),
             snapshot_payload: snapshot,
         })
+        .await
         .expect("handle_schema");
 
     // Now deliver an op carrying origin_hlc as schema_hlc.
@@ -158,17 +175,17 @@ fn ops_with_imported_schema_hlc_apply_correctly() {
         "op with imported schema_hlc must apply"
     );
 
-    receiver.flush("remote");
-    let val = receiver.read_coord("remote", 4, i64::MAX);
+    receiver.flush("remote").await;
+    let val = receiver.read_coord("remote", 4, i64::MAX).await;
     assert_eq!(val, Some(CellValue::Float64(7.5)));
 }
 
 /// Calling `put_schema` again on an existing array (schema "ALTER") advances
 /// the schema_hlc so the new HLC is >= the old one.
-#[test]
-fn put_schema_again_advances_schema_hlc() {
-    let harness = common::SyncHarness::new_in_memory();
-    harness.create_array("evolve");
+#[tokio::test(flavor = "multi_thread")]
+async fn put_schema_again_advances_schema_hlc() {
+    let harness = common::SyncHarness::new_in_memory().await;
+    harness.create_array("evolve").await;
 
     let hlc_v1 = harness.schema_hlc("evolve");
 
@@ -176,6 +193,7 @@ fn put_schema_again_advances_schema_hlc() {
     harness
         .schemas
         .put_schema("evolve", &two_attr_schema("evolve"))
+        .await
         .expect("put_schema second call");
 
     let hlc_v2 = harness.schema_hlc("evolve");

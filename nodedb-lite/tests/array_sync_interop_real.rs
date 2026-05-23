@@ -26,18 +26,20 @@ use nodedb_array::sync::op::{ArrayOp, ArrayOpHeader, ArrayOpKind};
 use nodedb_array::sync::op_codec;
 use nodedb_array::types::cell_value::value::CellValue;
 use nodedb_array::types::coord::value::CoordValue;
-use nodedb_lite::NodeDbLite;
-use nodedb_lite::storage::redb_storage::RedbStorage;
 use nodedb_lite::sync::SyncDelegate;
+use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 use nodedb_types::sync::wire::array::{ArrayDeltaBatchMsg, ArrayDeltaMsg};
 
 use common::schema::simple_schema;
 
 /// Open a fresh in-memory `NodeDbLite` with a named array pre-registered.
-async fn open_lite_with_array(array_name: &str) -> Arc<NodeDbLite<RedbStorage>> {
-    let storage = RedbStorage::open_in_memory().expect("open_in_memory");
+async fn open_lite_with_array(array_name: &str) -> Arc<NodeDbLite<PagedbStorageMem>> {
+    let storage = PagedbStorageMem::open_in_memory()
+        .await
+        .expect("open_in_memory");
     let lite = Arc::new(NodeDbLite::open(storage, 1).await.expect("open"));
     lite.create_array(array_name, simple_schema(array_name))
+        .await
         .expect("create_array");
     lite
 }
@@ -47,7 +49,7 @@ async fn open_lite_with_array(array_name: &str) -> Arc<NodeDbLite<RedbStorage>> 
 /// `handle_array_delta` — the method `dispatch_frame` calls on every
 /// `SyncMessageType::ArrayDelta` frame — applies a Put op, updates local
 /// engine state, and returns an `ArrayAckMsg`.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn array_delta_apply_and_ack() {
     let lite = open_lite_with_array("arr").await;
 
@@ -100,6 +102,7 @@ async fn array_delta_apply_and_ack() {
     // The cell must be visible in the local engine.
     let payload = lite
         .array_read_coord("arr", &[CoordValue::Int64(5)], Some(2_000))
+        .await
         .expect("array_read_coord");
     assert!(payload.is_some(), "cell must be present after apply");
     let cell = payload.unwrap();
@@ -114,7 +117,7 @@ async fn array_delta_apply_and_ack() {
 
 /// Applying the same delta twice returns `None` on the second call (idempotent).
 /// `dispatch_frame` must not enqueue a second ack for the same op.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn array_delta_idempotent_no_ack() {
     let lite = open_lite_with_array("idem").await;
     let schema_hlc = lite.array_schema_hlc("idem").expect("schema_hlc");
@@ -160,7 +163,7 @@ async fn array_delta_idempotent_no_ack() {
 
 /// `handle_array_delta_batch` applies multiple ops and returns one ack
 /// carrying the highest-HLC applied op.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn array_delta_batch_apply_and_ack() {
     let lite = open_lite_with_array("batch").await;
     let schema_hlc = lite.array_schema_hlc("batch").expect("schema_hlc");
@@ -213,6 +216,7 @@ async fn array_delta_batch_apply_and_ack() {
     for i in 1i64..=3 {
         let payload = lite
             .array_read_coord("batch", &[CoordValue::Int64(i)], Some(10_000))
+            .await
             .expect("array_read_coord");
         assert!(
             payload.is_some(),

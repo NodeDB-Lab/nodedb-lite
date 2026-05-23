@@ -25,6 +25,9 @@
  * Opaque handle to a NodeDB-Lite database.
  *
  * Created by `nodedb_open`, freed by `nodedb_close`.
+ *
+ * `_tmpdir` is `Some` when the database was opened with the `:memory:` path.
+ * The directory is deleted when the handle is dropped.
  */
 typedef struct NodeDbNodeDbHandle NodeDbNodeDbHandle;
 

@@ -6,7 +6,7 @@ use nodedb_types::result::QueryResult;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync, WriteOp};
+use crate::storage::engine::{StorageEngine, WriteOp};
 
 use super::keys::score_prefix;
 use super::window::{WindowDef, delete_window_def, store_window_def};
@@ -22,7 +22,7 @@ use super::window::{WindowDef, delete_window_def, store_window_def};
 /// Sliding and session windows use `window_start_ms` as the window size in ms
 /// (duration between window_start_ms and window_end_ms when both are non-zero,
 /// or window_start_ms alone if window_end_ms is 0).
-pub fn kv_register_sorted_index<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_register_sorted_index<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     index_name: &str,
     window_type: &str,
@@ -41,7 +41,7 @@ pub fn kv_register_sorted_index<S: StorageEngine + StorageEngineSync>(
                 window_start_ms,
                 window_end_ms,
             };
-            store_window_def(engine, index_name, &def)?;
+            store_window_def(engine, index_name, &def).await?;
         }
         "sliding" | "session" => {
             // For sliding/session, window_start_ms holds the window duration.
@@ -62,7 +62,7 @@ pub fn kv_register_sorted_index<S: StorageEngine + StorageEngineSync>(
                 window_start_ms: size_ms,
                 window_end_ms: 0,
             };
-            store_window_def(engine, index_name, &def)?;
+            store_window_def(engine, index_name, &def).await?;
         }
         other => {
             return Err(LiteError::Storage {
@@ -82,14 +82,15 @@ pub fn kv_register_sorted_index<S: StorageEngine + StorageEngineSync>(
 }
 
 /// DropSortedIndex: remove all entries for a sorted index.
-pub fn kv_drop_sorted_index<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_drop_sorted_index<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     index_name: &str,
 ) -> Result<QueryResult, LiteError> {
     let score_pfx = score_prefix(index_name);
     let score_entries = engine
         .storage
-        .scan_range_bounded_sync(Namespace::Meta, Some(score_pfx.as_bytes()), None, None)
+        .scan_range_bounded(Namespace::Meta, Some(score_pfx.as_bytes()), None, None)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -97,7 +98,8 @@ pub fn kv_drop_sorted_index<S: StorageEngine + StorageEngineSync>(
     let pk_pfx = format!("kv_sorted:{index_name}:pk:");
     let pk_entries = engine
         .storage
-        .scan_range_bounded_sync(Namespace::Meta, Some(pk_pfx.as_bytes()), None, None)
+        .scan_range_bounded(Namespace::Meta, Some(pk_pfx.as_bytes()), None, None)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -125,14 +127,15 @@ pub fn kv_drop_sorted_index<S: StorageEngine + StorageEngineSync>(
     if !ops.is_empty() {
         engine
             .storage
-            .batch_write_sync(&ops)
+            .batch_write(&ops)
+            .await
             .map_err(|e| LiteError::Storage {
                 detail: e.to_string(),
             })?;
     }
 
     // Remove the window definition if present.
-    delete_window_def(engine, index_name)?;
+    delete_window_def(engine, index_name).await?;
 
     Ok(QueryResult {
         columns: vec![],

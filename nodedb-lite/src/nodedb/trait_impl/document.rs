@@ -8,9 +8,9 @@ use nodedb_types::error::{NodeDbError, NodeDbResult};
 use crate::nodedb::LockExt;
 use crate::nodedb::NodeDbLite;
 use crate::nodedb::convert::{loro_value_to_document, value_to_loro};
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
-impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
+impl<S: StorageEngine> NodeDbLite<S> {
     /// Read a single document by id from the CRDT store and decode it into the
     /// public `Document` type. Returns `Ok(None)` if the key is absent or has
     /// been tombstoned.

@@ -8,7 +8,7 @@
 //!   on-disk path, query returns identical results (no rebuild from CRDT).
 
 use nodedb_lite::storage::engine::StorageEngine;
-use nodedb_lite::{NodeDbLite, RedbStorage};
+use nodedb_lite::{NodeDbLite, PagedbStorageDefault, PagedbStorageMem};
 use nodedb_spatial::predicates::{contains::st_contains, intersects::st_intersects};
 use nodedb_types::BoundingBox;
 use nodedb_types::geometry::Geometry;
@@ -56,8 +56,10 @@ fn western_europe_polygon() -> Geometry {
     ]])
 }
 
-async fn open_in_memory() -> NodeDbLite<RedbStorage> {
-    let storage = RedbStorage::open_in_memory().expect("open in-memory storage");
+async fn open_in_memory() -> NodeDbLite<PagedbStorageMem> {
+    let storage = PagedbStorageMem::open_in_memory()
+        .await
+        .expect("open in-memory storage");
     NodeDbLite::open(storage, 1).await.expect("open NodeDbLite")
 }
 
@@ -204,7 +206,9 @@ async fn spatial_index_persists_across_restart() {
 
     // ── First open: insert points, query, flush, drop ────────────────────────
     {
-        let storage = RedbStorage::open(&path).expect("open storage");
+        let storage = PagedbStorageDefault::open(&path)
+            .await
+            .expect("open storage");
         let db = NodeDbLite::open(storage, 42)
             .await
             .expect("open NodeDbLite");
@@ -230,7 +234,9 @@ async fn spatial_index_persists_across_restart() {
     // Sanity: Namespace::Spatial must have entries after flush.
     {
         use nodedb_types::Namespace;
-        let storage = RedbStorage::open(&path).expect("storage for count check");
+        let storage = PagedbStorageDefault::open(&path)
+            .await
+            .expect("storage for count check");
         let spatial_count = storage
             .count(Namespace::Spatial)
             .await
@@ -243,7 +249,9 @@ async fn spatial_index_persists_across_restart() {
 
     // ── Second open: reopen, query, assert identical results ─────────────────
     {
-        let storage = RedbStorage::open(&path).expect("reopen storage");
+        let storage = PagedbStorageDefault::open(&path)
+            .await
+            .expect("reopen storage");
         let db = NodeDbLite::open(storage, 42)
             .await
             .expect("reopen NodeDbLite");
@@ -291,7 +299,9 @@ async fn upsert_and_delete_after_restart() {
     // Insert "london", flush, reopen, upsert "london" to a new position,
     // verify old position no longer returns and new position does.
     {
-        let storage = RedbStorage::open(&path).expect("open storage");
+        let storage = PagedbStorageDefault::open(&path)
+            .await
+            .expect("open storage");
         let db = NodeDbLite::open(storage, 1).await.expect("open db");
         db.spatial_insert(
             COLLECTION,
@@ -303,7 +313,9 @@ async fn upsert_and_delete_after_restart() {
     }
 
     {
-        let storage = RedbStorage::open(&path).expect("reopen storage");
+        let storage = PagedbStorageDefault::open(&path)
+            .await
+            .expect("reopen storage");
         let db = NodeDbLite::open(storage, 1).await.expect("reopen db");
 
         // Upsert london to a totally different location (south Atlantic).

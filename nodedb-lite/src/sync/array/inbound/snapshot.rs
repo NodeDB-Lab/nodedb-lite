@@ -8,12 +8,12 @@ use nodedb_array::sync::snapshot::{SnapshotChunk, SnapshotHeader, assemble_chunk
 use nodedb_types::sync::wire::array::{ArraySnapshotChunkMsg, ArraySnapshotMsg};
 
 use crate::error::LiteError;
-use crate::storage::engine::StorageEngineSync;
+use crate::storage::engine::StorageEngine;
 
 use super::dispatcher::{ArrayInbound, SnapshotAssembly};
 use super::outcome::InboundOutcome;
 
-impl<S: StorageEngineSync> ArrayInbound<S> {
+impl<S: StorageEngine> ArrayInbound<S> {
     /// Buffer an incoming snapshot header.
     ///
     /// Must arrive before any [`Self::handle_snapshot_chunk`] calls for the
@@ -131,14 +131,18 @@ mod tests {
     use super::super::fixtures::{hlc, make_inbound, simple_schema};
     use super::super::outcome::InboundOutcome;
 
-    #[test]
-    fn snapshot_chunks_assemble_and_apply() {
-        let (inbound, schemas, _pending, storage) = make_inbound();
-        schemas.put_schema("snap", &simple_schema("snap")).unwrap();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn snapshot_chunks_assemble_and_apply() {
+        let (inbound, schemas, _pending, storage) = make_inbound().await;
+        schemas
+            .put_schema("snap", &simple_schema("snap"))
+            .await
+            .unwrap();
         {
-            let mut state = inbound.engine.array_state.lock().unwrap();
+            let mut state = inbound.engine.array_state.lock().await;
             state
                 .create_array(&storage, "snap", simple_schema("snap"))
+                .await
                 .unwrap();
         }
         let schema_hlc = schemas.schema_hlc("snap").unwrap();
@@ -220,14 +224,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn snapshot_partial_returns_partial() {
-        let (inbound, schemas, _pending, storage) = make_inbound();
-        schemas.put_schema("p", &simple_schema("p")).unwrap();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn snapshot_partial_returns_partial() {
+        let (inbound, schemas, _pending, storage) = make_inbound().await;
+        schemas.put_schema("p", &simple_schema("p")).await.unwrap();
         {
-            let mut state = inbound.engine.array_state.lock().unwrap();
+            let mut state = inbound.engine.array_state.lock().await;
             state
                 .create_array(&storage, "p", simple_schema("p"))
+                .await
                 .unwrap();
         }
         let schema_hlc = schemas.schema_hlc("p").unwrap();

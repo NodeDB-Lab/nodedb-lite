@@ -9,11 +9,11 @@
 use std::sync::Arc;
 
 use nodedb_client::NodeDb;
-use nodedb_lite::{NodeDbLite, RedbStorage};
+use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 use nodedb_types::value::Value;
 
-async fn open_db() -> Arc<NodeDbLite<RedbStorage>> {
-    let storage = RedbStorage::open_in_memory().unwrap();
+async fn open_db() -> Arc<NodeDbLite<PagedbStorageMem>> {
+    let storage = PagedbStorageMem::open_in_memory().await.unwrap();
     Arc::new(NodeDbLite::open(storage, 1).await.unwrap())
 }
 

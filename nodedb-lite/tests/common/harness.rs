@@ -2,9 +2,9 @@
 //! outbound emitter, and engine state.
 //!
 //! Bypasses WebSocket transport; exercises wire-message handlers directly
-//! against an in-memory redb store.
+//! against an in-memory pagedb store.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use nodedb_array::schema::array_schema::ArraySchema;
 use nodedb_array::sync::hlc::Hlc;
@@ -12,8 +12,8 @@ use nodedb_array::sync::op::ArrayOp;
 use nodedb_array::sync::op_codec;
 use nodedb_array::types::cell_value::value::CellValue;
 use nodedb_array::types::coord::value::CoordValue;
+use nodedb_lite::PagedbStorageMem;
 use nodedb_lite::engine::array::engine::ArrayEngineState;
-use nodedb_lite::storage::redb_storage::RedbStorage;
 use nodedb_lite::sync::array::catchup::CatchupTracker;
 use nodedb_lite::sync::array::inbound::apply::LiteApplyEngine;
 use nodedb_lite::sync::array::inbound::dispatcher::ArrayInbound;
@@ -28,47 +28,62 @@ use nodedb_types::sync::wire::array::ArrayDeltaMsg;
 use super::schema::simple_schema;
 
 /// Convenience constructor used by outbound-loop tests.
-pub fn make_outbound_harness() -> SyncHarness {
-    SyncHarness::new_in_memory()
+pub async fn make_outbound_harness() -> SyncHarness {
+    SyncHarness::new_in_memory().await
 }
 
 pub struct SyncHarness {
-    pub inbound: ArrayInbound<RedbStorage>,
-    pub outbound: ArrayOutbound<RedbStorage>,
-    pub schemas: Arc<SchemaRegistry<RedbStorage>>,
-    pub pending: Arc<PendingQueue<RedbStorage>>,
-    pub op_log: Arc<RedbOpLog<RedbStorage>>,
-    pub storage: Arc<RedbStorage>,
+    pub inbound: ArrayInbound<PagedbStorageMem>,
+    pub outbound: ArrayOutbound<PagedbStorageMem>,
+    pub schemas: Arc<SchemaRegistry<PagedbStorageMem>>,
+    pub pending: Arc<PendingQueue<PagedbStorageMem>>,
+    pub op_log: Arc<RedbOpLog<PagedbStorageMem>>,
+    pub storage: Arc<PagedbStorageMem>,
     /// Direct handle to the shared engine state for AS-OF queries in tests.
-    pub array_state: Arc<Mutex<ArrayEngineState>>,
-    pub catchup: Arc<CatchupTracker<RedbStorage>>,
+    pub array_state: Arc<tokio::sync::Mutex<ArrayEngineState>>,
+    pub catchup: Arc<CatchupTracker<PagedbStorageMem>>,
 }
 
 impl SyncHarness {
-    /// Create a harness backed by a fresh in-memory redb database.
-    pub fn new_in_memory() -> Self {
-        let storage = Arc::new(RedbStorage::open_in_memory().expect("open_in_memory"));
-        Self::from_storage(storage)
+    /// Create a harness backed by a fresh in-memory pagedb database.
+    pub async fn new_in_memory() -> Self {
+        let storage = Arc::new(
+            PagedbStorageMem::open_in_memory()
+                .await
+                .expect("open_in_memory"),
+        );
+        Self::from_storage(storage).await
     }
 
     /// Create a harness backed by the given storage (allows durability tests).
-    pub fn from_storage(storage: Arc<RedbStorage>) -> Self {
-        let replica = Arc::new(ReplicaState::load_or_init(&*storage).expect("load_or_init"));
+    pub async fn from_storage(storage: Arc<PagedbStorageMem>) -> Self {
+        let replica = Arc::new(
+            ReplicaState::load_or_init(&*storage)
+                .await
+                .expect("load_or_init"),
+        );
         let schemas = Arc::new(SchemaRegistry::new(
             Arc::clone(&storage),
             Arc::clone(&replica),
         ));
         let op_log = Arc::new(RedbOpLog::new(Arc::clone(&storage)));
         let pending = Arc::new(PendingQueue::new(Arc::clone(&storage)));
-        let array_state = Arc::new(Mutex::new(ArrayEngineState::new()));
+        let array_state = Arc::new(tokio::sync::Mutex::new(ArrayEngineState::new()));
 
-        let engine = Arc::new(LiteApplyEngine::new(
-            Arc::clone(&storage),
-            Arc::clone(&array_state),
-            Arc::clone(&schemas),
-            Arc::clone(&op_log),
-        ));
-        let catchup = Arc::new(CatchupTracker::load(Arc::clone(&storage)).expect("catchup load"));
+        let engine = Arc::new(
+            LiteApplyEngine::new(
+                Arc::clone(&storage),
+                Arc::clone(&array_state),
+                Arc::clone(&schemas),
+                Arc::clone(&op_log),
+            )
+            .await,
+        );
+        let catchup = Arc::new(
+            CatchupTracker::load(Arc::clone(&storage))
+                .await
+                .expect("catchup load"),
+        );
 
         let inbound = ArrayInbound::new(
             engine,
@@ -99,21 +114,31 @@ impl SyncHarness {
     }
 
     /// Register the given schema in the SchemaRegistry AND the engine catalog.
-    pub fn create_array(&self, name: &str) {
+    pub async fn create_array(&self, name: &str) {
         let schema = simple_schema(name);
-        self.schemas.put_schema(name, &schema).expect("put_schema");
-        let mut state = self.array_state.lock().expect("lock");
-        state
+        self.schemas
+            .put_schema(name, &schema)
+            .await
+            .expect("put_schema");
+        self.array_state
+            .lock()
+            .await
             .create_array(&self.storage, name, simple_schema(name))
+            .await
             .expect("create_array");
     }
 
     /// Register a custom schema.
-    pub fn create_array_with_schema(&self, name: &str, schema: ArraySchema) {
-        self.schemas.put_schema(name, &schema).expect("put_schema");
-        let mut state = self.array_state.lock().expect("lock");
-        state
+    pub async fn create_array_with_schema(&self, name: &str, schema: ArraySchema) {
+        self.schemas
+            .put_schema(name, &schema)
+            .await
+            .expect("put_schema");
+        self.array_state
+            .lock()
+            .await
             .create_array(&self.storage, name, schema)
+            .await
             .expect("create_array");
     }
 
@@ -138,8 +163,8 @@ impl SyncHarness {
     ///
     /// Returns the first attribute value of the live cell, or `None` if the
     /// cell is absent, tombstoned, or erased.
-    pub fn read_coord(&self, array: &str, coord_x: i64, as_of_ms: i64) -> Option<CellValue> {
-        let state = self.array_state.lock().expect("lock");
+    pub async fn read_coord(&self, array: &str, coord_x: i64, as_of_ms: i64) -> Option<CellValue> {
+        let state = self.array_state.lock().await;
         let cell = state
             .read_coord(
                 &self.storage,
@@ -147,13 +172,18 @@ impl SyncHarness {
                 &[CoordValue::Int64(coord_x)],
                 as_of_ms,
             )
+            .await
             .expect("read_coord");
         cell.and_then(|c| c.attrs.into_iter().next())
     }
 
     /// Flush buffered writes for the named array to storage.
-    pub fn flush(&self, array: &str) {
-        let mut state = self.array_state.lock().expect("lock");
-        state.flush(&self.storage, array).expect("flush");
+    pub async fn flush(&self, array: &str) {
+        self.array_state
+            .lock()
+            .await
+            .flush(&self.storage, array)
+            .await
+            .expect("flush");
     }
 }

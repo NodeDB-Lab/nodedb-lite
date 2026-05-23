@@ -16,28 +16,32 @@ use nodedb_lite::sync::array::inbound::outcome::InboundOutcome;
 use nodedb_types::sync::wire::array::{ArrayRejectMsg, ArrayRejectReason};
 
 /// Helper: enqueue one op in the pending queue and return its HLC bytes.
-fn enqueue_and_get_hlc_bytes(harness: &common::SyncHarness, array: &str) -> [u8; 18] {
+async fn enqueue_and_get_hlc_bytes(harness: &common::SyncHarness, array: &str) -> [u8; 18] {
     let schema_hlc = harness.schema_hlc(array);
     let rep = common::replica(7);
     let op = common::put_op(array, 1, 55.0, 300, schema_hlc, rep);
 
     // Enqueue directly into the pending queue (simulates a locally-emitted op
     // that hasn't been acked by Origin yet).
-    harness.pending.enqueue(&op).expect("enqueue pending op");
+    harness
+        .pending
+        .enqueue(&op)
+        .await
+        .expect("enqueue pending op");
 
     op.header.hlc.to_bytes()
 }
 
 /// Origin rejects an op with `ArrayUnknown`; the op is removed from the
 /// pending queue and the outcome is `RejectAcknowledged`.
-#[test]
-fn reject_array_unknown_drops_from_pending() {
-    let harness = common::SyncHarness::new_in_memory();
-    harness.create_array("rej_arr");
+#[tokio::test(flavor = "multi_thread")]
+async fn reject_array_unknown_drops_from_pending() {
+    let harness = common::SyncHarness::new_in_memory().await;
+    harness.create_array("rej_arr").await;
 
-    let hlc_bytes = enqueue_and_get_hlc_bytes(&harness, "rej_arr");
+    let hlc_bytes = enqueue_and_get_hlc_bytes(&harness, "rej_arr").await;
 
-    let before = harness.pending.len().expect("len");
+    let before = harness.pending.len().await.expect("len");
     assert_eq!(before, 1, "one op must be pending before reject");
 
     let reject_msg = ArrayRejectMsg {
@@ -50,6 +54,7 @@ fn reject_array_unknown_drops_from_pending() {
     let outcome = harness
         .inbound
         .handle_reject(&reject_msg)
+        .await
         .expect("handle_reject");
     assert_eq!(
         outcome,
@@ -57,17 +62,17 @@ fn reject_array_unknown_drops_from_pending() {
         "reject must return RejectAcknowledged"
     );
 
-    let after = harness.pending.len().expect("len");
+    let after = harness.pending.len().await.expect("len");
     assert_eq!(after, 0, "rejected op must be removed from pending queue");
 }
 
 /// Rejection with `RetentionFloor` marks the array as needing a full catch-up.
-#[test]
-fn reject_retention_floor_marks_catchup_needed() {
-    let harness = common::SyncHarness::new_in_memory();
-    harness.create_array("ret_floor");
+#[tokio::test(flavor = "multi_thread")]
+async fn reject_retention_floor_marks_catchup_needed() {
+    let harness = common::SyncHarness::new_in_memory().await;
+    harness.create_array("ret_floor").await;
 
-    let hlc_bytes = enqueue_and_get_hlc_bytes(&harness, "ret_floor");
+    let hlc_bytes = enqueue_and_get_hlc_bytes(&harness, "ret_floor").await;
 
     let reject_msg = ArrayRejectMsg {
         array: "ret_floor".into(),
@@ -79,6 +84,7 @@ fn reject_retention_floor_marks_catchup_needed() {
     harness
         .inbound
         .handle_reject(&reject_msg)
+        .await
         .expect("handle_reject");
 
     // Verify the catchup tracker now flags this array.
@@ -91,10 +97,10 @@ fn reject_retention_floor_marks_catchup_needed() {
 
 /// Rejecting an op that is no longer in the pending queue is a no-op
 /// (idempotent) — returns `RejectAcknowledged` without error.
-#[test]
-fn reject_missing_op_is_idempotent() {
-    let harness = common::SyncHarness::new_in_memory();
-    harness.create_array("ghost");
+#[tokio::test(flavor = "multi_thread")]
+async fn reject_missing_op_is_idempotent() {
+    let harness = common::SyncHarness::new_in_memory().await;
+    harness.create_array("ghost").await;
 
     let rep = common::replica(1);
     let schema_hlc = harness.schema_hlc("ghost");
@@ -111,6 +117,7 @@ fn reject_missing_op_is_idempotent() {
     let outcome = harness
         .inbound
         .handle_reject(&reject_msg)
+        .await
         .expect("handle_reject must not fail for missing op");
     assert_eq!(outcome, InboundOutcome::RejectAcknowledged);
 }
@@ -118,8 +125,8 @@ fn reject_missing_op_is_idempotent() {
 /// Deliver an op whose `schema_hlc` is far in the future so the apply engine
 /// returns `SchemaTooNew`. This is not a wire rejection but an apply-level
 /// rejection — surfaces as `InboundOutcome::Rejected(SchemaTooNew)`.
-#[test]
-fn schema_too_new_surfaces_as_rejected_outcome() {
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_too_new_surfaces_as_rejected_outcome() {
     use nodedb_array::sync::apply::ApplyRejection;
     use nodedb_array::sync::hlc::Hlc;
     use nodedb_array::sync::op::{ArrayOp, ArrayOpHeader, ArrayOpKind};
@@ -128,8 +135,8 @@ fn schema_too_new_surfaces_as_rejected_outcome() {
     use nodedb_array::types::coord::value::CoordValue;
     use nodedb_types::sync::wire::array::ArrayDeltaMsg;
 
-    let harness = common::SyncHarness::new_in_memory();
-    harness.create_array("schema_rej");
+    let harness = common::SyncHarness::new_in_memory().await;
+    harness.create_array("schema_rej").await;
 
     // schema_hlc far in the future — apply engine doesn't know about it.
     let future_schema_hlc = Hlc::new(u64::MAX >> 16, 0, ReplicaId::new(99)).expect("valid HLC");

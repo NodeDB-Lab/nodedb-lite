@@ -10,7 +10,7 @@ use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::filter_convert::sql_filters_to_metadata;
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::adapter::LiteFut;
 
@@ -33,7 +33,7 @@ fn encode_filters(filters: &[Filter]) -> Result<Vec<u8>, LiteError> {
 
 /// Lower `SqlPlan::RecursiveScan` to `QueryOp::RecursiveScan`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn lower_recursive_scan<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_recursive_scan<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     base_filters: &[Filter],
@@ -65,7 +65,7 @@ pub(super) fn lower_recursive_scan<'a, S: StorageEngine + StorageEngineSync + 'a
 
 /// Lower `SqlPlan::RecursiveValue` to `QueryOp::RecursiveValue`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn lower_recursive_value<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_recursive_value<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     cte_name: &str,
     columns: &[String],
@@ -94,12 +94,16 @@ pub(super) fn lower_recursive_value<'a, S: StorageEngine + StorageEngineSync + '
 mod tests {
     use std::sync::Arc;
 
+    use crate::PagedbStorageMem;
     use crate::query::engine::LiteQueryEngine;
-    use crate::storage::redb_storage::RedbStorage;
 
-    fn make_engine() -> LiteQueryEngine<RedbStorage> {
+    async fn make_engine() -> LiteQueryEngine<PagedbStorageMem> {
         use std::sync::Mutex;
-        let storage = Arc::new(RedbStorage::open_in_memory().expect("in-memory redb"));
+        let storage = Arc::new(
+            PagedbStorageMem::open_in_memory()
+                .await
+                .expect("in-memory pagedb"),
+        );
         let crdt = Arc::new(Mutex::new(
             crate::engine::crdt::CrdtEngine::new(1).expect("crdt"),
         ));
@@ -117,8 +121,10 @@ mod tests {
             Arc::clone(&storage),
             100,
         ));
-        let array_state = Arc::new(Mutex::new(
-            crate::engine::array::engine::ArrayEngineState::open(&storage).expect("array"),
+        let array_state = Arc::new(tokio::sync::Mutex::new(
+            crate::engine::array::engine::ArrayEngineState::open(&storage)
+                .await
+                .expect("array"),
         ));
         let fts_state = Arc::new(crate::engine::fts::FtsState::new());
         let spatial = Arc::new(Mutex::new(
@@ -141,7 +147,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_recursive_value_counting() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         // WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 WHERE n < 5)
         let result = super::lower_recursive_value(
             &engine,
@@ -162,7 +168,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_recursive_scan_lower() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         let result = super::lower_recursive_scan(
             &engine,
             "nodes",

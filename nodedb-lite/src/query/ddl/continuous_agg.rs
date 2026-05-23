@@ -20,9 +20,9 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
-impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
+impl<S: StorageEngine> LiteQueryEngine<S> {
     /// Handle CREATE CONTINUOUS AGGREGATE.
     pub(in crate::query) async fn handle_create_continuous_aggregate(
         &self,

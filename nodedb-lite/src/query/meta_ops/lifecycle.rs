@@ -7,7 +7,7 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// `CreateSnapshot` dispatch target.
 ///
@@ -15,7 +15,7 @@ use crate::storage::engine::{StorageEngine, StorageEngineSync};
 /// or administrative CLI. Lite's `PlanVisitor` has no `create_snapshot` trait
 /// method and exposes no SQL syntax that produces this variant. The `StorageEngine`
 /// trait has no snapshot API. No valid Lite deployment-shape code path reaches here.
-pub async fn handle_create_snapshot<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_create_snapshot<S: StorageEngine>(
     _engine: &LiteQueryEngine<S>,
 ) -> Result<QueryResult, LiteError> {
     unreachable!(
@@ -30,7 +30,7 @@ pub async fn handle_create_snapshot<S: StorageEngine + StorageEngineSync>(
 /// Lite's `PlanVisitor` has no `compact` trait method and exposes no SQL syntax
 /// that produces this variant. The `StorageEngine` trait has no compact entry
 /// point. No valid Lite deployment-shape code path reaches here.
-pub async fn handle_compact<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_compact<S: StorageEngine>(
     _engine: &LiteQueryEngine<S>,
 ) -> Result<QueryResult, LiteError> {
     unreachable!(
@@ -40,7 +40,7 @@ pub async fn handle_compact<S: StorageEngine + StorageEngineSync>(
 }
 
 /// `Checkpoint` — report a logical LSN of 0 (Lite is single-node, no WAL LSN).
-pub async fn handle_checkpoint<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_checkpoint<S: StorageEngine>(
     _engine: &LiteQueryEngine<S>,
 ) -> Result<QueryResult, LiteError> {
     Ok(QueryResult {
@@ -54,7 +54,7 @@ pub async fn handle_checkpoint<S: StorageEngine + StorageEngineSync>(
 ///
 /// Scans `Namespace::Meta` for keys prefixed with `collection/<name>` and
 /// deletes them. The collection name is the `name` field from the op.
-pub async fn handle_unregister_collection<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_unregister_collection<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     _tenant_id: u64,
     name: &str,
@@ -88,7 +88,7 @@ pub async fn handle_unregister_collection<S: StorageEngine + StorageEngineSync>(
 }
 
 /// `UnregisterMaterializedView` — remove materialized-view metadata entries.
-pub async fn handle_unregister_materialized_view<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_unregister_materialized_view<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     _tenant_id: u64,
     name: &str,
@@ -112,7 +112,7 @@ pub async fn handle_unregister_materialized_view<S: StorageEngine + StorageEngin
 
 /// `RenameCollection` — rewrite all `Namespace::Meta` keys for a collection
 /// from the old qualified name to the new qualified name.
-pub async fn handle_rename_collection<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_rename_collection<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     _tenant_id: u64,
     old_collection: &str,
@@ -148,7 +148,7 @@ pub async fn handle_rename_collection<S: StorageEngine + StorageEngineSync>(
 /// `ConvertCollection` — delegate to the existing DDL convert helpers.
 ///
 /// `target_type` is one of `"document_schemaless"`, `"document_strict"`, `"kv"`.
-pub async fn handle_convert_collection<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_convert_collection<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     target_type: &str,

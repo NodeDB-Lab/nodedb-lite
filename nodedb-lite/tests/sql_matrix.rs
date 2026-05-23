@@ -13,15 +13,16 @@ mod common;
 use std::sync::Arc;
 
 use nodedb_client::NodeDb;
-use nodedb_lite::storage::redb_storage::RedbStorage;
-use nodedb_lite::{NodeDbLite, RedbStorage as RS};
+use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 use nodedb_types::document::Document;
 use nodedb_types::value::Value;
 
 // ── Setup helpers ─────────────────────────────────────────────────────────────
 
-async fn open_db() -> Arc<NodeDbLite<RedbStorage>> {
-    let storage = RS::open_in_memory().expect("open_in_memory");
+async fn open_db() -> Arc<NodeDbLite<PagedbStorageMem>> {
+    let storage = PagedbStorageMem::open_in_memory()
+        .await
+        .expect("open_in_memory");
     Arc::new(
         NodeDbLite::open(storage, 1)
             .await
@@ -30,7 +31,7 @@ async fn open_db() -> Arc<NodeDbLite<RedbStorage>> {
 }
 
 /// Seed a schemaless collection so it appears in the SQL catalog.
-async fn seed(db: &Arc<NodeDbLite<RedbStorage>>, collection: &str, id: &str) {
+async fn seed(db: &Arc<NodeDbLite<PagedbStorageMem>>, collection: &str, id: &str) {
     let mut doc = Document::new(id);
     doc.set("_seed", Value::Bool(true));
     db.document_put(collection, doc)
@@ -39,7 +40,7 @@ async fn seed(db: &Arc<NodeDbLite<RedbStorage>>, collection: &str, id: &str) {
 }
 
 /// Assert the query succeeds (any `Ok` result is acceptable).
-async fn assert_ok(db: &Arc<NodeDbLite<RedbStorage>>, sql: &str) {
+async fn assert_ok(db: &Arc<NodeDbLite<PagedbStorageMem>>, sql: &str) {
     db.execute_sql(sql, &[])
         .await
         .unwrap_or_else(|e| panic!("expected Ok for SQL: {sql:?}\n  got: {e}"));

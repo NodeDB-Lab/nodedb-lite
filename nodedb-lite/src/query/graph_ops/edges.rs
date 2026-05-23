@@ -14,7 +14,7 @@ use crate::engine::array::ops::util::time::now_ms;
 use crate::engine::graph::history;
 use crate::engine::graph::index::CsrIndex;
 use crate::error::LiteError;
-use crate::storage::engine::{StorageEngine, StorageEngineSync, WriteOp};
+use crate::storage::engine::{StorageEngine, WriteOp};
 
 /// Upsert edge properties into the Namespace::Graph storage table.
 ///
@@ -55,7 +55,7 @@ fn edge_to_value(
 }
 
 /// Handle `GraphOp::EdgePut`.
-pub async fn edge_put<S: StorageEngine + StorageEngineSync>(
+pub async fn edge_put<S: StorageEngine>(
     storage: &Arc<S>,
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
     collection: &str,
@@ -106,7 +106,7 @@ pub async fn edge_put<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Handle `GraphOp::EdgePutBatch`.
-pub async fn edge_put_batch<S: StorageEngine + StorageEngineSync>(
+pub async fn edge_put_batch<S: StorageEngine>(
     storage: &Arc<S>,
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
     edges: &[BatchEdge],
@@ -166,7 +166,7 @@ pub async fn edge_put_batch<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Handle `GraphOp::EdgeDelete`.
-pub async fn edge_delete<S: StorageEngine + StorageEngineSync>(
+pub async fn edge_delete<S: StorageEngine>(
     storage: &Arc<S>,
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
     collection: &str,
@@ -201,7 +201,7 @@ pub async fn edge_delete<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Handle `GraphOp::EdgeDeleteBatch`.
-pub async fn edge_delete_batch<S: StorageEngine + StorageEngineSync>(
+pub async fn edge_delete_batch<S: StorageEngine>(
     storage: &Arc<S>,
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
     edges: &[BatchEdge],

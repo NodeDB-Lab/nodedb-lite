@@ -4,15 +4,15 @@
 //! Union, Intersect, Except, InsertSelect, UpdateFrom, Merge.
 
 use nodedb_client::NodeDb;
-use nodedb_lite::{NodeDbLite, RedbStorage};
+use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 use nodedb_types::value::Value;
 
-async fn open_db() -> NodeDbLite<RedbStorage> {
-    let storage = RedbStorage::open_in_memory().unwrap();
+async fn open_db() -> NodeDbLite<PagedbStorageMem> {
+    let storage = PagedbStorageMem::open_in_memory().await.unwrap();
     NodeDbLite::open(storage, 1).await.unwrap()
 }
 
-async fn seed(db: &NodeDbLite<RedbStorage>, stmts: &[&str]) {
+async fn seed(db: &NodeDbLite<PagedbStorageMem>, stmts: &[&str]) {
     for s in stmts {
         db.execute_sql(s, &[])
             .await

@@ -7,14 +7,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use nodedb_client::NodeDb;
 use nodedb_lite::sync::*;
-use nodedb_lite::{NodeDbLite, RedbStorage};
+use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 use nodedb_types::document::Document;
 use nodedb_types::sync::compensation::CompensationHint;
 use nodedb_types::sync::wire::*;
 use nodedb_types::value::Value;
 
-async fn open_db() -> NodeDbLite<RedbStorage> {
-    let s = RedbStorage::open_in_memory().unwrap();
+async fn open_db() -> NodeDbLite<PagedbStorageMem> {
+    let s = PagedbStorageMem::open_in_memory().await.unwrap();
     NodeDbLite::open(s, 1).await.unwrap()
 }
 

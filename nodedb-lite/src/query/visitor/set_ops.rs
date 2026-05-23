@@ -9,7 +9,7 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::adapter::LiteFut;
 
@@ -23,7 +23,7 @@ fn row_key(row: &[Value]) -> String {
 
 // ── Union ────────────────────────────────────────────────────────────────────
 
-pub(super) fn lower_union<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_union<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     inputs: &[SqlPlan],
     distinct: bool,
@@ -62,7 +62,7 @@ pub(super) fn lower_union<'a, S: StorageEngine + StorageEngineSync + 'a>(
 
 // ── Intersect ────────────────────────────────────────────────────────────────
 
-pub(super) fn lower_intersect<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_intersect<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     left: &SqlPlan,
     right: &SqlPlan,
@@ -122,7 +122,7 @@ pub(super) fn lower_intersect<'a, S: StorageEngine + StorageEngineSync + 'a>(
 
 // ── Except ───────────────────────────────────────────────────────────────────
 
-pub(super) fn lower_except<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_except<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     left: &SqlPlan,
     right: &SqlPlan,

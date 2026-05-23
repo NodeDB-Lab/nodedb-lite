@@ -22,11 +22,11 @@ use crate::query::query_ops::{
     recursive_scan::execute_recursive_scan,
     recursive_value::execute_recursive_value,
 };
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::LitePhysicalFut;
 
-pub(super) fn dispatch<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     op: &QueryOp,
 ) -> Result<LitePhysicalFut<'a>, LiteError> {

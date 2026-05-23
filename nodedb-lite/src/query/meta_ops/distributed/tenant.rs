@@ -28,7 +28,7 @@ use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
 use crate::error::LiteError;
-use crate::storage::engine::{KvPair, StorageEngine, StorageEngineSync, WriteOp};
+use crate::storage::engine::{KvPair, StorageEngine, WriteOp};
 
 /// One entry: `(namespace_byte, user_key_without_tenant_prefix, value)`.
 type SnapshotEntry = (u8, Vec<u8>, Vec<u8>);
@@ -63,7 +63,7 @@ const ALL_NAMESPACES: &[Namespace] = &[
 /// tuples that belong to `tenant_id`, plus the user-key (without prefix).
 ///
 /// Returns `(full_storage_key, user_key, ns, value)` tuples.
-async fn collect_tenant_keys<S: StorageEngine + StorageEngineSync>(
+async fn collect_tenant_keys<S: StorageEngine>(
     storage: &S,
     tenant_id: u64,
 ) -> Result<Vec<TenantKeyTuple>, LiteError> {
@@ -92,7 +92,7 @@ async fn collect_tenant_keys<S: StorageEngine + StorageEngineSync>(
 ///
 /// Serialises all storage entries for `tenant_id` as a MessagePack blob and
 /// returns it in a single-row `QueryResult` with column `"snapshot"`.
-pub async fn handle_create_tenant_snapshot<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_create_tenant_snapshot<S: StorageEngine>(
     storage: &S,
     tenant_id: u64,
 ) -> Result<QueryResult, LiteError> {
@@ -122,7 +122,7 @@ pub async fn handle_create_tenant_snapshot<S: StorageEngine + StorageEngineSync>
 ///
 /// For tenant 0, the explicit `t/0/` prefix is used so restored keys are
 /// distinguishable from legacy un-prefixed data.
-pub async fn handle_restore_tenant_snapshot<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_restore_tenant_snapshot<S: StorageEngine>(
     storage: &S,
     tenant_id: u64,
     snapshot: &[u8],
@@ -162,7 +162,7 @@ pub async fn handle_restore_tenant_snapshot<S: StorageEngine + StorageEngineSync
 ///
 /// Deletes every storage entry that belongs to `tenant_id` in a single atomic
 /// batch.  Idempotent: re-running after a crash is safe.
-pub async fn handle_purge_tenant<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_purge_tenant<S: StorageEngine>(
     storage: &S,
     tenant_id: u64,
 ) -> Result<QueryResult, LiteError> {
@@ -186,15 +186,15 @@ pub async fn handle_purge_tenant<S: StorageEngine + StorageEngineSync>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::redb_storage::RedbStorage;
+    use crate::storage::pagedb_storage::PagedbStorageMem;
 
-    fn make_storage() -> RedbStorage {
-        RedbStorage::open_in_memory().unwrap()
+    async fn make_storage() -> PagedbStorageMem {
+        PagedbStorageMem::open_in_memory().await.unwrap()
     }
 
     #[tokio::test]
     async fn snapshot_roundtrip_tenant_zero_legacy_keys() {
-        let s = make_storage();
+        let s = make_storage().await;
         // Write legacy un-prefixed keys (tenant 0 legacy, no `t/` prefix).
         s.put(Namespace::Kv, b"doc:1", b"value1").await.unwrap();
         s.put(Namespace::Kv, b"doc:2", b"value2").await.unwrap();
@@ -227,7 +227,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_roundtrip_non_zero_tenant() {
-        let s = make_storage();
+        let s = make_storage().await;
         // Write an explicit tenant 42 key.
         s.put(Namespace::Strict, b"t/42/row:1", b"strict_data")
             .await
@@ -250,7 +250,7 @@ mod tests {
 
     #[tokio::test]
     async fn purge_tenant_removes_only_target_tenant() {
-        let s = make_storage();
+        let s = make_storage().await;
         // Tenant 0 legacy keys.
         s.put(Namespace::Kv, b"doc:1", b"v1").await.unwrap();
         s.put(Namespace::Kv, b"doc:2", b"v2").await.unwrap();
@@ -268,7 +268,7 @@ mod tests {
 
     #[tokio::test]
     async fn purge_tenant_is_idempotent() {
-        let s = make_storage();
+        let s = make_storage().await;
         s.put(Namespace::Kv, b"x", b"y").await.unwrap();
         handle_purge_tenant(&s, 0).await.unwrap();
 
@@ -278,7 +278,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_tenant_snapshot_roundtrip() {
-        let s = make_storage();
+        let s = make_storage().await;
         let result = handle_create_tenant_snapshot(&s, 7).await.unwrap();
         assert_eq!(result.rows_affected, 0);
         assert_eq!(result.rows.len(), 1);
@@ -297,7 +297,7 @@ mod tests {
 
     #[tokio::test]
     async fn tenant_zero_does_not_capture_other_tenants() {
-        let s = make_storage();
+        let s = make_storage().await;
         // Tenant 0 legacy key.
         s.put(Namespace::Kv, b"my_key", b"val0").await.unwrap();
         // Tenant 5 explicit key.

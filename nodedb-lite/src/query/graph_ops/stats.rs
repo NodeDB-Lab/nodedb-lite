@@ -10,12 +10,12 @@ use nodedb_types::value::Value;
 
 use crate::engine::graph::index::CsrIndex;
 use crate::error::LiteError;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::temporal;
 
 /// Handle `GraphOp::Stats`.
-pub async fn graph_stats<S: StorageEngine + StorageEngineSync>(
+pub async fn graph_stats<S: StorageEngine>(
     storage: &Arc<S>,
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
     collection: Option<&str>,
@@ -56,7 +56,7 @@ pub async fn graph_stats<S: StorageEngine + StorageEngineSync>(
     })
 }
 
-async fn single_collection_stats<S: StorageEngine + StorageEngineSync>(
+async fn single_collection_stats<S: StorageEngine>(
     storage: &Arc<S>,
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
     collection: &str,

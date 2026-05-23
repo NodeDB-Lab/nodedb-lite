@@ -1,4 +1,4 @@
-//! redb-backed [`OpLog`] implementation for the array CRDT sync subsystem.
+//! Storage-backed [`OpLog`] implementation for the array CRDT sync subsystem.
 //!
 //! # Storage layout
 //!
@@ -15,7 +15,17 @@
 //! The array schema validator enforces this upper bound. If a name longer
 //! than 255 bytes arrives at [`RedbOpLog::append`], the method returns
 //! [`ArrayError::SegmentCorruption`] rather than silently truncating.
+//!
+//! # Runtime requirement
+//!
+//! The `OpLog` trait has synchronous methods. This implementation bridges into
+//! async storage via `tokio::task::block_in_place`, which requires the
+//! multi-thread Tokio runtime. The array sync subsystem is
+//! `#[cfg(not(target_arch = "wasm32"))]` only, and the embedder runtimes
+//! (FFI, CLI) are all multi-thread. Tests in this module use
+//! `#[tokio::test(flavor = "multi_thread")]` for the same reason.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use nodedb_array::error::{ArrayError, ArrayResult};
@@ -26,19 +36,19 @@ use nodedb_array::sync::op_log::{OpIter, OpLog};
 use nodedb_types::Namespace;
 
 use crate::error::LiteError;
-use crate::storage::engine::{StorageEngineSync, WriteOp};
+use crate::storage::engine::{StorageEngine, WriteOp};
 
-/// redb-backed append-only operation log for the array CRDT sync subsystem.
+/// Storage-backed append-only operation log for the array CRDT sync subsystem.
 ///
-/// Generic over any [`StorageEngineSync`] implementation, though in practice
-/// `S` is always [`crate::storage::RedbStorage`].
+/// Generic over any [`StorageEngine`] implementation. Bridges the sync
+/// `OpLog` trait into async storage via `tokio::task::block_in_place`.
 ///
 /// See the module-level documentation for the composite key layout.
-pub struct RedbOpLog<S: StorageEngineSync> {
+pub struct RedbOpLog<S: StorageEngine> {
     storage: Arc<S>,
 }
 
-impl<S: StorageEngineSync> RedbOpLog<S> {
+impl<S: StorageEngine> RedbOpLog<S> {
     /// Wrap an existing storage backend.
     pub fn new(storage: Arc<S>) -> Self {
         Self { storage }
@@ -136,8 +146,23 @@ fn lite_err_to_array(e: LiteError) -> ArrayError {
 }
 
 // ─── OpLog impl ───────────────────────────────────────────────────────────────
+//
+// The `OpLog` trait has synchronous methods. We bridge into async storage via
+// `tokio::task::block_in_place`, which runs the future on the current thread
+// without yielding the multi-thread runtime. Requires multi-thread flavor.
 
-impl<S: StorageEngineSync> OpLog for RedbOpLog<S> {
+/// Run an async closure synchronously via `block_in_place`.
+///
+/// Panics if called outside a multi-thread Tokio runtime (which is guaranteed
+/// by the array sync subsystem's runtime contract).
+fn block<F, T>(f: F) -> T
+where
+    F: Future<Output = T>,
+{
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
+}
+
+impl<S: StorageEngine> OpLog for RedbOpLog<S> {
     /// Append an operation to the log.
     ///
     /// Idempotent: re-appending the same `(array, hlc)` overwrites the stored
@@ -145,21 +170,20 @@ impl<S: StorageEngineSync> OpLog for RedbOpLog<S> {
     fn append(&self, op: &ArrayOp) -> ArrayResult<()> {
         let key = make_key(&op.header.array, op.header.hlc)?;
         let value = op_codec::encode_op(op)?;
-        self.storage
-            .put_sync(Namespace::ArrayOpLog, &key, &value)
-            .map_err(lite_err_to_array)
+        block(self.storage.put(Namespace::ArrayOpLog, &key, &value)).map_err(lite_err_to_array)
     }
 
     /// Return all ops with `hlc >= from`, across all arrays, in composite-key
     /// order (array name, then HLC).
     ///
-    /// All matching entries are collected upfront so the storage lock is not
+    /// All matching entries are collected upfront so the storage handle is not
     /// held across the returned iterator lifetime.
     fn scan_from<'a>(&'a self, from: Hlc) -> ArrayResult<OpIter<'a>> {
-        let pairs = self
-            .storage
-            .scan_range_sync(Namespace::ArrayOpLog, &[], usize::MAX)
-            .map_err(lite_err_to_array)?;
+        let pairs = block(
+            self.storage
+                .scan_range(Namespace::ArrayOpLog, &[], usize::MAX),
+        )
+        .map_err(lite_err_to_array)?;
 
         let ops: Vec<ArrayResult<ArrayOp>> = pairs
             .into_iter()
@@ -182,10 +206,11 @@ impl<S: StorageEngineSync> OpLog for RedbOpLog<S> {
     fn scan_range<'a>(&'a self, array: &str, from: Hlc, to: Hlc) -> ArrayResult<OpIter<'a>> {
         let prefix = make_array_prefix(array)?;
 
-        let pairs = self
-            .storage
-            .scan_range_sync(Namespace::ArrayOpLog, &prefix, usize::MAX)
-            .map_err(lite_err_to_array)?;
+        let pairs = block(
+            self.storage
+                .scan_range(Namespace::ArrayOpLog, &prefix, usize::MAX),
+        )
+        .map_err(lite_err_to_array)?;
 
         let ops: Vec<ArrayResult<ArrayOp>> = pairs
             .into_iter()
@@ -203,20 +228,17 @@ impl<S: StorageEngineSync> OpLog for RedbOpLog<S> {
     }
 
     /// Return the total number of ops across all arrays.
-    ///
-    /// Delegates to [`StorageEngineSync::count_sync`] to avoid a full scan.
     fn len(&self) -> ArrayResult<u64> {
-        self.storage
-            .count_sync(Namespace::ArrayOpLog)
-            .map_err(lite_err_to_array)
+        block(self.storage.count(Namespace::ArrayOpLog)).map_err(lite_err_to_array)
     }
 
     /// Delete all ops with `hlc < hlc` and return the count deleted.
     fn drop_below(&self, hlc: Hlc) -> ArrayResult<u64> {
-        let pairs = self
-            .storage
-            .scan_range_sync(Namespace::ArrayOpLog, &[], usize::MAX)
-            .map_err(lite_err_to_array)?;
+        let pairs = block(
+            self.storage
+                .scan_range(Namespace::ArrayOpLog, &[], usize::MAX),
+        )
+        .map_err(lite_err_to_array)?;
 
         let to_delete: Vec<WriteOp> = pairs
             .into_iter()
@@ -235,9 +257,7 @@ impl<S: StorageEngineSync> OpLog for RedbOpLog<S> {
 
         let count = to_delete.len() as u64;
         if !to_delete.is_empty() {
-            self.storage
-                .batch_write_sync(&to_delete)
-                .map_err(lite_err_to_array)?;
+            block(self.storage.batch_write(&to_delete)).map_err(lite_err_to_array)?;
         }
         Ok(count)
     }
@@ -253,7 +273,7 @@ mod tests {
     use nodedb_array::types::cell_value::value::CellValue;
     use nodedb_array::types::coord::value::CoordValue;
 
-    use crate::storage::redb_storage::RedbStorage;
+    use crate::storage::pagedb_storage::{PagedbStorageDefault, PagedbStorageMem};
 
     fn replica() -> ReplicaId {
         ReplicaId::new(1)
@@ -279,14 +299,17 @@ mod tests {
         }
     }
 
-    fn make_log() -> RedbOpLog<RedbStorage> {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
+    async fn make_log() -> RedbOpLog<PagedbStorageMem> {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
         RedbOpLog::new(storage)
     }
 
-    #[test]
-    fn append_then_scan_returns_op() {
-        let log = make_log();
+    // All tests that exercise RedbOpLog methods must run on the multi-thread
+    // Tokio runtime because block_in_place requires it.
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn append_then_scan_returns_op() {
+        let log = make_log().await;
         log.append(&make_op("arr", 10)).unwrap();
         log.append(&make_op("arr", 20)).unwrap();
 
@@ -298,9 +321,9 @@ mod tests {
         assert_eq!(ops.len(), 2);
     }
 
-    #[test]
-    fn scan_from_filters_below() {
-        let log = make_log();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_from_filters_below() {
+        let log = make_log().await;
         log.append(&make_op("arr", 10)).unwrap();
         log.append(&make_op("arr", 20)).unwrap();
         log.append(&make_op("arr", 30)).unwrap();
@@ -314,9 +337,9 @@ mod tests {
         assert!(ops.iter().all(|op| op.header.hlc.physical_ms >= 20));
     }
 
-    #[test]
-    fn scan_range_filters_array() {
-        let log = make_log();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_range_filters_array() {
+        let log = make_log().await;
         log.append(&make_op("a", 10)).unwrap();
         log.append(&make_op("b", 20)).unwrap();
         log.append(&make_op("a", 30)).unwrap();
@@ -330,9 +353,9 @@ mod tests {
         assert!(ops.iter().all(|op| op.header.array == "a"));
     }
 
-    #[test]
-    fn scan_range_filters_inclusive_bounds() {
-        let log = make_log();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_range_filters_inclusive_bounds() {
+        let log = make_log().await;
         log.append(&make_op("arr", 10)).unwrap();
         log.append(&make_op("arr", 20)).unwrap();
         log.append(&make_op("arr", 30)).unwrap();
@@ -350,9 +373,9 @@ mod tests {
         assert!(!ms.contains(&30));
     }
 
-    #[test]
-    fn drop_below_drops_correctly() {
-        let log = make_log();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drop_below_drops_correctly() {
+        let log = make_log().await;
         log.append(&make_op("arr", 10)).unwrap();
         log.append(&make_op("arr", 20)).unwrap();
         log.append(&make_op("arr", 30)).unwrap();
@@ -370,18 +393,18 @@ mod tests {
         assert!(ops.iter().all(|op| op.header.hlc.physical_ms >= 20));
     }
 
-    #[test]
-    fn len_counts_correctly() {
-        let log = make_log();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn len_counts_correctly() {
+        let log = make_log().await;
         assert_eq!(log.len().unwrap(), 0);
         log.append(&make_op("x", 1)).unwrap();
         log.append(&make_op("y", 2)).unwrap();
         assert_eq!(log.len().unwrap(), 2);
     }
 
-    #[test]
-    fn idempotent_append() {
-        let log = make_log();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn idempotent_append() {
+        let log = make_log().await;
         log.append(&make_op("arr", 10)).unwrap();
         log.append(&make_op("arr", 10)).unwrap();
         assert_eq!(log.len().unwrap(), 1);
@@ -389,25 +412,27 @@ mod tests {
 
     #[test]
     fn array_name_too_long_errors() {
-        let log = make_log();
+        // make_key fails before touching storage, so no runtime needed.
         let long_name = "a".repeat(256);
-        let op = make_op(&long_name, 10);
-        let err = log.append(&op).unwrap_err();
+        let name_bytes = long_name.as_bytes();
+        assert!(name_bytes.len() > 255);
+        let err = make_key(&long_name, Hlc::ZERO).unwrap_err();
         assert!(
             matches!(err, ArrayError::SegmentCorruption { ref detail } if detail.contains("255")),
             "unexpected error: {err:?}"
         );
     }
 
-    #[test]
-    fn decode_corruption_propagates() {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
+    #[tokio::test(flavor = "multi_thread")]
+    async fn decode_corruption_propagates() {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
         let log = RedbOpLog::new(Arc::clone(&storage));
 
         // Write a valid key with garbage value directly via storage.
         let valid_key = make_key("arr", hlc(99, 0)).unwrap();
         storage
-            .put_sync(Namespace::ArrayOpLog, &valid_key, b"\xff\xfe garbage")
+            .put(Namespace::ArrayOpLog, &valid_key, b"\xff\xfe garbage")
+            .await
             .unwrap();
 
         let results: Vec<_> = log.scan_from(Hlc::ZERO).unwrap().collect();
@@ -415,13 +440,13 @@ mod tests {
         assert!(results[0].is_err(), "expected decode error, got Ok");
     }
 
-    #[test]
-    fn survives_storage_restart() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn survives_storage_restart() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("op_log_test.redb");
+        let path = dir.path().join("op_log_test.pagedb");
 
         {
-            let storage = Arc::new(RedbStorage::open(&path).unwrap());
+            let storage = Arc::new(PagedbStorageDefault::open(&path).await.unwrap());
             let log = RedbOpLog::new(Arc::clone(&storage));
             log.append(&make_op("arr", 10)).unwrap();
             log.append(&make_op("arr", 20)).unwrap();
@@ -429,7 +454,7 @@ mod tests {
 
         // Reopen the same file.
         {
-            let storage = Arc::new(RedbStorage::open(&path).unwrap());
+            let storage = Arc::new(PagedbStorageDefault::open(&path).await.unwrap());
             let log = RedbOpLog::new(storage);
             assert_eq!(log.len().unwrap(), 2);
             let ops: Vec<_> = log

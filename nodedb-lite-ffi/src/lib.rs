@@ -25,7 +25,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::Arc;
 
-use nodedb_lite::{LiteConfig, NodeDbLite, RedbStorage};
+use nodedb_lite::{LiteConfig, NodeDbLite, PagedbStorageDefault};
 
 /// Error codes returned by FFI functions.
 pub const NODEDB_OK: i32 = 0;
@@ -34,12 +34,44 @@ pub const NODEDB_ERR_UTF8: i32 = -2;
 pub const NODEDB_ERR_FAILED: i32 = -3;
 pub const NODEDB_ERR_NOT_FOUND: i32 = -4;
 
+/// Minimal RAII temp-directory wrapper used for the `:memory:` path.
+///
+/// Deleted on drop. No external crate dependency required.
+struct OwnedTempDir(std::path::PathBuf);
+
+impl Drop for OwnedTempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl OwnedTempDir {
+    /// Create a unique temporary directory under `std::env::temp_dir()`.
+    fn new() -> Option<Self> {
+        let mut path = std::env::temp_dir();
+        // Use process-id + a monotonic counter for uniqueness.
+        let pid = std::process::id();
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        path.push(format!("nodedb-lite-ffi-{pid}-{n}"));
+        if std::fs::create_dir_all(&path).is_ok() {
+            Some(Self(path))
+        } else {
+            None
+        }
+    }
+}
+
 /// Opaque handle to a NodeDB-Lite database.
 ///
 /// Created by `nodedb_open`, freed by `nodedb_close`.
+///
+/// `_tmpdir` is `Some` when the database was opened with the `:memory:` path.
+/// The directory is deleted when the handle is dropped.
 pub struct NodeDbHandle {
-    pub(crate) db: Arc<NodeDbLite<RedbStorage>>,
+    pub(crate) db: Arc<NodeDbLite<PagedbStorageDefault>>,
     pub(crate) rt: tokio::runtime::Runtime,
+    _tmpdir: Option<OwnedTempDir>,
 }
 
 /// Open or create a NodeDB-Lite database at the given path.
@@ -65,16 +97,22 @@ pub unsafe extern "C" fn nodedb_open(path: *const c_char, peer_id: u64) -> *mut 
         Err(_) => return std::ptr::null_mut(),
     };
 
-    let storage = if path == ":memory:" {
-        match RedbStorage::open_in_memory() {
+    let (storage, tmpdir) = if path == ":memory:" {
+        let tmp = match OwnedTempDir::new() {
+            Some(t) => t,
+            None => return std::ptr::null_mut(),
+        };
+        let s = match rt.block_on(PagedbStorageDefault::open(&tmp.0)) {
             Ok(s) => s,
             Err(_) => return std::ptr::null_mut(),
-        }
+        };
+        (s, Some(tmp))
     } else {
-        match RedbStorage::open(path) {
+        let s = match rt.block_on(PagedbStorageDefault::open(path)) {
             Ok(s) => s,
             Err(_) => return std::ptr::null_mut(),
-        }
+        };
+        (s, None)
     };
 
     let db = match rt.block_on(NodeDbLite::open(storage, peer_id)) {
@@ -82,7 +120,11 @@ pub unsafe extern "C" fn nodedb_open(path: *const c_char, peer_id: u64) -> *mut 
         Err(_) => return std::ptr::null_mut(),
     };
 
-    Box::into_raw(Box::new(NodeDbHandle { db, rt }))
+    Box::into_raw(Box::new(NodeDbHandle {
+        db,
+        rt,
+        _tmpdir: tmpdir,
+    }))
 }
 
 /// Open or create a NodeDB-Lite database with an explicit memory budget.
@@ -109,16 +151,22 @@ pub unsafe extern "C" fn nodedb_open_with_config(
         Err(_) => return std::ptr::null_mut(),
     };
 
-    let storage = if path == ":memory:" {
-        match RedbStorage::open_in_memory() {
+    let (storage, tmpdir) = if path == ":memory:" {
+        let tmp = match OwnedTempDir::new() {
+            Some(t) => t,
+            None => return std::ptr::null_mut(),
+        };
+        let s = match rt.block_on(PagedbStorageDefault::open(&tmp.0)) {
             Ok(s) => s,
             Err(_) => return std::ptr::null_mut(),
-        }
+        };
+        (s, Some(tmp))
     } else {
-        match RedbStorage::open(path) {
+        let s = match rt.block_on(PagedbStorageDefault::open(path)) {
             Ok(s) => s,
             Err(_) => return std::ptr::null_mut(),
-        }
+        };
+        (s, None)
     };
 
     let config = if memory_mb == 0 {
@@ -135,7 +183,11 @@ pub unsafe extern "C" fn nodedb_open_with_config(
         Err(_) => return std::ptr::null_mut(),
     };
 
-    Box::into_raw(Box::new(NodeDbHandle { db, rt }))
+    Box::into_raw(Box::new(NodeDbHandle {
+        db,
+        rt,
+        _tmpdir: tmpdir,
+    }))
 }
 
 /// Close a NodeDB-Lite database and free the handle.

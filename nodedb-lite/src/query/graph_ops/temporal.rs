@@ -21,7 +21,7 @@ use nodedb_types::value::Value;
 
 use crate::engine::graph::index::CsrIndex;
 use crate::error::LiteError;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::algorithms;
 
@@ -52,7 +52,7 @@ fn parse_edge_key(edge_key: &str) -> Option<(&str, &str, &str)> {
 ///
 /// Reads all edge history for `collection` and materialises the set of
 /// edges whose `system_from <= as_of < system_to`.
-async fn build_temporal_snapshot<S: StorageEngine + StorageEngineSync>(
+async fn build_temporal_snapshot<S: StorageEngine>(
     storage: &Arc<S>,
     collection: &str,
     system_as_of_ms: i64,
@@ -135,7 +135,7 @@ async fn build_temporal_snapshot<S: StorageEngine + StorageEngineSync>(
 
 /// Handle `GraphOp::TemporalNeighbors`.
 #[allow(clippy::too_many_arguments)]
-pub async fn temporal_neighbors<S: StorageEngine + StorageEngineSync>(
+pub async fn temporal_neighbors<S: StorageEngine>(
     storage: &Arc<S>,
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
     collection: &str,
@@ -172,7 +172,7 @@ pub async fn temporal_neighbors<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Handle `GraphOp::TemporalAlgorithm`.
-pub async fn temporal_algorithm<S: StorageEngine + StorageEngineSync>(
+pub async fn temporal_algorithm<S: StorageEngine>(
     storage: &Arc<S>,
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
     algorithm: GraphAlgorithm,

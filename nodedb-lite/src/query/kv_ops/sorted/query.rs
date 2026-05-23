@@ -10,7 +10,7 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::keys::{pk_entry_key, score_prefix, sort_bytes_to_f64};
 use super::window::purge_outside_window;
@@ -20,17 +20,18 @@ fn now_ms() -> u64 {
 }
 
 /// SortedIndexScore: return the score for a given primary key (ZSCORE).
-pub fn kv_sorted_index_score<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_sorted_index_score<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     index_name: &str,
     primary_key: &[u8],
 ) -> Result<QueryResult, LiteError> {
-    purge_outside_window(engine, index_name, now_ms())?;
+    purge_outside_window(engine, index_name, now_ms()).await?;
 
     let pk_key = pk_entry_key(index_name, primary_key);
     let stored = engine
         .storage
-        .get_sync(Namespace::Meta, &pk_key)
+        .get(Namespace::Meta, &pk_key)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -61,17 +62,18 @@ pub fn kv_sorted_index_score<S: StorageEngine + StorageEngineSync>(
 }
 
 /// SortedIndexRank: 1-based rank of a primary key in ascending score order.
-pub fn kv_sorted_index_rank<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_sorted_index_rank<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     index_name: &str,
     primary_key: &[u8],
 ) -> Result<QueryResult, LiteError> {
-    purge_outside_window(engine, index_name, now_ms())?;
+    purge_outside_window(engine, index_name, now_ms()).await?;
 
     let pk_key = pk_entry_key(index_name, primary_key);
     let stored = engine
         .storage
-        .get_sync(Namespace::Meta, &pk_key)
+        .get(Namespace::Meta, &pk_key)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -99,7 +101,8 @@ pub fn kv_sorted_index_rank<S: StorageEngine + StorageEngineSync>(
     let score_pfx = score_prefix(index_name);
     let all = engine
         .storage
-        .scan_range_bounded_sync(Namespace::Meta, Some(score_pfx.as_bytes()), None, None)
+        .scan_range_bounded(Namespace::Meta, Some(score_pfx.as_bytes()), None, None)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -133,17 +136,18 @@ pub fn kv_sorted_index_rank<S: StorageEngine + StorageEngineSync>(
 }
 
 /// SortedIndexTopK: return top K entries in ascending score order.
-pub fn kv_sorted_index_top_k<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_sorted_index_top_k<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     index_name: &str,
     k: u32,
 ) -> Result<QueryResult, LiteError> {
-    purge_outside_window(engine, index_name, now_ms())?;
+    purge_outside_window(engine, index_name, now_ms()).await?;
 
     let score_pfx = score_prefix(index_name);
     let all = engine
         .storage
-        .scan_range_bounded_sync(Namespace::Meta, Some(score_pfx.as_bytes()), None, None)
+        .scan_range_bounded(Namespace::Meta, Some(score_pfx.as_bytes()), None, None)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -180,13 +184,13 @@ pub fn kv_sorted_index_top_k<S: StorageEngine + StorageEngineSync>(
 }
 
 /// SortedIndexRange: return entries with score in [score_min, score_max].
-pub fn kv_sorted_index_range<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_sorted_index_range<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     index_name: &str,
     score_min: Option<&[u8]>,
     score_max: Option<&[u8]>,
 ) -> Result<QueryResult, LiteError> {
-    purge_outside_window(engine, index_name, now_ms())?;
+    purge_outside_window(engine, index_name, now_ms()).await?;
 
     let score_pfx = score_prefix(index_name);
     let prefix_bytes = score_pfx.as_bytes();
@@ -211,7 +215,8 @@ pub fn kv_sorted_index_range<S: StorageEngine + StorageEngineSync>(
 
     let all = engine
         .storage
-        .scan_range_bounded_sync(Namespace::Meta, Some(&start_key), None, None)
+        .scan_range_bounded(Namespace::Meta, Some(&start_key), None, None)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -264,16 +269,17 @@ pub fn kv_sorted_index_range<S: StorageEngine + StorageEngineSync>(
 }
 
 /// SortedIndexCount: total count of entries in a sorted index.
-pub fn kv_sorted_index_count<S: StorageEngine + StorageEngineSync>(
+pub async fn kv_sorted_index_count<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     index_name: &str,
 ) -> Result<QueryResult, LiteError> {
-    purge_outside_window(engine, index_name, now_ms())?;
+    purge_outside_window(engine, index_name, now_ms()).await?;
 
     let score_pfx = score_prefix(index_name);
     let all = engine
         .storage
-        .scan_range_bounded_sync(Namespace::Meta, Some(score_pfx.as_bytes()), None, None)
+        .scan_range_bounded(Namespace::Meta, Some(score_pfx.as_bytes()), None, None)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;

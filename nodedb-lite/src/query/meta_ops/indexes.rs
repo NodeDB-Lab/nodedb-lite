@@ -6,7 +6,7 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// `RebuildIndex` — re-emit index entries by scanning collection rows.
 ///
@@ -16,7 +16,7 @@ use crate::storage::engine::{StorageEngine, StorageEngineSync};
 /// `index_name` is specified, or scanning all collections if `None`.
 ///
 /// The `concurrent` flag is ignored on Lite (single-threaded embedded engine).
-pub async fn handle_rebuild_index<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_rebuild_index<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     index_name: Option<&str>,

@@ -39,7 +39,7 @@ use nodedb_types::Surrogate;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 use serde::{Deserialize, Serialize};
 
-use crate::storage::engine::{StorageEngine, StorageEngineSync, WriteOp};
+use crate::storage::engine::{StorageEngine, WriteOp};
 
 /// Surrogate maps persisted alongside posting data.
 #[derive(Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack)]
@@ -210,7 +210,7 @@ pub(crate) async fn restore_fts<S>(
     u32,
 )>
 where
-    S: StorageEngine + StorageEngineSync,
+    S: StorageEngine,
 {
     const TID: u64 = 0;
 

@@ -7,9 +7,9 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
-fn lock_ts<S: StorageEngine + StorageEngineSync>(
+fn lock_ts<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
 ) -> Result<
     std::sync::MutexGuard<'_, crate::engine::timeseries::engine::core::TimeseriesEngine>,
@@ -22,7 +22,7 @@ fn lock_ts<S: StorageEngine + StorageEngineSync>(
 }
 
 /// `RegisterContinuousAggregate` — register a new aggregate definition.
-pub async fn handle_register_continuous_aggregate<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_register_continuous_aggregate<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     def: ContinuousAggregateDef,
 ) -> Result<QueryResult, LiteError> {
@@ -36,7 +36,7 @@ pub async fn handle_register_continuous_aggregate<S: StorageEngine + StorageEngi
 }
 
 /// `UnregisterContinuousAggregate` — remove an aggregate by name.
-pub async fn handle_unregister_continuous_aggregate<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_unregister_continuous_aggregate<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     name: &str,
 ) -> Result<QueryResult, LiteError> {
@@ -50,7 +50,7 @@ pub async fn handle_unregister_continuous_aggregate<S: StorageEngine + StorageEn
 }
 
 /// `ListContinuousAggregates` — list all registered aggregate names.
-pub async fn handle_list_continuous_aggregates<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_list_continuous_aggregates<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
 ) -> Result<QueryResult, LiteError> {
     let ts = lock_ts(engine)?;
@@ -69,7 +69,7 @@ pub async fn handle_list_continuous_aggregates<S: StorageEngine + StorageEngineS
 
 /// `ApplyContinuousAggRetention` — drop materialized buckets older than each
 /// aggregate's configured retention period.
-pub async fn handle_apply_continuous_agg_retention<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_apply_continuous_agg_retention<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
 ) -> Result<QueryResult, LiteError> {
     let now_ms = std::time::SystemTime::now()
@@ -86,7 +86,7 @@ pub async fn handle_apply_continuous_agg_retention<S: StorageEngine + StorageEng
 }
 
 /// `QueryAggregateWatermark` — return the highest bucket_ts for an aggregate.
-pub async fn handle_query_aggregate_watermark<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_query_aggregate_watermark<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     aggregate_name: &str,
 ) -> Result<QueryResult, LiteError> {
@@ -107,7 +107,7 @@ pub async fn handle_query_aggregate_watermark<S: StorageEngine + StorageEngineSy
 /// `(aggregate_name, group_key, bucket_ts, <agg_col>, ...)`. Returns
 /// `BadRequest` when no aggregates are registered for this collection so
 /// callers fail loudly instead of silently getting zero rows.
-pub async fn handle_query_aggregate_last_values<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_query_aggregate_last_values<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
 ) -> Result<QueryResult, LiteError> {
@@ -183,7 +183,7 @@ pub async fn handle_query_aggregate_last_values<S: StorageEngine + StorageEngine
 /// In Lite, `series_id` indexes into the list of aggregates registered for
 /// `collection` (0-based). The most-recent bucket across all group keys is
 /// returned. Returns `BadRequest` when no matching aggregate exists.
-pub async fn handle_query_aggregate_last_value<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_query_aggregate_last_value<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     series_id: u64,

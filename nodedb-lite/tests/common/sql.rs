@@ -7,8 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use nodedb_client::NodeDb;
-use nodedb_lite::storage::redb_storage::RedbStorage;
-use nodedb_lite::{NodeDbLite, RedbStorage as RS};
+use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 use tokio_postgres::{Client, NoTls, Row};
@@ -16,8 +15,10 @@ use tokio_postgres::{Client, NoTls, Row};
 // ── Lite DB helpers ───────────────────────────────────────────────────────────
 
 /// Open a fresh in-memory Lite database.
-pub async fn open_lite() -> Arc<NodeDbLite<RedbStorage>> {
-    let storage = RS::open_in_memory().expect("open_in_memory");
+pub async fn open_lite() -> Arc<NodeDbLite<PagedbStorageMem>> {
+    let storage = PagedbStorageMem::open_in_memory()
+        .await
+        .expect("open_in_memory");
     Arc::new(
         NodeDbLite::open(storage, 1)
             .await
@@ -112,7 +113,7 @@ fn value_to_string(v: &Value) -> String {
 /// Panics with a descriptive message if:
 /// - The query succeeds (silent wrong-result is a bug).
 /// - The query returns a different error kind.
-pub async fn assert_lite_unsupported(db: &Arc<NodeDbLite<RedbStorage>>, sql: &str) {
+pub async fn assert_lite_unsupported(db: &Arc<NodeDbLite<PagedbStorageMem>>, sql: &str) {
     let result = db.execute_sql(sql, &[]).await;
     match result {
         Err(e) => {

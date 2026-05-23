@@ -25,7 +25,7 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync, WriteOp};
+use crate::storage::engine::{StorageEngine, WriteOp};
 
 use super::keys::{SCORE_TS_SEPARATOR, score_prefix};
 
@@ -49,7 +49,7 @@ fn window_meta_key(index_name: &str) -> Vec<u8> {
 }
 
 /// Persist the window definition for `index_name`.
-pub(super) fn store_window_def<S: StorageEngine + StorageEngineSync>(
+pub(super) async fn store_window_def<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     index_name: &str,
     def: &WindowDef,
@@ -74,7 +74,8 @@ pub(super) fn store_window_def<S: StorageEngine + StorageEngineSync>(
         })?;
     engine
         .storage
-        .put_sync(Namespace::Meta, &window_meta_key(index_name), &bytes)
+        .put(Namespace::Meta, &window_meta_key(index_name), &bytes)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })
@@ -82,13 +83,14 @@ pub(super) fn store_window_def<S: StorageEngine + StorageEngineSync>(
 
 /// Load the window definition for `index_name`, returning `None` if not found
 /// (non-windowed index).
-pub(super) fn load_window_def<S: StorageEngine + StorageEngineSync>(
+pub(super) async fn load_window_def<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     index_name: &str,
 ) -> Result<Option<WindowDef>, LiteError> {
     let raw = engine
         .storage
-        .get_sync(Namespace::Meta, &window_meta_key(index_name))
+        .get(Namespace::Meta, &window_meta_key(index_name))
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -134,13 +136,14 @@ pub(super) fn load_window_def<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Remove the window definition for `index_name` (called from DropSortedIndex).
-pub(super) fn delete_window_def<S: StorageEngine + StorageEngineSync>(
+pub(super) async fn delete_window_def<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     index_name: &str,
 ) -> Result<(), LiteError> {
     engine
         .storage
-        .delete_sync(Namespace::Meta, &window_meta_key(index_name))
+        .delete(Namespace::Meta, &window_meta_key(index_name))
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })
@@ -153,12 +156,12 @@ pub(super) fn delete_window_def<S: StorageEngine + StorageEngineSync>(
 /// them together with their reverse pk entries.
 ///
 /// For non-windowed indexes (window_def is None) this is a no-op.
-pub(super) fn purge_outside_window<S: StorageEngine + StorageEngineSync>(
+pub(super) async fn purge_outside_window<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     index_name: &str,
     now_ms: u64,
 ) -> Result<(), LiteError> {
-    let def = match load_window_def(engine, index_name)? {
+    let def = match load_window_def(engine, index_name).await? {
         None => return Ok(()),
         Some(d) => d,
     };
@@ -173,7 +176,8 @@ pub(super) fn purge_outside_window<S: StorageEngine + StorageEngineSync>(
     let score_pfx = score_prefix(index_name);
     let all = engine
         .storage
-        .scan_range_bounded_sync(Namespace::Meta, Some(score_pfx.as_bytes()), None, None)
+        .scan_range_bounded(Namespace::Meta, Some(score_pfx.as_bytes()), None, None)
+        .await
         .map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
@@ -218,7 +222,8 @@ pub(super) fn purge_outside_window<S: StorageEngine + StorageEngineSync>(
     if !ops.is_empty() {
         engine
             .storage
-            .batch_write_sync(&ops)
+            .batch_write(&ops)
+            .await
             .map_err(|e| LiteError::Storage {
                 detail: e.to_string(),
             })?;

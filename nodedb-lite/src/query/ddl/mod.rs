@@ -18,9 +18,9 @@ use nodedb_types::result::QueryResult;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
-impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
+impl<S: StorageEngine> LiteQueryEngine<S> {
     /// Intercept DDL statements before passing to DataFusion.
     ///
     /// Returns `Some(result)` if the statement was handled, `None` if it should

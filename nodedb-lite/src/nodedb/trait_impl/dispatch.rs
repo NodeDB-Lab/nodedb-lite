@@ -21,13 +21,13 @@ use nodedb_types::text_search::TextSearchParams;
 use nodedb_types::value::Value;
 
 use crate::nodedb::NodeDbLite;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::vector::{INTERNAL_FIELDS_BASE, INTERNAL_FIELDS_NAMED};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S: StorageEngine + StorageEngineSync> NodeDb for NodeDbLite<S> {
+impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
     // ─── Vector Operations ───────────────────────────────────────────
 
     async fn vector_search(

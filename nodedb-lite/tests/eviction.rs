@@ -2,10 +2,10 @@
 //! data survives in storage, lazy reload on next access.
 
 use nodedb_client::NodeDb;
-use nodedb_lite::{NodeDbLite, RedbStorage};
+use nodedb_lite::{NodeDbLite, PagedbStorageDefault, PagedbStorageMem};
 
-async fn open_db_with_budget(budget: usize) -> NodeDbLite<RedbStorage> {
-    let storage = RedbStorage::open_in_memory().unwrap();
+async fn open_db_with_budget(budget: usize) -> NodeDbLite<PagedbStorageMem> {
+    let storage = PagedbStorageMem::open_in_memory().await.unwrap();
     NodeDbLite::open_with_budget(storage, 1, budget)
         .await
         .unwrap()
@@ -123,11 +123,11 @@ async fn check_and_evict_responds_to_pressure() {
 #[tokio::test]
 async fn startup_loads_only_persisted_collections() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("lazy_start.redb");
+    let path = dir.path().join("lazy_start.pagedb");
 
     // Write data, flush, close.
     {
-        let storage = RedbStorage::open(&path).unwrap();
+        let storage = PagedbStorageDefault::open(&path).await.unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
 
         db.batch_vector_insert("active", &[("v1", &[1.0f32, 0.0][..])])
@@ -139,7 +139,7 @@ async fn startup_loads_only_persisted_collections() {
 
     // Reopen — both should be loaded from storage.
     {
-        let storage = RedbStorage::open(&path).unwrap();
+        let storage = PagedbStorageDefault::open(&path).await.unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
 
         let loaded = db.loaded_collections().unwrap();

@@ -253,17 +253,64 @@ impl<S: StorageEngine> StorageEngine for EncryptedStorage<S> {
     async fn count(&self, ns: Namespace) -> Result<u64, LiteError> {
         self.inner.count(ns).await
     }
+
+    async fn scan_range(
+        &self,
+        ns: Namespace,
+        start: &[u8],
+        limit: usize,
+    ) -> Result<Vec<super::engine::KvPair>, LiteError> {
+        let encrypted_entries = self.inner.scan_range(ns, start, limit).await?;
+        let mut results = Vec::with_capacity(encrypted_entries.len());
+        for (key, ciphertext) in &encrypted_entries {
+            match self.decrypt(ns, key, ciphertext) {
+                Ok(plaintext) => results.push((key.clone(), plaintext)),
+                Err(e) => {
+                    tracing::warn!(
+                        key = ?String::from_utf8_lossy(key),
+                        error = %e,
+                        "skipping undecryptable entry in scan_range"
+                    );
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    async fn scan_range_bounded(
+        &self,
+        ns: Namespace,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        limit: Option<usize>,
+    ) -> Result<Vec<super::engine::KvPair>, LiteError> {
+        let encrypted_entries = self.inner.scan_range_bounded(ns, start, end, limit).await?;
+        let mut results = Vec::with_capacity(encrypted_entries.len());
+        for (key, ciphertext) in &encrypted_entries {
+            match self.decrypt(ns, key, ciphertext) {
+                Ok(plaintext) => results.push((key.clone(), plaintext)),
+                Err(e) => {
+                    tracing::warn!(
+                        key = ?String::from_utf8_lossy(key),
+                        error = %e,
+                        "skipping undecryptable entry in scan_range_bounded"
+                    );
+                }
+            }
+        }
+        Ok(results)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::LiteConfig;
-    use crate::storage::redb_storage::RedbStorage;
+    use crate::storage::pagedb_storage::PagedbStorageMem;
 
-    async fn make_encrypted() -> EncryptedStorage<RedbStorage> {
+    async fn make_encrypted() -> EncryptedStorage<PagedbStorageMem> {
         let cfg = LiteConfig::default();
-        let inner = RedbStorage::open_in_memory().unwrap();
+        let inner = PagedbStorageMem::open_in_memory().await.unwrap();
         EncryptedStorage::open(
             inner,
             "test-passphrase-123",
@@ -310,7 +357,7 @@ mod tests {
     #[tokio::test]
     async fn wrong_passphrase_fails_decrypt() {
         let cfg = LiteConfig::default();
-        let inner = RedbStorage::open_in_memory().unwrap();
+        let inner = PagedbStorageMem::open_in_memory().await.unwrap();
         // Write with passphrase A.
         {
             let s = EncryptedStorage::open(

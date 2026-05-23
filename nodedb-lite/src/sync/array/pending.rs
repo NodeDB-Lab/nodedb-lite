@@ -19,15 +19,15 @@ use nodedb_array::sync::op_codec;
 use nodedb_types::Namespace;
 
 use crate::error::LiteError;
-use crate::storage::engine::{StorageEngineSync, WriteOp};
+use crate::storage::engine::{StorageEngine, WriteOp};
 
 /// Durable outbound pending-op queue backed by [`Namespace::ArrayDelta`].
-pub struct PendingQueue<S: StorageEngineSync> {
+pub struct PendingQueue<S: StorageEngine> {
     storage: Arc<S>,
     cap: usize,
 }
 
-impl<S: StorageEngineSync> PendingQueue<S> {
+impl<S: StorageEngine> PendingQueue<S> {
     /// Default maximum number of pending ops before backpressure kicks in.
     pub const DEFAULT_CAP: usize = 100_000;
 
@@ -48,8 +48,8 @@ impl<S: StorageEngineSync> PendingQueue<S> {
     ///
     /// Returns [`LiteError::Backpressure`] when `len() >= cap` to prevent
     /// unbounded queue growth during prolonged offline operation.
-    pub fn enqueue(&self, op: &ArrayOp) -> Result<(), LiteError> {
-        let current = self.len()?;
+    pub async fn enqueue(&self, op: &ArrayOp) -> Result<(), LiteError> {
+        let current = self.len().await?;
         if current >= self.cap as u64 {
             return Err(LiteError::Backpressure {
                 detail: format!(
@@ -62,17 +62,18 @@ impl<S: StorageEngineSync> PendingQueue<S> {
         let value = op_codec::encode_op(op).map_err(|e| LiteError::Storage {
             detail: format!("pending queue encode: {e}"),
         })?;
-        self.storage.put_sync(Namespace::ArrayDelta, &key, &value)
+        self.storage.put(Namespace::ArrayDelta, &key, &value).await
     }
 
     /// Return up to `limit` ops in FIFO order (lowest HLC first).
     ///
     /// Does not remove the returned ops — call [`ack_through`] after they are
     /// confirmed by Origin.
-    pub fn drain_batch(&self, limit: usize) -> Result<Vec<ArrayOp>, LiteError> {
+    pub async fn drain_batch(&self, limit: usize) -> Result<Vec<ArrayOp>, LiteError> {
         let pairs = self
             .storage
-            .scan_range_sync(Namespace::ArrayDelta, &[], limit)?;
+            .scan_range(Namespace::ArrayDelta, &[], limit)
+            .await?;
 
         let mut ops = Vec::with_capacity(pairs.len());
         for (_key, value) in pairs {
@@ -88,13 +89,14 @@ impl<S: StorageEngineSync> PendingQueue<S> {
     ///
     /// Called after Origin acknowledges a batch up to `ack_hlc`. Returns the
     /// number of ops removed.
-    pub fn ack_through(&self, ack_hlc: Hlc) -> Result<u64, LiteError> {
+    pub async fn ack_through(&self, ack_hlc: Hlc) -> Result<u64, LiteError> {
         // HLC bytes are byte-comparable; scan from the start and stop when we
         // hit an entry with a key > ack_hlc bytes.
         let ack_key = ack_hlc.to_bytes();
         let pairs = self
             .storage
-            .scan_range_sync(Namespace::ArrayDelta, &[], usize::MAX)?;
+            .scan_range(Namespace::ArrayDelta, &[], usize::MAX)
+            .await?;
 
         let to_delete: Vec<WriteOp> = pairs
             .into_iter()
@@ -113,19 +115,19 @@ impl<S: StorageEngineSync> PendingQueue<S> {
 
         let count = to_delete.len() as u64;
         if !to_delete.is_empty() {
-            self.storage.batch_write_sync(&to_delete)?;
+            self.storage.batch_write(&to_delete).await?;
         }
         Ok(count)
     }
 
     /// Total count of pending ops in storage.
-    pub fn len(&self) -> Result<u64, LiteError> {
-        self.storage.count_sync(Namespace::ArrayDelta)
+    pub async fn len(&self) -> Result<u64, LiteError> {
+        self.storage.count(Namespace::ArrayDelta).await
     }
 
     /// Returns `true` if the queue contains no pending ops.
-    pub fn is_empty(&self) -> Result<bool, LiteError> {
-        self.len().map(|n| n == 0)
+    pub async fn is_empty(&self) -> Result<bool, LiteError> {
+        self.len().await.map(|n| n == 0)
     }
 
     /// Remove a single op identified by `hlc` from the queue.
@@ -135,14 +137,15 @@ impl<S: StorageEngineSync> PendingQueue<S> {
     ///
     /// Used by the inbound reject handler to roll back a single optimistic
     /// local write without touching the rest of the queue.
-    pub fn remove(&self, hlc: Hlc) -> Result<bool, LiteError> {
+    pub async fn remove(&self, hlc: Hlc) -> Result<bool, LiteError> {
         let key = hlc.to_bytes().to_vec();
         let exists = self
             .storage
-            .get_sync(Namespace::ArrayDelta, &key)?
+            .get(Namespace::ArrayDelta, &key)
+            .await?
             .is_some();
         if exists {
-            self.storage.delete_sync(Namespace::ArrayDelta, &key)?;
+            self.storage.delete(Namespace::ArrayDelta, &key).await?;
         }
         Ok(exists)
     }
@@ -153,7 +156,7 @@ impl<S: StorageEngineSync> PendingQueue<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::redb_storage::RedbStorage;
+    use crate::storage::pagedb_storage::{PagedbStorageDefault, PagedbStorageMem};
     use nodedb_array::sync::op::{ArrayOpHeader, ArrayOpKind};
     use nodedb_array::sync::replica_id::ReplicaId;
     use nodedb_array::types::cell_value::value::CellValue;
@@ -183,97 +186,97 @@ mod tests {
         }
     }
 
-    fn make_queue() -> PendingQueue<RedbStorage> {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
+    async fn make_queue() -> PendingQueue<PagedbStorageMem> {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
         PendingQueue::new(storage)
     }
 
-    #[test]
-    fn enqueue_drain_fifo_order() {
-        let q = make_queue();
-        q.enqueue(&make_op(10)).unwrap();
-        q.enqueue(&make_op(20)).unwrap();
-        q.enqueue(&make_op(30)).unwrap();
+    #[tokio::test]
+    async fn enqueue_drain_fifo_order() {
+        let q = make_queue().await;
+        q.enqueue(&make_op(10)).await.unwrap();
+        q.enqueue(&make_op(20)).await.unwrap();
+        q.enqueue(&make_op(30)).await.unwrap();
 
-        let ops = q.drain_batch(usize::MAX).unwrap();
+        let ops = q.drain_batch(usize::MAX).await.unwrap();
         assert_eq!(ops.len(), 3);
         let ms: Vec<u64> = ops.iter().map(|o| o.header.hlc.physical_ms).collect();
         assert_eq!(ms, vec![10, 20, 30], "must be FIFO (ascending HLC) order");
     }
 
-    #[test]
-    fn enqueue_full_returns_backpressure() {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
+    #[tokio::test]
+    async fn enqueue_full_returns_backpressure() {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
         let q = PendingQueue::with_cap(Arc::clone(&storage), 2);
 
-        q.enqueue(&make_op(1)).unwrap();
-        q.enqueue(&make_op(2)).unwrap();
+        q.enqueue(&make_op(1)).await.unwrap();
+        q.enqueue(&make_op(2)).await.unwrap();
 
-        let err = q.enqueue(&make_op(3)).unwrap_err();
+        let err = q.enqueue(&make_op(3)).await.unwrap_err();
         assert!(
             matches!(err, LiteError::Backpressure { .. }),
             "expected Backpressure, got: {err:?}"
         );
     }
 
-    #[test]
-    fn ack_through_removes_lower() {
-        let q = make_queue();
-        q.enqueue(&make_op(10)).unwrap();
-        q.enqueue(&make_op(20)).unwrap();
-        q.enqueue(&make_op(30)).unwrap();
+    #[tokio::test]
+    async fn ack_through_removes_lower() {
+        let q = make_queue().await;
+        q.enqueue(&make_op(10)).await.unwrap();
+        q.enqueue(&make_op(20)).await.unwrap();
+        q.enqueue(&make_op(30)).await.unwrap();
 
         // Ack through ms=20 (inclusive).
-        let removed = q.ack_through(hlc(20)).unwrap();
+        let removed = q.ack_through(hlc(20)).await.unwrap();
         assert_eq!(removed, 2);
-        assert_eq!(q.len().unwrap(), 1);
+        assert_eq!(q.len().await.unwrap(), 1);
 
-        let remaining = q.drain_batch(usize::MAX).unwrap();
+        let remaining = q.drain_batch(usize::MAX).await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].header.hlc.physical_ms, 30);
     }
 
-    #[test]
-    fn remove_existing_returns_true() {
-        let q = make_queue();
-        q.enqueue(&make_op(10)).unwrap();
-        q.enqueue(&make_op(20)).unwrap();
+    #[tokio::test]
+    async fn remove_existing_returns_true() {
+        let q = make_queue().await;
+        q.enqueue(&make_op(10)).await.unwrap();
+        q.enqueue(&make_op(20)).await.unwrap();
 
-        let removed = q.remove(hlc(10)).unwrap();
+        let removed = q.remove(hlc(10)).await.unwrap();
         assert!(removed, "remove of existing op must return true");
-        assert_eq!(q.len().unwrap(), 1);
+        assert_eq!(q.len().await.unwrap(), 1);
 
-        let remaining = q.drain_batch(usize::MAX).unwrap();
+        let remaining = q.drain_batch(usize::MAX).await.unwrap();
         assert_eq!(remaining[0].header.hlc.physical_ms, 20);
     }
 
-    #[test]
-    fn remove_missing_returns_false() {
-        let q = make_queue();
-        q.enqueue(&make_op(10)).unwrap();
+    #[tokio::test]
+    async fn remove_missing_returns_false() {
+        let q = make_queue().await;
+        q.enqueue(&make_op(10)).await.unwrap();
 
-        let removed = q.remove(hlc(99)).unwrap();
+        let removed = q.remove(hlc(99)).await.unwrap();
         assert!(!removed, "remove of absent op must return false");
-        assert_eq!(q.len().unwrap(), 1, "queue length must be unchanged");
+        assert_eq!(q.len().await.unwrap(), 1, "queue length must be unchanged");
     }
 
-    #[test]
-    fn survives_storage_restart() {
+    #[tokio::test]
+    async fn survives_storage_restart() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pending_test.redb");
+        let path = dir.path().join("pending_test.pagedb");
 
         {
-            let storage = Arc::new(RedbStorage::open(&path).unwrap());
+            let storage = Arc::new(PagedbStorageDefault::open(&path).await.unwrap());
             let q = PendingQueue::new(storage);
-            q.enqueue(&make_op(5)).unwrap();
-            q.enqueue(&make_op(15)).unwrap();
+            q.enqueue(&make_op(5)).await.unwrap();
+            q.enqueue(&make_op(15)).await.unwrap();
         }
 
         {
-            let storage = Arc::new(RedbStorage::open(&path).unwrap());
+            let storage = Arc::new(PagedbStorageDefault::open(&path).await.unwrap());
             let q = PendingQueue::new(storage);
-            assert_eq!(q.len().unwrap(), 2);
-            let ops = q.drain_batch(usize::MAX).unwrap();
+            assert_eq!(q.len().await.unwrap(), 2);
+            let ops = q.drain_batch(usize::MAX).await.unwrap();
             let ms: Vec<u64> = ops.iter().map(|o| o.header.hlc.physical_ms).collect();
             assert_eq!(ms, vec![5, 15]);
         }

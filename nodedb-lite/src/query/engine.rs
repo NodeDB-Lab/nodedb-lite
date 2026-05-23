@@ -19,13 +19,13 @@ use crate::engine::spatial::SpatialIndexManager;
 use crate::engine::strict::StrictEngine;
 use crate::engine::vector::VectorState;
 use crate::error::LiteError;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::catalog::LiteCatalog;
 use super::meta_ops::CancellationRegistry;
 
 /// Lite-side query engine.
-pub struct LiteQueryEngine<S: StorageEngine + StorageEngineSync> {
+pub struct LiteQueryEngine<S: StorageEngine> {
     pub(in crate::query) crdt: Arc<Mutex<CrdtEngine>>,
     pub(in crate::query) strict: Arc<StrictEngine<S>>,
     pub(in crate::query) columnar: Arc<ColumnarEngine<S>>,
@@ -34,7 +34,7 @@ pub struct LiteQueryEngine<S: StorageEngine + StorageEngineSync> {
     pub(in crate::query) timeseries:
         Arc<Mutex<crate::engine::timeseries::engine::TimeseriesEngine>>,
     pub(crate) vector_state: Arc<VectorState<S>>,
-    pub(crate) array_state: Arc<Mutex<crate::engine::array::engine::ArrayEngineState>>,
+    pub(crate) array_state: Arc<tokio::sync::Mutex<crate::engine::array::engine::ArrayEngineState>>,
     pub(crate) fts_state: Arc<FtsState>,
     pub(in crate::query) spatial: Arc<Mutex<SpatialIndexManager>>,
     pub(crate) cancellation: CancellationRegistry,
@@ -42,7 +42,7 @@ pub struct LiteQueryEngine<S: StorageEngine + StorageEngineSync> {
     pub(crate) csr: Arc<Mutex<HashMap<String, CsrIndex>>>,
 }
 
-impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
+impl<S: StorageEngine> LiteQueryEngine<S> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         crdt: Arc<Mutex<CrdtEngine>>,
@@ -52,7 +52,7 @@ impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
         storage: Arc<S>,
         timeseries: Arc<Mutex<crate::engine::timeseries::engine::TimeseriesEngine>>,
         vector_state: Arc<VectorState<S>>,
-        array_state: Arc<Mutex<crate::engine::array::engine::ArrayEngineState>>,
+        array_state: Arc<tokio::sync::Mutex<crate::engine::array::engine::ArrayEngineState>>,
         fts_state: Arc<FtsState>,
         spatial: Arc<Mutex<SpatialIndexManager>>,
         csr: Arc<Mutex<HashMap<String, CsrIndex>>>,

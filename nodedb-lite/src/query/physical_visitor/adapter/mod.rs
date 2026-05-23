@@ -23,7 +23,7 @@ use nodedb_types::result::QueryResult;
 use crate::engine::array::ops::util::time::now_ms;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::text_op::execute_text_op;
 use super::vector_op::execute_vector_op;
@@ -42,15 +42,15 @@ mod timeseries;
 pub(crate) type LitePhysicalFut<'a> =
     Pin<Box<dyn Future<Output = Result<QueryResult, LiteError>> + Send + 'a>>;
 
-pub(crate) struct LiteDataPlaneVisitor<'a, S: StorageEngine + StorageEngineSync> {
+pub(crate) struct LiteDataPlaneVisitor<'a, S: StorageEngine> {
     pub(crate) engine: &'a LiteQueryEngine<S>,
 }
 
 /// Decode a msgpack-encoded `Slice` for array `name` and run a surrogate
 /// bitmap scan against the array engine, returning the set of surrogates
 /// for all live cells that match the slice predicate.
-pub(crate) fn execute_surrogate_scan<S: StorageEngine + StorageEngineSync>(
-    array_state: &Arc<std::sync::Mutex<crate::engine::array::engine::ArrayEngineState>>,
+pub(crate) async fn execute_surrogate_scan<S: StorageEngine>(
+    array_state: &Arc<tokio::sync::Mutex<crate::engine::array::engine::ArrayEngineState>>,
     storage: &Arc<S>,
     name: &str,
     slice_bytes: &[u8],
@@ -60,13 +60,13 @@ pub(crate) fn execute_surrogate_scan<S: StorageEngine + StorageEngineSync>(
             detail: format!("decode Slice predicate: {e}"),
         })?;
     let system_as_of = now_ms();
-    let mut state = array_state.lock().map_err(|_| LiteError::LockPoisoned)?;
-    state.surrogate_bitmap_scan(storage, name, slice.dim_ranges, system_as_of)
+    let mut state = array_state.lock().await;
+    state
+        .surrogate_bitmap_scan(storage, name, slice.dim_ranges, system_as_of)
+        .await
 }
 
-impl<'a, S: StorageEngine + StorageEngineSync + 'a> PhysicalTaskVisitor
-    for LiteDataPlaneVisitor<'a, S>
-{
+impl<'a, S: StorageEngine + 'a> PhysicalTaskVisitor for LiteDataPlaneVisitor<'a, S> {
     type Output = LitePhysicalFut<'a>;
     type Error = LiteError;
 

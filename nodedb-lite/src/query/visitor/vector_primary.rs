@@ -12,7 +12,7 @@ use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::filter_convert::sql_value_to_value;
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::adapter::LiteFut;
 
@@ -39,7 +39,7 @@ fn encode_payload(
 /// Each row in `rows` becomes one `DirectUpsert`. Lite processes them
 /// sequentially — there is no batch allocator; each upsert is idempotent
 /// and the last write wins on duplicate surrogate.
-pub(super) fn lower_vector_primary_insert<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_vector_primary_insert<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     field: &str,
@@ -108,12 +108,16 @@ mod tests {
     use nodedb_sql::types::plan::VectorPrimaryRow;
     use nodedb_types::{Surrogate, VectorQuantization, VectorStorageDtype};
 
+    use crate::PagedbStorageMem;
     use crate::query::engine::LiteQueryEngine;
-    use crate::storage::redb_storage::RedbStorage;
 
-    fn make_engine() -> LiteQueryEngine<RedbStorage> {
+    async fn make_engine() -> LiteQueryEngine<PagedbStorageMem> {
         use std::sync::Mutex;
-        let storage = Arc::new(RedbStorage::open_in_memory().expect("in-memory redb"));
+        let storage = Arc::new(
+            PagedbStorageMem::open_in_memory()
+                .await
+                .expect("in-memory pagedb"),
+        );
         let crdt = Arc::new(Mutex::new(
             crate::engine::crdt::CrdtEngine::new(1).expect("crdt"),
         ));
@@ -131,8 +135,10 @@ mod tests {
             Arc::clone(&storage),
             100,
         ));
-        let array_state = Arc::new(Mutex::new(
-            crate::engine::array::engine::ArrayEngineState::open(&storage).expect("array"),
+        let array_state = Arc::new(tokio::sync::Mutex::new(
+            crate::engine::array::engine::ArrayEngineState::open(&storage)
+                .await
+                .expect("array"),
         ));
         let fts_state = Arc::new(crate::engine::fts::FtsState::new());
         let spatial = Arc::new(Mutex::new(
@@ -155,7 +161,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_vector_primary_insert_single_row() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         let rows = vec![VectorPrimaryRow {
             surrogate: Surrogate(1u32),
             vector: vec![0.1f32, 0.2, 0.3, 0.4],
@@ -177,7 +183,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_vector_primary_insert_multiple_rows() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         let rows: Vec<VectorPrimaryRow> = (1..=3u32)
             .map(|i| VectorPrimaryRow {
                 surrogate: Surrogate(i),

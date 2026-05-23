@@ -7,7 +7,7 @@ use nodedb_types::result::QueryResult;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::value_utils::{loro_value_to_string, value_to_string};
-use crate::storage::engine::{StorageEngine, StorageEngineSync, WriteOp};
+use crate::storage::engine::{StorageEngine, WriteOp};
 
 use super::is_strict;
 use super::reads::index_insert_id;
@@ -17,7 +17,7 @@ use super::reads::index_insert_id;
 /// For strict collections (`StorageMode::Strict`), the schema is persisted to
 /// the strict engine. For schemaless collections, this is a no-op — CRDT
 /// collections are discovered on first write.
-pub async fn register<S: StorageEngine + StorageEngineSync>(
+pub async fn register<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     storage_mode: &nodedb_physical::physical_plan::document::types::StorageMode,
@@ -42,18 +42,19 @@ pub async fn register<S: StorageEngine + StorageEngineSync>(
 }
 
 /// DropIndex: remove all sparse-index entries for a field on a collection.
-pub fn drop_index<S: StorageEngine + StorageEngineSync>(
+pub async fn drop_index<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     field: &str,
 ) -> Result<QueryResult, LiteError> {
     let prefix = format!("{collection}:{field}:");
-    let entries = engine.storage.scan_range_bounded_sync(
-        Namespace::Meta,
-        Some(prefix.as_bytes()),
-        None,
-        None,
-    )?;
+    let entries = engine
+        .storage
+        .scan_range_bounded(Namespace::Meta, Some(prefix.as_bytes()), None, None)
+        .await
+        .map_err(|e| LiteError::Storage {
+            detail: e.to_string(),
+        })?;
     let mut ops: Vec<WriteOp> = Vec::with_capacity(entries.len());
     for (key, _) in entries {
         if key.starts_with(prefix.as_bytes()) {
@@ -65,7 +66,13 @@ pub fn drop_index<S: StorageEngine + StorageEngineSync>(
     }
     let count = ops.len() as u64;
     if !ops.is_empty() {
-        engine.storage.batch_write_sync(&ops)?;
+        engine
+            .storage
+            .batch_write(&ops)
+            .await
+            .map_err(|e| LiteError::Storage {
+                detail: e.to_string(),
+            })?;
     }
     Ok(QueryResult {
         columns: Vec::new(),
@@ -75,7 +82,7 @@ pub fn drop_index<S: StorageEngine + StorageEngineSync>(
 }
 
 /// BackfillIndex: rebuild a secondary index from existing collection documents.
-pub async fn backfill_index<S: StorageEngine + StorageEngineSync>(
+pub async fn backfill_index<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     path: &str,
@@ -109,27 +116,29 @@ pub async fn backfill_index<S: StorageEngine + StorageEngineSync>(
                 && idx < row.len()
             {
                 let val_str = value_to_string(&row[idx]);
-                index_insert_id(engine, collection, path, &val_str, &pk)?;
+                index_insert_id(engine, collection, path, &val_str, &pk).await?;
                 indexed += 1;
             }
         }
     } else {
-        let crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
-        let ids = crdt.list_ids(collection);
-        let bare = bare_path(path);
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        for id in &ids {
-            if let Some(val) = crdt.read(collection, id)
-                && let loro::LoroValue::Map(map) = &val
-                && let Some(field_val) = map.get(bare)
-            {
-                let val_str = loro_value_to_string(field_val);
-                pairs.push((id.clone(), val_str));
+        let pairs: Vec<(String, String)> = {
+            let crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
+            let ids = crdt.list_ids(collection);
+            let bare = bare_path(path);
+            let mut out: Vec<(String, String)> = Vec::new();
+            for id in &ids {
+                if let Some(val) = crdt.read(collection, id)
+                    && let loro::LoroValue::Map(map) = &val
+                    && let Some(field_val) = map.get(bare)
+                {
+                    let val_str = loro_value_to_string(field_val);
+                    out.push((id.clone(), val_str));
+                }
             }
-        }
-        drop(crdt);
+            out
+        };
         for (id, val_str) in &pairs {
-            index_insert_id(engine, collection, path, val_str, id)?;
+            index_insert_id(engine, collection, path, val_str, id).await?;
             indexed += 1;
         }
     }

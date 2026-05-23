@@ -7,14 +7,14 @@
 //! When `audit_retain_ms` is `None` the array has no retention policy and
 //! compact is a no-op (returns `rows_affected = 0`).
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use nodedb_types::result::QueryResult;
 
 use crate::engine::array::engine::ArrayEngineState;
 use crate::engine::array::ops::util::time::now_ms;
 use crate::error::LiteError;
-use crate::storage::engine::StorageEngineSync;
+use crate::storage::engine::StorageEngine;
 
 /// Execute `ArrayOp::Compact` for the Lite engine.
 ///
@@ -24,8 +24,8 @@ use crate::storage::engine::StorageEngineSync;
 ///
 /// If `audit_retain_ms` is `None`, no merge is needed and the call returns
 /// immediately with `rows_affected = 0`.
-pub async fn compact<S: StorageEngineSync>(
-    array_state: &Arc<Mutex<ArrayEngineState>>,
+pub async fn compact<S: StorageEngine>(
+    array_state: &Arc<tokio::sync::Mutex<ArrayEngineState>>,
     storage: &Arc<S>,
     name: &str,
     audit_retain_ms: Option<i64>,
@@ -44,7 +44,7 @@ pub async fn compact<S: StorageEngineSync>(
     let now_ms = now_ms();
 
     let rewritten = {
-        let mut state = array_state.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let mut state = array_state.lock().await;
         let arr = state
             .arrays
             .get_mut(name)
@@ -53,15 +53,26 @@ pub async fn compact<S: StorageEngineSync>(
             })?;
         let schema = arr.schema.clone();
         let schema_hash = arr.schema_hash;
-        crate::engine::array::retention::run_retention(
+        // Drop the lock before the async call.
+        let (schema, schema_hash, manifest_snapshot) = (schema, schema_hash, arr.manifest.clone());
+        drop(state);
+        let mut manifest = manifest_snapshot;
+        let n = crate::engine::array::retention::run_retention(
             storage,
             name,
-            &mut arr.manifest,
+            &mut manifest,
             &schema,
             schema_hash,
             retain_ms,
             now_ms,
-        )?
+        )
+        .await?;
+        // Write the updated manifest back.
+        let mut state = array_state.lock().await;
+        if let Some(arr) = state.arrays.get_mut(name) {
+            arr.manifest = manifest;
+        }
+        n
     };
 
     Ok(QueryResult {

@@ -9,7 +9,7 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// Parse a JSON `{"<peer_hex>": counter}` object into a Loro `VersionVector`.
 ///
@@ -38,7 +38,7 @@ fn parse_version_vector(json: &str) -> Result<VersionVector, LiteError> {
 }
 
 /// Read a document's state at a historical version.
-pub async fn handle_read_at_version<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_read_at_version<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     document_id: &str,
@@ -73,7 +73,7 @@ pub async fn handle_read_at_version<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Return the current oplog version vector as a JSON string.
-pub async fn handle_get_version_vector<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_get_version_vector<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
 ) -> Result<QueryResult, LiteError> {
     let crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
@@ -89,7 +89,7 @@ pub async fn handle_get_version_vector<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Export the oplog delta from a version to current state.
-pub async fn handle_export_delta<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_export_delta<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     from_version_json: &str,
 ) -> Result<QueryResult, LiteError> {
@@ -112,7 +112,7 @@ pub async fn handle_export_delta<S: StorageEngine + StorageEngineSync>(
 /// Restore a document to a historical version via a forward mutation.
 ///
 /// Returns the delta bytes for the restore operation.
-pub async fn handle_restore_to_version<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_restore_to_version<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     document_id: &str,
@@ -136,7 +136,7 @@ pub async fn handle_restore_to_version<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Compact the CRDT oplog at a specific version, discarding history before it.
-pub async fn handle_compact_at_version<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_compact_at_version<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     target_version_json: &str,
 ) -> Result<QueryResult, LiteError> {

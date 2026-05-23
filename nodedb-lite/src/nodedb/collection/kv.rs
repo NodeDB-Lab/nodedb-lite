@@ -26,7 +26,7 @@ use nodedb_types::Namespace;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 
 use super::super::{LockExt, NodeDbLite};
-use crate::storage::engine::{StorageEngine, StorageEngineSync, WriteOp};
+use crate::storage::engine::{StorageEngine, WriteOp};
 
 /// Prefix for KV collection names in the CRDT namespace.
 const KV_CRDT_PREFIX: &str = "_kv_";
@@ -90,20 +90,20 @@ fn is_expired(deadline_ms: u64) -> bool {
     deadline_ms != 0 && now_ms() >= deadline_ms
 }
 
-impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
+impl<S: StorageEngine> NodeDbLite<S> {
     /// KV PUT: store a key-value pair with no expiry.
     ///
     /// Buffered in memory — call `kv_flush()` to commit to redb, or let
     /// the auto-flush threshold handle it.
-    pub fn kv_put(&self, collection: &str, key: &str, value: &[u8]) -> NodeDbResult<()> {
-        self.kv_put_with_deadline(collection, key, value, 0)
+    pub async fn kv_put(&self, collection: &str, key: &str, value: &[u8]) -> NodeDbResult<()> {
+        self.kv_put_with_deadline(collection, key, value, 0).await
     }
 
     /// KV PUT WITH TTL: store a key-value pair that expires after `ttl_ms` ms.
     ///
     /// After `ttl_ms` milliseconds, `kv_get` will return `None` for this key
     /// and lazy-delete it. The deadline survives a database reopen.
-    pub fn kv_put_with_ttl(
+    pub async fn kv_put_with_ttl(
         &self,
         collection: &str,
         key: &str,
@@ -112,10 +112,11 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     ) -> NodeDbResult<()> {
         let deadline = now_ms().saturating_add(ttl_ms);
         self.kv_put_with_deadline(collection, key, value, deadline)
+            .await
     }
 
     /// Internal: write a key with an explicit deadline (0 = no expiry).
-    fn kv_put_with_deadline(
+    async fn kv_put_with_deadline(
         &self,
         collection: &str,
         key: &str,
@@ -136,7 +137,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         drop(buf);
 
         if should_flush {
-            self.kv_flush_inner()?;
+            self.kv_flush_inner().await?;
         }
 
         // Sync path: also update Loro for delta generation.
@@ -159,7 +160,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     ///
     /// Checks the in-memory write buffer first (for uncommitted writes),
     /// then falls through to redb.
-    pub fn kv_get(&self, collection: &str, key: &str) -> NodeDbResult<Option<Vec<u8>>> {
+    pub async fn kv_get(&self, collection: &str, key: &str) -> NodeDbResult<Option<Vec<u8>>> {
         let rkey = redb_key(collection, key.as_bytes());
 
         // Check write buffer overlay first.
@@ -182,10 +183,11 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         }
         drop(buf);
 
-        // Fall through to redb.
+        // Fall through to storage.
         let stored = self
             .storage
-            .get_sync(Namespace::Kv, &rkey)
+            .get(Namespace::Kv, &rkey)
+            .await
             .map_err(NodeDbError::storage)?;
 
         match stored {
@@ -195,7 +197,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
                 Some((deadline, user_bytes)) => {
                     if is_expired(deadline) {
                         // Lazy expiration: schedule a delete.
-                        self.kv_lazy_delete(rkey)?;
+                        self.kv_lazy_delete(rkey).await?;
                         Ok(None)
                     } else {
                         Ok(Some(user_bytes.to_vec()))
@@ -206,7 +208,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     }
 
     /// Internal: queue a lazy delete for an expired key.
-    fn kv_lazy_delete(&self, rkey: Vec<u8>) -> NodeDbResult<()> {
+    async fn kv_lazy_delete(&self, rkey: Vec<u8>) -> NodeDbResult<()> {
         let mut buf = self.kv_write_buf.lock_or_recover();
         buf.overlay.insert(rkey.clone(), None);
         buf.ops.push(WriteOp::Delete {
@@ -216,13 +218,13 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         let should_flush = buf.ops.len() >= KV_FLUSH_THRESHOLD;
         drop(buf);
         if should_flush {
-            self.kv_flush_inner()?;
+            self.kv_flush_inner().await?;
         }
         Ok(())
     }
 
     /// KV DELETE: remove a key.
-    pub fn kv_delete(&self, collection: &str, key: &str) -> NodeDbResult<bool> {
+    pub async fn kv_delete(&self, collection: &str, key: &str) -> NodeDbResult<bool> {
         let rkey = redb_key(collection, key.as_bytes());
 
         let mut buf = self.kv_write_buf.lock_or_recover();
@@ -235,7 +237,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         drop(buf);
 
         if should_flush {
-            self.kv_flush_inner()?;
+            self.kv_flush_inner().await?;
         }
 
         if self.sync_enabled {
@@ -260,14 +262,14 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     ///
     /// Flushes the write buffer before scanning so redb reflects all pending
     /// writes.
-    pub fn kv_range_scan(
+    pub async fn kv_range_scan(
         &self,
         collection: &str,
         start: Option<&[u8]>,
         end: Option<&[u8]>,
         limit: Option<usize>,
     ) -> NodeDbResult<Vec<(Vec<u8>, Vec<u8>)>> {
-        self.kv_flush_inner()?;
+        self.kv_flush_inner().await?;
 
         let col_prefix_end = {
             let mut p = collection.as_bytes().to_vec();
@@ -294,12 +296,13 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
 
         let entries = self
             .storage
-            .scan_range_bounded_sync(
+            .scan_range_bounded(
                 Namespace::Kv,
                 start_key.as_deref(),
                 end_key.as_deref(),
                 limit.map(|l| l + 32), // over-fetch slightly to account for skipped expired keys
             )
+            .await
             .map_err(NodeDbError::storage)?;
 
         let mut results: Vec<(Vec<u8>, Vec<u8>)> =
@@ -341,7 +344,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             let should_flush = buf.ops.len() >= KV_FLUSH_THRESHOLD;
             drop(buf);
             if should_flush {
-                self.kv_flush_inner()?;
+                self.kv_flush_inner().await?;
             }
         }
 
@@ -353,8 +356,8 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     /// Flushes the write buffer, then scans all keys in the collection and
     /// deletes any whose TTL deadline has passed. Returns the count of keys
     /// removed.
-    pub fn kv_compact_expired(&self, collection: &str) -> NodeDbResult<usize> {
-        self.kv_flush_inner()?;
+    pub async fn kv_compact_expired(&self, collection: &str) -> NodeDbResult<usize> {
+        self.kv_flush_inner().await?;
 
         let col_prefix = {
             let mut p = collection.as_bytes().to_vec();
@@ -364,7 +367,8 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
 
         let entries = self
             .storage
-            .scan_range_bounded_sync(Namespace::Kv, Some(&col_prefix), None, None)
+            .scan_range_bounded(Namespace::Kv, Some(&col_prefix), None, None)
+            .await
             .map_err(NodeDbError::storage)?;
 
         let now = now_ms();
@@ -381,8 +385,8 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
                 && deadline != 0
                 && now >= deadline
             {
-                // composite_key is the redb user-key (namespace byte
-                // already stripped by scan_range_bounded_sync). WriteOp
+                // composite_key is the user-key (namespace byte
+                // already stripped by scan_range_bounded). WriteOp
                 // re-prepends the namespace byte via make_key internally.
                 delete_ops.push(WriteOp::Delete {
                     ns: Namespace::Kv,
@@ -394,7 +398,8 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         let count = delete_ops.len();
         if count > 0 {
             self.storage
-                .batch_write_sync(&delete_ops)
+                .batch_write(&delete_ops)
+                .await
                 .map_err(NodeDbError::storage)?;
         }
 
@@ -407,20 +412,21 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     /// Pass an empty cursor to start from the beginning of the collection.
     ///
     /// Flushes the write buffer first to ensure redb has all data, then
-    /// uses redb's native B-tree range scan — O(log N + count).
-    pub fn kv_scan(
+    /// uses the storage's B-tree range scan — O(log N + count).
+    pub async fn kv_scan(
         &self,
         collection: &str,
         cursor: &str,
         count: usize,
     ) -> NodeDbResult<Vec<(String, Vec<u8>)>> {
-        // Flush pending writes so redb is up to date.
-        self.kv_flush_inner()?;
+        // Flush pending writes so storage is up to date.
+        self.kv_flush_inner().await?;
 
         let start = redb_key(collection, cursor.as_bytes());
         let entries = self
             .storage
-            .scan_range_sync(Namespace::Kv, &start, count)
+            .scan_range(Namespace::Kv, &start, count)
+            .await
             .map_err(NodeDbError::storage)?;
 
         let mut results = Vec::with_capacity(entries.len());
@@ -445,11 +451,11 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         Ok(results)
     }
 
-    /// Flush buffered KV writes to redb as a single transaction.
+    /// Flush buffered KV writes to storage as a single transaction.
     ///
     /// Also flushes deferred CRDT deltas when sync is enabled.
-    pub fn kv_flush(&self) -> NodeDbResult<usize> {
-        let count = self.kv_flush_inner()?;
+    pub async fn kv_flush(&self) -> NodeDbResult<usize> {
+        let count = self.kv_flush_inner().await?;
 
         if self.sync_enabled {
             let mut crdt = self.crdt.lock_or_recover();
@@ -459,8 +465,8 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         Ok(count)
     }
 
-    /// Internal: flush write buffer to redb without touching CRDT.
-    fn kv_flush_inner(&self) -> NodeDbResult<usize> {
+    /// Internal: flush write buffer to storage without touching CRDT.
+    async fn kv_flush_inner(&self) -> NodeDbResult<usize> {
         let mut buf = self.kv_write_buf.lock_or_recover();
         if buf.ops.is_empty() {
             return Ok(0);
@@ -472,21 +478,23 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
 
         let count = ops.len();
         self.storage
-            .batch_write_sync(&ops)
+            .batch_write(&ops)
+            .await
             .map_err(NodeDbError::storage)?;
 
         Ok(count)
     }
 
     /// List all keys in a KV collection.
-    pub fn kv_keys(&self, collection: &str) -> NodeDbResult<Vec<String>> {
+    pub async fn kv_keys(&self, collection: &str) -> NodeDbResult<Vec<String>> {
         // Flush pending writes first.
-        self.kv_flush_inner()?;
+        self.kv_flush_inner().await?;
 
         let prefix = redb_key(collection, b"");
         let entries = self
             .storage
-            .scan_range_sync(Namespace::Kv, &prefix, usize::MAX)
+            .scan_range(Namespace::Kv, &prefix, usize::MAX)
+            .await
             .map_err(NodeDbError::storage)?;
 
         let mut keys = Vec::with_capacity(entries.len());
@@ -552,12 +560,12 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
     }
 
     /// Subscribe to a subset of KV keys matching a pattern.
-    pub fn kv_subscribe_shape(
+    pub async fn kv_subscribe_shape(
         &self,
         collection: &str,
         key_pattern: &str,
     ) -> NodeDbResult<Vec<String>> {
-        let all_keys = self.kv_keys(collection)?;
+        let all_keys = self.kv_keys(collection).await?;
         let matched: Vec<String> = all_keys
             .into_iter()
             .filter(|k| glob_matches(key_pattern, k))

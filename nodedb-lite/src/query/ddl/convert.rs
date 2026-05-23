@@ -12,11 +12,11 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::parser::parse_strict_create_sql;
 
-impl<S: StorageEngine + StorageEngineSync> LiteQueryEngine<S> {
+impl<S: StorageEngine> LiteQueryEngine<S> {
     /// Handle: CONVERT COLLECTION <name> TO strict (<col_defs>)
     ///
     /// Reads all schemaless documents from the CRDT engine, validates each

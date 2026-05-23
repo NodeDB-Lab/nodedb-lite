@@ -7,7 +7,7 @@ use nodedb_types::value::Value;
 use crate::engine::graph::history as graph_history;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// `TemporalPurgeEdgeStore` — purge superseded edge versions older than cutoff.
 ///
@@ -15,7 +15,7 @@ use crate::storage::engine::{StorageEngine, StorageEngineSync};
 /// `Namespace::GraphHistory`. This handler deletes history entries whose
 /// `system_to_ms < cutoff_system_ms`. Collections that are not bitemporal have
 /// no history table; they return `rows_affected: 0` (correct — nothing to purge).
-pub async fn handle_temporal_purge_edge_store<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_temporal_purge_edge_store<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     _tenant_id: u64,
     collection: &str,
@@ -42,7 +42,7 @@ pub async fn handle_temporal_purge_edge_store<S: StorageEngine + StorageEngineSy
 /// the old row version to `Namespace::StrictHistory`. This handler deletes
 /// history entries whose `system_to_ms < cutoff_system_ms`. Non-bitemporal
 /// collections have no history table and return `rows_affected: 0`.
-pub async fn handle_temporal_purge_document_strict<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_temporal_purge_document_strict<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     _tenant_id: u64,
     collection: &str,
@@ -68,7 +68,7 @@ pub async fn handle_temporal_purge_document_strict<S: StorageEngine + StorageEng
 /// timestamp rather than being immediately purged. This handler removes those
 /// tombstones where `fully_deleted_at_ms < cutoff_system_ms`. Non-bitemporal
 /// collections have no tombstones and return `rows_affected: 0`.
-pub async fn handle_temporal_purge_columnar<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_temporal_purge_columnar<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     _tenant_id: u64,
     collection: &str,
@@ -93,7 +93,7 @@ pub async fn handle_temporal_purge_columnar<S: StorageEngine + StorageEngineSync
 /// The current state is fully preserved. The cutoff is advisory — Loro's
 /// `compact_history` discards all history before the current frontier, which
 /// subsumes the cutoff when all operations before it have been applied.
-pub async fn handle_temporal_purge_crdt<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_temporal_purge_crdt<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     _tenant_id: u64,
     _collection: &str,
@@ -114,7 +114,7 @@ pub async fn handle_temporal_purge_crdt<S: StorageEngine + StorageEngineSync>(
 /// to 0) and calls the array compact op, which merges out-of-horizon tile
 /// versions in every segment and rewrites the manifest. `rows_affected` reflects
 /// the number of segments rewritten by the compact pass.
-pub async fn handle_temporal_purge_array<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_temporal_purge_array<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     _tenant_id: u64,
     array_id: &str,
@@ -132,7 +132,7 @@ pub async fn handle_temporal_purge_array<S: StorageEngine + StorageEngineSync>(
 }
 
 /// `EnforceTimeseriesRetention` — drop timeseries partitions older than max_age_ms.
-pub async fn handle_enforce_timeseries_retention<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_enforce_timeseries_retention<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     _collection: &str,
     max_age_ms: i64,
@@ -161,6 +161,7 @@ mod tests {
     use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
     use nodedb_types::value::Value;
 
+    use crate::PagedbStorageDefault;
     use crate::engine::array::engine::ArrayEngineState;
     use crate::engine::columnar::ColumnarEngine;
     use crate::engine::crdt::CrdtEngine;
@@ -169,11 +170,10 @@ mod tests {
     use crate::engine::strict::StrictEngine;
     use crate::engine::vector::VectorState;
     use crate::query::engine::LiteQueryEngine;
-    use crate::storage::redb_storage::RedbStorage;
 
     use super::*;
 
-    fn make_engine(storage: Arc<RedbStorage>) -> LiteQueryEngine<RedbStorage> {
+    fn make_engine(storage: Arc<PagedbStorageDefault>) -> LiteQueryEngine<PagedbStorageDefault> {
         let crdt = Arc::new(Mutex::new(
             CrdtEngine::new(1).expect("CrdtEngine::new failed in test"),
         ));
@@ -184,7 +184,7 @@ mod tests {
             crate::engine::timeseries::engine::TimeseriesEngine::new(),
         ));
         let vector_state = Arc::new(VectorState::new(Arc::clone(&storage), 50));
-        let array_state = Arc::new(Mutex::new(ArrayEngineState::new()));
+        let array_state = Arc::new(tokio::sync::Mutex::new(ArrayEngineState::new()));
         let fts_state = Arc::new(FtsState::new());
         let spatial = Arc::new(Mutex::new(
             crate::engine::spatial::SpatialIndexManager::new(),
@@ -207,7 +207,11 @@ mod tests {
     #[tokio::test]
     async fn strict_bitemporal_purge_removes_superseded_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Arc::new(RedbStorage::open(dir.path().join("test.db")).unwrap());
+        let storage = Arc::new(
+            PagedbStorageDefault::open(dir.path().join("test.pagedb"))
+                .await
+                .unwrap(),
+        );
         let engine = make_engine(Arc::clone(&storage));
 
         // Create a bitemporal strict collection.
@@ -256,7 +260,11 @@ mod tests {
     #[tokio::test]
     async fn strict_non_bitemporal_purge_returns_zero() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Arc::new(RedbStorage::open(dir.path().join("test.db")).unwrap());
+        let storage = Arc::new(
+            PagedbStorageDefault::open(dir.path().join("test.pagedb"))
+                .await
+                .unwrap(),
+        );
         let engine = make_engine(Arc::clone(&storage));
 
         let cols = vec![ColumnDef::required("id", ColumnType::Int64).with_primary_key()];
@@ -276,7 +284,11 @@ mod tests {
     #[tokio::test]
     async fn columnar_non_bitemporal_purge_returns_zero() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Arc::new(RedbStorage::open(dir.path().join("test.db")).unwrap());
+        let storage = Arc::new(
+            PagedbStorageDefault::open(dir.path().join("test.pagedb"))
+                .await
+                .unwrap(),
+        );
         let engine = make_engine(Arc::clone(&storage));
 
         let schema = nodedb_types::columnar::ColumnarSchema::new(vec![
@@ -303,7 +315,11 @@ mod tests {
     #[tokio::test]
     async fn columnar_bitemporal_purge_removes_tombstoned_segments() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Arc::new(RedbStorage::open(dir.path().join("test.db")).unwrap());
+        let storage = Arc::new(
+            PagedbStorageDefault::open(dir.path().join("test.pagedb"))
+                .await
+                .unwrap(),
+        );
         let engine = make_engine(Arc::clone(&storage));
 
         let schema = nodedb_types::columnar::ColumnarSchema::new(vec![
@@ -357,7 +373,11 @@ mod tests {
     #[tokio::test]
     async fn graph_non_bitemporal_purge_returns_zero() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Arc::new(RedbStorage::open(dir.path().join("test.db")).unwrap());
+        let storage = Arc::new(
+            PagedbStorageDefault::open(dir.path().join("test.pagedb"))
+                .await
+                .unwrap(),
+        );
         let engine = make_engine(Arc::clone(&storage));
 
         // Collection "social" has no bitemporal flag set — returns 0.
@@ -370,7 +390,11 @@ mod tests {
     #[tokio::test]
     async fn strict_bitemporal_purge_cutoff_before_deletion_retains_history() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Arc::new(RedbStorage::open(dir.path().join("test.db")).unwrap());
+        let storage = Arc::new(
+            PagedbStorageDefault::open(dir.path().join("test.pagedb"))
+                .await
+                .unwrap(),
+        );
         let engine = make_engine(Arc::clone(&storage));
 
         let user_cols = vec![ColumnDef::required("id", ColumnType::Int64).with_primary_key()];

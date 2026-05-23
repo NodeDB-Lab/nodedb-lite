@@ -7,7 +7,7 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// `QueryCollectionSize` — sum the on-disk byte footprint (key + value) of
 /// every blob keyed under `{name}*` across all data-bearing namespaces.
@@ -15,7 +15,7 @@ use crate::storage::engine::{StorageEngine, StorageEngineSync};
 /// This is exact for the bytes the storage layer hands back, not an estimate;
 /// it does not include redb's internal page overhead, but it is deterministic
 /// and reflects what would be reclaimed by dropping the collection.
-pub async fn handle_query_collection_size<S: StorageEngine + StorageEngineSync>(
+pub async fn handle_query_collection_size<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     _tenant_id: u64,
     name: &str,

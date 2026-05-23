@@ -17,23 +17,20 @@ use crate::engine::strict::StrictEngine;
 use crate::engine::vector::VectorState;
 use crate::engine::vector::graph::HnswIndex;
 use crate::nodedb::lock_ext::LockExt;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::types::{
     KvWriteBuffer, META_CRDT_DELTAS, META_CRDT_SNAPSHOT, META_CSR_COLLECTIONS, META_CSR_LEGACY,
     META_HNSW_COLLECTIONS, META_LAST_FLUSHED_MID, NodeDbLite,
 };
 
-impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
+impl<S: StorageEngine> NodeDbLite<S> {
     /// Open or create a Lite database backed by the given storage engine.
     ///
     /// Memory budget and per-engine percentages are resolved from environment
     /// variables via [`LiteConfig::from_env()`], falling back to defaults when
     /// variables are absent or malformed.
-    pub async fn open(storage: S, peer_id: u64) -> NodeDbResult<Self>
-    where
-        S: crate::storage::engine::StorageEngineSync,
-    {
+    pub async fn open(storage: S, peer_id: u64) -> NodeDbResult<Self> {
         Self::open_with_config(storage, peer_id, crate::config::LiteConfig::from_env()).await
     }
 
@@ -45,10 +42,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         storage: S,
         peer_id: u64,
         config: crate::config::LiteConfig,
-    ) -> NodeDbResult<Self>
-    where
-        S: crate::storage::engine::StorageEngineSync,
-    {
+    ) -> NodeDbResult<Self> {
         let governor = crate::memory::MemoryGovernor::from_config(&config);
         let sync_enabled = config.sync_enabled;
         Self::open_inner(storage, peer_id, governor, sync_enabled).await
@@ -61,10 +55,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         storage: S,
         peer_id: u64,
         memory_budget: usize,
-    ) -> NodeDbResult<Self>
-    where
-        S: crate::storage::engine::StorageEngineSync,
-    {
+    ) -> NodeDbResult<Self> {
         let governor = crate::memory::MemoryGovernor::new(memory_budget);
         Self::open_inner(storage, peer_id, governor, true).await
     }
@@ -74,10 +65,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         peer_id: u64,
         governor: crate::memory::MemoryGovernor,
         sync_enabled: bool,
-    ) -> NodeDbResult<Self>
-    where
-        S: crate::storage::engine::StorageEngineSync,
-    {
+    ) -> NodeDbResult<Self> {
         let storage = Arc::new(storage);
 
         // ── Restore CRDT state (with CRC32C validation) ──
@@ -233,9 +221,10 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             hnsw_map,
         ));
         let fts_state = Arc::new(FtsState::from_restored(fts_manager));
-        let array_engine =
-            crate::engine::array::ArrayEngineState::open(&storage).map_err(NodeDbError::storage)?;
-        let array_state = Arc::new(Mutex::new(array_engine));
+        let array_engine = crate::engine::array::ArrayEngineState::open(&storage)
+            .await
+            .map_err(NodeDbError::storage)?;
+        let array_state = Arc::new(tokio::sync::Mutex::new(array_engine));
 
         let csr_arc = Arc::new(Mutex::new(csr));
         let query_engine = crate::query::LiteQueryEngine::new(
@@ -256,6 +245,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         #[cfg(not(target_arch = "wasm32"))]
         let array_replica = Arc::new(
             crate::sync::array::ReplicaState::load_or_init(&*storage)
+                .await
                 .map_err(NodeDbError::storage)?,
         );
         #[cfg(not(target_arch = "wasm32"))]
@@ -264,6 +254,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
                 Arc::clone(&storage),
                 Arc::clone(&array_replica),
             )
+            .await
             .map_err(NodeDbError::storage)?,
         );
         #[cfg(not(target_arch = "wasm32"))]
@@ -282,15 +273,19 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         #[cfg(not(target_arch = "wasm32"))]
         let array_catchup = Arc::new(
             crate::sync::array::CatchupTracker::load(Arc::clone(&storage))
+                .await
                 .map_err(NodeDbError::storage)?,
         );
         #[cfg(not(target_arch = "wasm32"))]
-        let array_apply_engine = Arc::new(crate::sync::array::LiteApplyEngine::new(
-            Arc::clone(&storage),
-            Arc::clone(&array_state),
-            Arc::clone(&array_schemas),
-            Arc::clone(array_outbound.op_log()),
-        ));
+        let array_apply_engine = Arc::new(
+            crate::sync::array::LiteApplyEngine::new(
+                Arc::clone(&storage),
+                Arc::clone(&array_state),
+                Arc::clone(&array_schemas),
+                Arc::clone(array_outbound.op_log()),
+            )
+            .await,
+        );
         #[cfg(not(target_arch = "wasm32"))]
         let array_inbound = Arc::new(crate::sync::array::ArrayInbound::new(
             array_apply_engine,

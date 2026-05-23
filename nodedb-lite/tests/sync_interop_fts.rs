@@ -28,9 +28,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nodedb_client::NodeDb;
-use nodedb_lite::NodeDbLite;
-use nodedb_lite::storage::redb_storage::RedbStorage;
 use nodedb_lite::sync::{SyncClient, SyncConfig, run_sync_loop};
+use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 use nodedb_types::document::Document;
 use nodedb_types::value::Value;
 
@@ -50,8 +49,10 @@ const CREATE_ORIGIN: &str = "CREATE COLLECTION fts_sync_test WITH (engine='docum
 
 // ── Helper: open a Lite DB backed by in-memory redb ─────────────────────────
 
-async fn open_lite() -> Arc<NodeDbLite<RedbStorage>> {
-    let storage = RedbStorage::open_in_memory().expect("open_in_memory");
+async fn open_lite() -> Arc<NodeDbLite<PagedbStorageMem>> {
+    let storage = PagedbStorageMem::open_in_memory()
+        .await
+        .expect("open_in_memory");
     Arc::new(
         NodeDbLite::open(storage, 1)
             .await
@@ -60,7 +61,7 @@ async fn open_lite() -> Arc<NodeDbLite<RedbStorage>> {
 }
 
 /// Wire up the sync transport and wait until the connection is established.
-async fn start_sync(lite: Arc<NodeDbLite<RedbStorage>>, peer_id: u64) -> Arc<SyncClient> {
+async fn start_sync(lite: Arc<NodeDbLite<PagedbStorageMem>>, peer_id: u64) -> Arc<SyncClient> {
     let sync_config = SyncConfig::new(common::origin::ORIGIN_WS, "");
     let sync_client = Arc::new(SyncClient::new(sync_config, peer_id));
     let delegate = Arc::clone(&lite) as Arc<dyn nodedb_lite::sync::SyncDelegate>;

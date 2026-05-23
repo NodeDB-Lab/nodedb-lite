@@ -7,7 +7,7 @@
 //! and returns one row per live cell. The response mirrors the Slice arm:
 //! columns `["attrs", "valid_from_ms", "valid_until_ms"]`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use nodedb_array::query::project::{Projection, project_sparse};
 use nodedb_array::query::retention::decode_sparse_rows;
@@ -20,15 +20,15 @@ use crate::engine::array::engine::ArrayEngineState;
 use crate::engine::array::ops::util::cell::cell_value_to_value;
 use crate::engine::array::ops::util::time::now_ms;
 use crate::error::LiteError;
-use crate::storage::engine::StorageEngineSync;
+use crate::storage::engine::StorageEngine;
 
 /// Execute `ArrayOp::Project` for the Lite engine.
 ///
 /// Scans all segments and the memtable, projects to the requested attribute
 /// indices, and returns every live cell as a row. The attribute order in the
 /// response matches `attr_indices` — not the schema order.
-pub async fn project<S: StorageEngineSync>(
-    array_state: &Arc<Mutex<ArrayEngineState>>,
+pub async fn project<S: StorageEngine>(
+    array_state: &Arc<tokio::sync::Mutex<ArrayEngineState>>,
     storage: &Arc<S>,
     name: &str,
     attr_indices: &[u32],
@@ -36,7 +36,7 @@ pub async fn project<S: StorageEngineSync>(
     let now_ms = now_ms();
 
     let (seg_ids, schema, schema_attr_count) = {
-        let state = array_state.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let state = array_state.lock().await;
         let arr = state
             .arrays
             .get(name)
@@ -70,7 +70,7 @@ pub async fn project<S: StorageEngineSync>(
 
     // Segments.
     for seg_id in &seg_ids {
-        let bytes = crate::engine::array::segments::load_segment(storage, name, *seg_id)?;
+        let bytes = crate::engine::array::segments::load_segment(storage, name, *seg_id).await?;
         let reader = SegmentReader::open(&bytes).map_err(|e| LiteError::Storage {
             detail: format!("open segment {seg_id}: {e}"),
         })?;
@@ -112,7 +112,7 @@ pub async fn project<S: StorageEngineSync>(
 
     // Memtable.
     {
-        let mut state = array_state.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let mut state = array_state.lock().await;
         let arr = state
             .arrays
             .get_mut(name)

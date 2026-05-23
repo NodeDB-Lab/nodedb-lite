@@ -13,7 +13,7 @@ use nodedb_types::value::Value;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::msgpack_helpers::{write_array_header, write_bin};
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// Parameters for a columnar scan operation.
 pub struct ScanParams {
@@ -29,7 +29,7 @@ pub struct ScanParams {
 
 /// Columnar Scan: filters, projection, sort, limit — with bitemporal and
 /// prefilter support.
-pub async fn scan<S: StorageEngine + StorageEngineSync>(
+pub async fn scan<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     params: ScanParams,
@@ -209,7 +209,7 @@ pub async fn scan<S: StorageEngine + StorageEngineSync>(
 /// MaterializeScan: cursor-paginated raw scan for the clone materializer.
 ///
 /// Response is msgpack-encoded `[next_cursor: bin, entries: [[row_bytes: bin], ...]]`.
-pub async fn materialize_scan<S: StorageEngine + StorageEngineSync>(
+pub async fn materialize_scan<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     cursor: &[u8],
