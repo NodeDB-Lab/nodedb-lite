@@ -201,6 +201,24 @@ where
         .map_err(|_| LiteError::LockPoisoned)?;
     let sidecar = sidecars.get(index_key);
 
+    // On native targets, use `get_vector_or_backing` so that graph-checkpoint-
+    // only restored indexes (which have empty per-node local storage) serve
+    // vectors from the pagedb segment backing attached by `with_backing`.
+    // On WASM the backing path is absent; `get_vector` is always correct there
+    // because WASM uses the full-checkpoint blob path where vectors are inline.
+    #[cfg(not(target_arch = "wasm32"))]
+    let ranked = rerank(
+        candidates,
+        query,
+        metric.unwrap_or_else(|| index.metric()),
+        k,
+        opts,
+        sidecar,
+        |id| index.get_vector_or_backing(id),
+    )
+    .map_err(|e| LiteError::Query(e.to_string()))?;
+
+    #[cfg(target_arch = "wasm32")]
     let ranked = rerank(
         candidates,
         query,

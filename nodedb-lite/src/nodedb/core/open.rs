@@ -364,6 +364,11 @@ impl<S: StorageEngine> NodeDbLite<S> {
     }
 
     /// Restore per-collection CSR graph indices from storage.
+    ///
+    /// On native targets with `PagedbStorage`, CSR blobs are read from pagedb
+    /// segments (segment-first, then fall back to the legacy B+ tree KV blob
+    /// for databases written by older builds).  On WASM, only the B+ tree path
+    /// is used.
     async fn restore_csr_indices(storage: &Arc<S>) -> NodeDbResult<HashMap<String, CsrIndex>> {
         let mut csr_map: HashMap<String, CsrIndex> = HashMap::new();
         let Some(collections_bytes) = storage.get(Namespace::Meta, META_CSR_COLLECTIONS).await?
@@ -373,7 +378,44 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let Ok(names) = zerompk::from_msgpack::<Vec<String>>(&collections_bytes) else {
             return Ok(csr_map);
         };
+
+        // On native targets, prefer the pagedb segment path when available.
+        #[cfg(not(target_arch = "wasm32"))]
+        let graph_seg_ext = storage.as_graph_segment_ext();
+
         for name in &names {
+            // ── Segment path (native PagedbStorage) ──
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(ext) = graph_seg_ext {
+                match ext.open_graph_segment(name).await {
+                    Ok(Some(bytes)) => {
+                        match CsrIndex::from_checkpoint(&bytes) {
+                            Ok(Some(idx)) => {
+                                csr_map.insert(name.clone(), idx);
+                            }
+                            Ok(None) | Err(_) => {
+                                tracing::warn!(
+                                    collection = %name,
+                                    "CSR segment deserialization failed, will rebuild from CRDT"
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                    Ok(None) => {
+                        // No segment yet — fall through to legacy B+ tree path below.
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            collection = %name,
+                            error = %e,
+                            "CSR segment open failed, falling back to legacy B+ tree path"
+                        );
+                    }
+                }
+            }
+
+            // ── Legacy B+ tree path (WASM, RedbStorage, or pre-migration data) ──
             let key = format!("csr:{name}");
             if let Some(envelope) = storage.get(Namespace::Graph, key.as_bytes()).await? {
                 match crate::storage::checksum::unwrap(&envelope) {
@@ -412,12 +454,48 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let Ok(names) = zerompk::from_msgpack::<Vec<String>>(&collections_bytes) else {
             return Ok(hnsw_indices);
         };
+
+        // On native targets, check if vector segment operations are available.
+        // When yes, the graph blob has empty vector placeholders; we load the
+        // backing from the pagedb segment and attach it to the restored index.
+        #[cfg(not(target_arch = "wasm32"))]
+        let seg_ext = storage.as_vector_segment_ext();
+
         for name in &names {
             let key = format!("hnsw:{name}");
             if let Some(envelope) = storage.get(Namespace::Vector, key.as_bytes()).await? {
                 match crate::storage::checksum::unwrap(&envelope) {
                     Some(checkpoint) => match HnswIndex::from_checkpoint(&checkpoint) {
-                        Ok(Some(index)) => {
+                        Ok(Some(mut index)) => {
+                            // Attach vector segment backing when available (native pagedb path).
+                            #[cfg(not(target_arch = "wasm32"))]
+                            if let Some(ext) = seg_ext {
+                                match ext.open_vector_segment(name).await {
+                                    Ok(Some(backing)) => {
+                                        use std::sync::Arc;
+                                        index.with_backing(Arc::new(backing));
+                                        tracing::debug!(
+                                            collection = %name,
+                                            "HNSW restored with pagedb vector segment backing"
+                                        );
+                                    }
+                                    Ok(None) => {
+                                        tracing::debug!(
+                                            collection = %name,
+                                            "no vector segment found; \
+                                             HNSW restored with inline vectors (legacy path)"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            collection = %name,
+                                            error = %e,
+                                            "vector segment open failed; \
+                                             HNSW restored with inline vectors"
+                                        );
+                                    }
+                                }
+                            }
                             hnsw_indices.insert(name.clone(), index);
                         }
                         Ok(None) | Err(_) => {

@@ -31,6 +31,61 @@ use crate::sync::ColumnarOutbound;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::sync::outbound::timeseries::TimeseriesOutbound;
 
+/// Helper: write large segment bytes via the segment ext if available, or fall
+/// back to the KV blob path.
+async fn store_segment_bytes<S: StorageEngine>(
+    storage: &S,
+    collection: &str,
+    segment_id: u32,
+    bytes: &[u8],
+) -> Result<(), LiteError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(ext) = storage.as_columnar_segment_ext() {
+        return ext
+            .write_columnar_segment(collection, segment_id, bytes)
+            .await;
+    }
+    let seg_key = format!("{collection}:seg:{segment_id}");
+    storage
+        .put(Namespace::Columnar, seg_key.as_bytes(), bytes)
+        .await
+}
+
+/// Helper: read large segment bytes via the segment ext if available, or fall
+/// back to the KV blob path.
+async fn load_segment_bytes<S: StorageEngine>(
+    storage: &S,
+    collection: &str,
+    segment_id: u32,
+) -> Result<Option<Vec<u8>>, LiteError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(ext) = storage.as_columnar_segment_ext() {
+        return ext
+            .open_columnar_segment(collection, segment_id)
+            .await
+            .map(|opt| opt.map(|b| b.into_vec()));
+    }
+    let seg_key = format!("{collection}:seg:{segment_id}");
+    storage.get(Namespace::Columnar, seg_key.as_bytes()).await
+}
+
+/// Helper: delete large segment bytes via the segment ext if available, or
+/// fall back to the KV blob path.
+async fn remove_segment_bytes<S: StorageEngine>(
+    storage: &S,
+    collection: &str,
+    segment_id: u32,
+) -> Result<(), LiteError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(ext) = storage.as_columnar_segment_ext() {
+        return ext.delete_columnar_segment(collection, segment_id).await;
+    }
+    let seg_key = format!("{collection}:seg:{segment_id}");
+    storage
+        .delete(Namespace::Columnar, seg_key.as_bytes())
+        .await
+}
+
 /// Meta key prefix for columnar schemas.
 const META_COLUMNAR_SCHEMA_PREFIX: &str = "columnar_schema:";
 /// Meta key listing all columnar collections.
@@ -170,9 +225,8 @@ impl<S: StorageEngine> ColumnarEngine<S> {
                         continue;
                     }
 
-                    let seg_key = format!("{name}:seg:{}", seg_meta.segment_id);
                     if let Some(seg_bytes) =
-                        storage.get(Namespace::Columnar, seg_key.as_bytes()).await?
+                        load_segment_bytes(&*storage, &name, seg_meta.segment_id).await?
                         && let Ok(reader) = SegmentReader::open(&seg_bytes)
                         && let Ok(pk_col) = reader.read_column(0)
                     {
@@ -336,12 +390,16 @@ impl<S: StorageEngine> ColumnarEngine<S> {
             (segments, names)
         };
 
+        // Delete large segment bytes via the segment ext (or KV fallback).
+        for seg in &segments {
+            if seg.fully_deleted_at_ms.is_none() {
+                remove_segment_bytes(&*self.storage, name, seg.segment_id).await?;
+            }
+        }
+
+        // Remove small B+ tree entries (delete bitmaps, metadata, schema).
         let mut ops = Vec::new();
         for seg in &segments {
-            ops.push(WriteOp::Delete {
-                ns: Namespace::Columnar,
-                key: format!("{name}:seg:{}", seg.segment_id).into_bytes(),
-            });
             ops.push(WriteOp::Delete {
                 ns: Namespace::Columnar,
                 key: format!("{name}:del:{}", seg.segment_id).into_bytes(),
@@ -543,7 +601,6 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         // Drain memtable + collect everything we need under the inner lock.
         struct FlushPayload {
             segment_id: u32,
-            seg_key: String,
             segment_bytes: Vec<u8>,
             meta_key: String,
             meta_bytes: Vec<u8>,
@@ -572,7 +629,6 @@ impl<S: StorageEngine> ColumnarEngine<S> {
                 .write_segment(&schema, &columns, row_count, None)
                 .map_err(columnar_err_to_lite)?;
 
-            let seg_key = format!("{collection}:seg:{segment_id}");
             let system_time_from_ms = if s.bitemporal { now_ms() } else { 0 };
             s.segments.push(SegmentMeta {
                 segment_id,
@@ -603,7 +659,6 @@ impl<S: StorageEngine> ColumnarEngine<S> {
 
             FlushPayload {
                 segment_id,
-                seg_key,
                 segment_bytes,
                 meta_key,
                 meta_bytes,
@@ -611,16 +666,17 @@ impl<S: StorageEngine> ColumnarEngine<S> {
             }
         };
 
-        let _ = payload.segment_id;
-
         // Storage I/O with lock dropped.
-        self.storage
-            .put(
-                Namespace::Columnar,
-                payload.seg_key.as_bytes(),
-                &payload.segment_bytes,
-            )
-            .await?;
+        // Large segment bytes go through the segment ext (or KV fallback).
+        store_segment_bytes(
+            &*self.storage,
+            collection,
+            payload.segment_id,
+            &payload.segment_bytes,
+        )
+        .await?;
+
+        // Small B+ tree entries: segment metadata list and delete bitmaps.
         self.storage
             .put(
                 Namespace::Columnar,
@@ -704,12 +760,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         };
 
         for seg_id in &snap.to_compact {
-            let seg_key = format!("{collection}:seg:{seg_id}");
-            let seg_bytes = match self
-                .storage
-                .get(Namespace::Columnar, seg_key.as_bytes())
-                .await?
-            {
+            let seg_bytes = match load_segment_bytes(&*self.storage, collection, *seg_id).await? {
                 Some(b) => b,
                 None => continue,
             };
@@ -728,12 +779,10 @@ impl<S: StorageEngine> ColumnarEngine<S> {
             .map_err(columnar_err_to_lite)?;
 
             if let Some(new_seg_bytes) = result.segment {
-                self.storage
-                    .put(Namespace::Columnar, seg_key.as_bytes(), &new_seg_bytes)
-                    .await?;
+                store_segment_bytes(&*self.storage, collection, *seg_id, &new_seg_bytes).await?;
 
                 // Update row count under the inner lock (scoped so the guard
-                // never crosses the `.delete` await below — clippy is strict).
+                // never crosses the await below — clippy is strict).
                 {
                     let mut s = Self::lock_state(&state_arc)?;
                     if let Some(meta) = s.segments.iter_mut().find(|m| m.segment_id == *seg_id) {
@@ -755,9 +804,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
                     s.bitemporal
                 };
 
-                self.storage
-                    .delete(Namespace::Columnar, seg_key.as_bytes())
-                    .await?;
+                remove_segment_bytes(&*self.storage, collection, *seg_id).await?;
                 let del_key = format!("{collection}:del:{seg_id}");
                 self.storage
                     .delete(Namespace::Columnar, del_key.as_bytes())
@@ -829,15 +876,11 @@ impl<S: StorageEngine> ColumnarEngine<S> {
             if seg_meta.fully_deleted_at_ms.is_some() {
                 continue;
             }
-            let seg_key = format!("{collection}:seg:{}", seg_meta.segment_id);
-            let seg_bytes = match self
-                .storage
-                .get(Namespace::Columnar, seg_key.as_bytes())
-                .await?
-            {
-                Some(b) => b,
-                None => continue,
-            };
+            let seg_bytes =
+                match load_segment_bytes(&*self.storage, collection, seg_meta.segment_id).await? {
+                    Some(b) => b,
+                    None => continue,
+                };
 
             let reader = nodedb_columnar::reader::SegmentReader::open(&seg_bytes).map_err(|e| {
                 LiteError::Storage {
@@ -891,11 +934,8 @@ impl<S: StorageEngine> ColumnarEngine<S> {
             if seg_meta.fully_deleted_at_ms.is_some() {
                 continue;
             }
-            let seg_key = format!("{collection}:seg:{}", seg_meta.segment_id);
-            if let Some(bytes) = self
-                .storage
-                .get(Namespace::Columnar, seg_key.as_bytes())
-                .await?
+            if let Some(bytes) =
+                load_segment_bytes(&*self.storage, collection, seg_meta.segment_id).await?
             {
                 segments.push((seg_meta.segment_id, bytes));
             }

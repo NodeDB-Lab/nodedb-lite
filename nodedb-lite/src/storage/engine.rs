@@ -96,6 +96,85 @@ pub trait StorageEngine: Send + Sync + 'static {
         end: Option<&[u8]>,
         limit: Option<usize>,
     ) -> Result<Vec<KvPair>, LiteError>;
+
+    /// Return this engine's vector segment operations interface if supported.
+    ///
+    /// `PagedbStorage` returns `Some(self)`. `RedbStorage` and any test double
+    /// return `None`, falling back to the legacy blob checkpoint path.
+    ///
+    /// Only available on non-WASM targets (mmap is required).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn as_vector_segment_ext(
+        &self,
+    ) -> Option<&dyn crate::storage::vector_segment_ext::VectorSegmentExt> {
+        None
+    }
+
+    /// Return this engine's array segment operations interface if supported.
+    ///
+    /// `PagedbStorage` returns `Some(self)`. `RedbStorage` and any test double
+    /// return `None`, falling back to the KV blob path.
+    ///
+    /// Only available on non-WASM targets.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn as_array_segment_ext(
+        &self,
+    ) -> Option<&dyn crate::storage::array_segment_ext::ArraySegmentExt> {
+        None
+    }
+
+    /// Return this engine's FTS segment operations interface if supported.
+    ///
+    /// `PagedbStorage` returns `Some(self)`. `RedbStorage` and any test double
+    /// return `None`, falling back to the KV blob path where each term's
+    /// postings are stored as a separate B+ tree entry.
+    ///
+    /// Only available on non-WASM targets.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn as_fts_segment_ext(&self) -> Option<&dyn crate::storage::fts_segment_ext::FtsSegmentExt> {
+        None
+    }
+
+    /// Return this engine's columnar segment operations interface if supported.
+    ///
+    /// `PagedbStorage` returns `Some(self)`. `RedbStorage` and any test double
+    /// return `None`, falling back to the KV blob path for large segment bytes.
+    ///
+    /// Only available on non-WASM targets.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn as_columnar_segment_ext(
+        &self,
+    ) -> Option<&dyn crate::storage::columnar_segment_ext::ColumnarSegmentExt> {
+        None
+    }
+
+    /// Return this engine's graph segment operations interface if supported.
+    ///
+    /// `PagedbStorage` returns `Some(self)`. `RedbStorage` and any test double
+    /// return `None`, falling back to the legacy `Namespace::Graph` KV blob path
+    /// for CSR adjacency checkpoints.
+    ///
+    /// Only available on non-WASM targets.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn as_graph_segment_ext(
+        &self,
+    ) -> Option<&dyn crate::storage::graph_segment_ext::GraphSegmentExt> {
+        None
+    }
+
+    /// Return this engine's spatial segment operations interface if supported.
+    ///
+    /// `PagedbStorage` returns `Some(self)`. `RedbStorage` and any test double
+    /// return `None`, falling back to the legacy `Namespace::Spatial` KV blob path
+    /// for R-tree checkpoint blobs.
+    ///
+    /// Only available on non-WASM targets.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn as_spatial_segment_ext(
+        &self,
+    ) -> Option<&dyn crate::storage::spatial_segment_ext::SpatialSegmentExt> {
+        None
+    }
 }
 
 #[cfg(test)]

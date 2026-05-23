@@ -33,7 +33,7 @@ pub(super) async fn ensure_index_loaded<S: StorageEngine>(
     }
 
     let key = format!("hnsw:{index_key}");
-    let Some(checkpoint) = vector_state
+    let Some(envelope) = vector_state
         .storage
         .get(Namespace::Vector, key.as_bytes())
         .await?
@@ -41,9 +41,45 @@ pub(super) async fn ensure_index_loaded<S: StorageEngine>(
         return Ok(());
     };
 
-    let Ok(Some(index)) = HnswIndex::from_checkpoint(&checkpoint) else {
+    let Some(checkpoint) = crate::storage::checksum::unwrap(&envelope) else {
+        tracing::warn!(
+            index_key,
+            "HNSW checkpoint CRC32C mismatch on lazy-load; skipping"
+        );
         return Ok(());
     };
+
+    let Ok(Some(mut index)) = HnswIndex::from_checkpoint(&checkpoint) else {
+        return Ok(());
+    };
+
+    // On native targets, attach vector segment backing if available.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(ext) = vector_state.storage.as_vector_segment_ext() {
+        match ext.open_vector_segment(index_key).await {
+            Ok(Some(backing)) => {
+                use std::sync::Arc;
+                index.with_backing(Arc::new(backing));
+                tracing::debug!(
+                    index_key,
+                    "lazy-load: attached pagedb vector segment backing"
+                );
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    index_key,
+                    "lazy-load: no vector segment found; using inline vectors"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    index_key,
+                    error = %e,
+                    "lazy-load: vector segment open failed; using inline vectors"
+                );
+            }
+        }
+    }
 
     tracing::info!(index_key, "lazy-loaded HNSW collection from storage");
     vector_state

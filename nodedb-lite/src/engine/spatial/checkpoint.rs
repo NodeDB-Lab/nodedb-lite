@@ -8,14 +8,14 @@
 //! | Key                                    | Value                                               |
 //! |----------------------------------------|-----------------------------------------------------|
 //! | `spatial:_collections`                 | MessagePack `Vec<(String, String)>` — (collection, field) pairs |
-//! | `spatial:{collection}:{field}:rtree`   | CRC32C-wrapped R-tree checkpoint bytes              |
 //! | `spatial:{collection}:{field}:docmap`  | MessagePack `Vec<(String, u64)>` — doc_id → entry_id |
 //! | `spatial:_next_id`                     | MessagePack `u64` — next entry ID                  |
 //!
-//! The `docmap` key is what distinguishes this checkpoint from the original
-//! inline implementation: persisting the `doc_id → entry_id` mapping means
-//! upserts and deletes after a cold open correctly remove stale R-tree entries
-//! instead of accumulating duplicates.
+//! The R-tree blob (`spatial:{collection}:{field}:rtree`) is stored in a pagedb
+//! segment when `as_spatial_segment_ext()` is available, or falls back to the
+//! `Namespace::Spatial` KV path (e.g. WASM / RedbStorage). In both cases the
+//! bytes stored are the CRC32C-wrapped R-tree checkpoint produced by
+//! `crate::storage::checksum::wrap`.
 
 use std::collections::HashMap;
 
@@ -61,24 +61,8 @@ where
         value: next_id_bytes,
     });
 
-    // ── Per-index R-tree bytes and doc-map ────────────────────────────────────
-    for (collection, field, rtree_bytes) in checkpoints {
-        let rtree_key = format!("spatial:{collection}:{field}:rtree");
-        ops.push(WriteOp::Put {
-            ns: Namespace::Spatial,
-            key: rtree_key.into_bytes(),
-            value: crate::storage::checksum::wrap(rtree_bytes),
-        });
-
-        // Collect doc_to_entry pairs for this (collection, field).
-        // The doc_to_entry map is keyed by (collection, doc_id); field comes
-        // from the per-index loop, but the manager stores one map across all
-        // fields. We persist the entries whose (collection, doc_id) pair
-        // matches any doc indexed under this (collection, field).
-        //
-        // Because `doc_to_entry` uses (collection, doc_id) as key (not field),
-        // we persist a flat list of (doc_id, entry_id) per (collection, field).
-        // On restore, we reconstruct the map using the same scheme.
+    // ── Per-index doc-map (always on B+ tree) ─────────────────────────────────
+    for (collection, field, _rtree_bytes) in checkpoints {
         let docmap_key = format!("spatial:{collection}:{field}:docmap");
         let pairs: Vec<(String, u64)> = doc_to_entry
             .iter()
@@ -94,10 +78,40 @@ where
         });
     }
 
+    // ── Commit catalog + docmap to B+ tree ────────────────────────────────────
     storage
         .batch_write(&ops)
         .await
         .map_err(NodeDbError::storage)?;
+
+    // ── Per-index R-tree bytes: segment when available, KV fallback ───────────
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(seg) = storage.as_spatial_segment_ext() {
+        for (collection, field, rtree_bytes) in checkpoints {
+            let wrapped = crate::storage::checksum::wrap(rtree_bytes);
+            seg.write_spatial_segment(collection, field, &wrapped)
+                .await
+                .map_err(NodeDbError::storage)?;
+        }
+        return Ok(());
+    }
+
+    // Legacy KV path (WASM / RedbStorage).
+    let mut rtree_ops: Vec<WriteOp> = Vec::with_capacity(checkpoints.len());
+    for (collection, field, rtree_bytes) in checkpoints {
+        let rtree_key = format!("spatial:{collection}:{field}:rtree");
+        rtree_ops.push(WriteOp::Put {
+            ns: Namespace::Spatial,
+            key: rtree_key.into_bytes(),
+            value: crate::storage::checksum::wrap(rtree_bytes),
+        });
+    }
+    if !rtree_ops.is_empty() {
+        storage
+            .batch_write(&rtree_ops)
+            .await
+            .map_err(NodeDbError::storage)?;
+    }
 
     Ok(())
 }
@@ -145,26 +159,67 @@ where
     let mut doc_to_entry: HashMap<(String, String), u64> = HashMap::new();
 
     for (collection, field) in &index_keys {
-        let rtree_key = format!("spatial:{collection}:{field}:rtree");
-        if let Ok(Some(envelope)) = storage.get(Namespace::Spatial, rtree_key.as_bytes()).await {
-            match crate::storage::checksum::unwrap(&envelope) {
-                Some(bytes) => {
-                    checkpoints.push((collection.clone(), field.clone(), bytes));
-                }
-                None => {
-                    tracing::error!(
-                        collection = %collection,
-                        field = %field,
-                        "spatial R-tree CRC32C mismatch — discarding"
-                    );
-                    let _ = storage
-                        .delete(Namespace::Spatial, rtree_key.as_bytes())
-                        .await;
-                    continue;
+        // Try pagedb segment first (non-WASM), then fall back to KV blob.
+        let rtree_envelope: Option<Vec<u8>> = {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if let Some(seg) = storage.as_spatial_segment_ext() {
+                    match seg.open_spatial_segment(collection, field).await {
+                        Ok(Some(boxed)) => Some(boxed.into_vec()),
+                        Ok(None) => {
+                            // Segment absent — fall through to KV blob.
+                            None
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                collection = %collection,
+                                field = %field,
+                                error = %e,
+                                "spatial segment open failed — falling back to KV blob"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
                 }
             }
+            #[cfg(target_arch = "wasm32")]
+            {
+                None
+            }
+        };
+
+        // If segment was not found (absent or not supported), try KV blob.
+        let envelope = if let Some(env) = rtree_envelope {
+            env
         } else {
-            continue;
+            let rtree_key = format!("spatial:{collection}:{field}:rtree");
+            match storage.get(Namespace::Spatial, rtree_key.as_bytes()).await {
+                Ok(Some(env)) => env,
+                Ok(None) => continue,
+                Err(_) => continue,
+            }
+        };
+
+        match crate::storage::checksum::unwrap(&envelope) {
+            Some(bytes) => {
+                checkpoints.push((collection.clone(), field.clone(), bytes));
+            }
+            None => {
+                tracing::error!(
+                    collection = %collection,
+                    field = %field,
+                    "spatial R-tree CRC32C mismatch — discarding"
+                );
+                // Best-effort cleanup of the stale KV blob (segment path has
+                // no stale entry to clean in this branch).
+                let rtree_key = format!("spatial:{collection}:{field}:rtree");
+                let _ = storage
+                    .delete(Namespace::Spatial, rtree_key.as_bytes())
+                    .await;
+                continue;
+            }
         }
 
         // ── Restore doc_id → entry_id mapping ────────────────────────────────

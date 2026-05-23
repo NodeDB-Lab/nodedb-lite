@@ -153,8 +153,33 @@ impl<S: StorageEngine> NodeDbLite<S> {
             sorted
         };
 
+        // Check once whether the pagedb segment path is available.
+        #[cfg(not(target_arch = "wasm32"))]
+        let seg_ext = self.storage.as_vector_segment_ext();
+
         for (name, _) in candidates.into_iter().take(max_to_evict) {
-            let checkpoint = {
+            // Snapshot checkpoint while holding the lock.
+            // On native with segment support: graph-only bytes + extract vectors.
+            // Otherwise: full checkpoint blob (WASM and non-pagedb native backends).
+            #[cfg(not(target_arch = "wasm32"))]
+            let (blob, segment_data) = {
+                let indices = self.vector_state.hnsw_indices.lock_or_recover();
+                match indices.get(&name) {
+                    Some(idx) => {
+                        if seg_ext.is_some() {
+                            let graph_bytes = idx.graph_checkpoint_to_bytes();
+                            let (vectors, surrogates) = idx.extract_vectors_and_surrogates();
+                            let dim = idx.dim();
+                            (graph_bytes, Some((dim, vectors, surrogates)))
+                        } else {
+                            (idx.checkpoint_to_bytes(), None)
+                        }
+                    }
+                    None => continue,
+                }
+            };
+            #[cfg(target_arch = "wasm32")]
+            let blob = {
                 let indices = self.vector_state.hnsw_indices.lock_or_recover();
                 match indices.get(&name) {
                     Some(idx) => idx.checkpoint_to_bytes(),
@@ -164,9 +189,29 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
             let key = format!("hnsw:{name}");
             self.storage
-                .put(Namespace::Vector, key.as_bytes(), &checkpoint)
+                .put(
+                    Namespace::Vector,
+                    key.as_bytes(),
+                    &crate::storage::checksum::wrap(&blob),
+                )
                 .await
                 .map_err(NodeDbError::storage)?;
+
+            // Write vector segment on native targets when segment ext is available.
+            #[cfg(not(target_arch = "wasm32"))]
+            if let (Some((dim, vectors, surrogates)), Some(ext)) = (segment_data, seg_ext) {
+                if let Err(e) = ext
+                    .write_vector_segment(&name, dim, &vectors, &surrogates)
+                    .await
+                {
+                    tracing::error!(
+                        collection = %name,
+                        error = %e,
+                        "HNSW vector segment write failed during eviction; \
+                         graph blob is persisted but vectors may be lost on cold restart"
+                    );
+                }
+            }
 
             {
                 let mut indices = self.vector_state.hnsw_indices.lock_or_recover();

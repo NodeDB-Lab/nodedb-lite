@@ -63,8 +63,16 @@ impl<S: StorageEngine> NodeDbLite<S> {
             });
         }
 
-        // ── Persist per-collection CSR indices (CRC32C wrapped) ──
-        {
+        // ── Persist per-collection CSR indices ──
+        // When the pagedb segment extension is available (native PagedbStorage):
+        //   - CSR blob → pagedb segment (written after batch_write)
+        //   - B+ tree receives only the collection-name index (META_CSR_COLLECTIONS)
+        // Otherwise (WASM or non-pagedb native backends):
+        //   - CSR blob → B+ tree (Namespace::Graph, CRC32C wrapped)
+        #[cfg(not(target_arch = "wasm32"))]
+        let graph_seg_ext = self.storage.as_graph_segment_ext();
+        #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+        let csr_segment_data: Vec<(String, Vec<u8>)> = {
             let csr_map = self.csr.lock_or_recover();
             let names: Vec<String> = csr_map.keys().cloned().collect();
             let names_bytes = zerompk::to_msgpack_vec(&names)
@@ -75,15 +83,34 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 value: names_bytes,
             });
 
+            let mut segment_data = Vec::new();
             for (name, index) in csr_map.iter() {
-                let key = format!("csr:{name}");
                 match index.checkpoint_to_bytes() {
                     Ok(checkpoint) => {
-                        ops.push(WriteOp::Put {
-                            ns: Namespace::Graph,
-                            key: key.into_bytes(),
-                            value: crate::storage::checksum::wrap(&checkpoint),
-                        });
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            if graph_seg_ext.is_some() {
+                                // Pagedb segment path: collect for post-batch write.
+                                segment_data.push((name.clone(), checkpoint));
+                            } else {
+                                // Legacy B+ tree path.
+                                let key = format!("csr:{name}");
+                                ops.push(WriteOp::Put {
+                                    ns: Namespace::Graph,
+                                    key: key.into_bytes(),
+                                    value: crate::storage::checksum::wrap(&checkpoint),
+                                });
+                            }
+                        }
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            let key = format!("csr:{name}");
+                            ops.push(WriteOp::Put {
+                                ns: Namespace::Graph,
+                                key: key.into_bytes(),
+                                value: crate::storage::checksum::wrap(&checkpoint),
+                            });
+                        }
                     }
                     Err(e) => {
                         tracing::error!(
@@ -94,10 +121,19 @@ impl<S: StorageEngine> NodeDbLite<S> {
                     }
                 }
             }
-        }
+            segment_data
+        };
 
         // ── Persist HNSW indices ──
-        {
+        // When the pagedb segment extension is available (native PagedbStorage):
+        //   - graph topology blob → B+ tree (graph_checkpoint_to_bytes; empty vector slots)
+        //   - vector data → pagedb segment (written after batch_write)
+        // Otherwise (WASM or non-pagedb native backends like RedbStorage):
+        //   - full checkpoint blob → B+ tree (checkpoint_to_bytes)
+        #[cfg(not(target_arch = "wasm32"))]
+        let seg_ext = self.storage.as_vector_segment_ext();
+        #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+        let hnsw_segment_data: Vec<(String, usize, Vec<Vec<f32>>, Vec<u64>)> = {
             let indices = self.vector_state.hnsw_indices.lock_or_recover();
             let names: Vec<String> = indices.keys().cloned().collect();
             let names_bytes = zerompk::to_msgpack_vec(&names)
@@ -108,21 +144,85 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 value: names_bytes,
             });
 
+            let mut segment_data = Vec::new();
             for (name, index) in indices.iter() {
                 let key = format!("hnsw:{name}");
-                let checkpoint = index.checkpoint_to_bytes();
-                ops.push(WriteOp::Put {
-                    ns: Namespace::Vector,
-                    key: key.into_bytes(),
-                    value: crate::storage::checksum::wrap(&checkpoint),
-                });
+
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if seg_ext.is_some() {
+                        // Graph-only blob (vector bytes are empty placeholders).
+                        let graph_bytes = index.graph_checkpoint_to_bytes();
+                        ops.push(WriteOp::Put {
+                            ns: Namespace::Vector,
+                            key: key.into_bytes(),
+                            value: crate::storage::checksum::wrap(&graph_bytes),
+                        });
+                        // Collect vector + surrogate data for segment write after batch_write.
+                        let (vectors, surrogates) = index.extract_vectors_and_surrogates();
+                        let dim = index.dim();
+                        segment_data.push((name.clone(), dim, vectors, surrogates));
+                    } else {
+                        // Non-pagedb native backend: full checkpoint blob path.
+                        let checkpoint = index.checkpoint_to_bytes();
+                        ops.push(WriteOp::Put {
+                            ns: Namespace::Vector,
+                            key: key.into_bytes(),
+                            value: crate::storage::checksum::wrap(&checkpoint),
+                        });
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    // WASM: full checkpoint blob path (no segment ops).
+                    let checkpoint = index.checkpoint_to_bytes();
+                    ops.push(WriteOp::Put {
+                        ns: Namespace::Vector,
+                        key: key.into_bytes(),
+                        value: crate::storage::checksum::wrap(&checkpoint),
+                    });
+                }
             }
-        }
+            segment_data
+        };
 
         self.storage
             .batch_write(&ops)
             .await
             .map_err(NodeDbError::storage)?;
+
+        // ── Write HNSW vector segments to pagedb (native PagedbStorage only) ──
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(ext) = seg_ext {
+            for (name, dim, vectors, surrogates) in &hnsw_segment_data {
+                if let Err(e) = ext
+                    .write_vector_segment(name, *dim, vectors, surrogates)
+                    .await
+                {
+                    tracing::error!(
+                        collection = %name,
+                        error = %e,
+                        "HNSW vector segment write failed; \
+                         graph topology is persisted but vectors may be lost on cold restart"
+                    );
+                }
+            }
+        }
+
+        // ── Write CSR adjacency segments to pagedb (native PagedbStorage only) ──
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(ext) = graph_seg_ext {
+            for (name, checkpoint) in &csr_segment_data {
+                if let Err(e) = ext.write_graph_segment(name, checkpoint).await {
+                    tracing::error!(
+                        collection = %name,
+                        error = %e,
+                        "CSR adjacency segment write failed; \
+                         graph state may be lost on cold restart"
+                    );
+                }
+            }
+        }
 
         // ── Persist spatial indices (separate batch — includes docmap) ────────
         let (spatial_checkpoints, spatial_doc_to_entry, spatial_next_id) =
@@ -136,16 +236,22 @@ impl<S: StorageEngine> NodeDbLite<S> {
         .await?;
 
         // ── Persist FTS indices (separate batch — potentially large) ──
-        // Serialize synchronously while holding the lock, then write after.
-        let fts_ops = {
+        // Serialize is synchronous (no I/O); do it inside the lock so we don't
+        // need to clone FtsIndex.  The resulting ops + segment blobs are written
+        // to storage after the lock is released.
+        let (fts_ops, fts_segment_writes) = {
             let fts = self.fts_state.manager.lock_or_recover();
             let (indices, id_to_surrogate, next_surrogate) = fts.checkpoint_data();
-            crate::engine::fts::checkpoint::serialize_fts(indices, id_to_surrogate, next_surrogate)?
+            crate::engine::fts::checkpoint::serialize_fts(indices, id_to_surrogate, next_surrogate)
+                .map_err(|e| NodeDbError::storage(format!("fts serialize: {e}")))?
         };
-        self.storage
-            .batch_write(&fts_ops)
-            .await
-            .map_err(NodeDbError::storage)?;
+        crate::engine::fts::checkpoint::write_serialized_fts(
+            self.storage.as_ref(),
+            fts_ops,
+            fts_segment_writes,
+        )
+        .await
+        .map_err(|e| NodeDbError::storage(format!("fts flush: {e}")))?;
 
         Ok(())
     }

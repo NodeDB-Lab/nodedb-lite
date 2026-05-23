@@ -1,32 +1,40 @@
 //! Checkpoint serialization and restoration for [`FtsCollectionManager`].
 //!
-//! Persists the full in-memory FTS state to `Namespace::Fts` so that a cold
-//! open can load the index without re-tokenizing source documents.
+//! Persists the full in-memory FTS state so that a cold open can load the
+//! index without re-tokenizing source documents.
 //!
-//! ## Key layout under `Namespace::Fts`
+//! ## Storage layout
 //!
-//! | Key                                     | Value                                         |
-//! |-----------------------------------------|-----------------------------------------------|
-//! | `fts:_collections`                      | MessagePack `Vec<String>` — index key list    |
-//! | `fts:_surrogates`                       | MessagePack `FtsSurrogateState`               |
-//! | `fts:{index_key}:mt:{scoped_term}`      | MessagePack `Vec<(u32,u32,u8,Vec<u32>)>` — memtable postings |
-//! | `fts:{index_key}:mtstat`                | MessagePack `(u32, u64)` — memtable stats     |
-//! | `fts:{index_key}:doclens`               | MessagePack `Vec<(u32, u32)>` — surrogate/len |
-//! | `fts:{index_key}:meta:{subkey}`         | raw bytes (fieldnorms/analyzer/language blobs)|
+//! ### B+ tree (`Namespace::Fts`) — always used
+//!
+//! | Key                             | Value                                      |
+//! |---------------------------------|--------------------------------------------|
+//! | `fts:_collections`              | MessagePack `Vec<String>` — index key list |
+//! | `fts:_surrogates`               | MessagePack `FtsSurrogateState`            |
+//! | `fts:{index_key}:doclens`       | MessagePack `Vec<(u32,u32)>` — surrogate/len |
+//! | `fts:{index_key}:meta:{subkey}` | raw bytes (fieldnorms/analyzer/language)   |
+//!
+//! ### pagedb segments — used when `as_fts_segment_ext()` returns `Some`
+//!
+//! | Segment name          | Value                                            |
+//! |-----------------------|--------------------------------------------------|
+//! | `fts/seg/{index_key}` | MessagePack `Vec<(String, Vec<SerPosting>)>`     |
+//!
+//! When pagedb segments are unavailable (WASM / `RedbStorage`), posting data
+//! falls back to the legacy KV path:
+//!
+//! | Key                               | Value                              |
+//! |-----------------------------------|------------------------------------|
+//! | `fts:{index_key}:mt:{scoped_term}`| MessagePack `Vec<SerPosting>`      |
+//! | `fts:{index_key}:mtstat`          | MessagePack `(u32, u64)` (unused)  |
 //!
 //! ## Rationale: memtable vs segment storage
 //!
-//! `nodedb-fts` accumulates posting data in an in-memory `Memtable` until the
-//! spill threshold (32M entries by default) is reached.  For small-to-medium
-//! corpora on Lite, all postings stay in the memtable — the backend's segment
-//! storage is effectively empty.  Serializing the segment storage alone would
-//! produce empty checkpoints.
-//!
-//! We therefore serialize the `Memtable` directly via the `FtsIndex::memtable()`
-//! accessor.  Memtable terms are stored with a `"{tid}:{collection}:"` scope
-//! prefix (e.g., `"0:articles:_doc:rustsearch"`); we persist the full scoped
-//! key and replay it identically on restore so that `insert(scoped_term, ...)`
-//! recreates the correct in-memory structure.
+//! `nodedb-fts` on Lite uses `MemoryBackend` exclusively.  All postings live in
+//! a `Memtable`; the backend's LSM segment layer is unused.  The pagedb segment
+//! path bundles all per-term posting entries for one index key into a single
+//! segment blob, reducing B+ tree pressure from O(vocab_size) entries to O(1)
+//! per index key.
 
 use std::collections::HashMap;
 
@@ -71,40 +79,44 @@ fn ser_to_compact(s: SerPosting) -> CompactPosting {
     }
 }
 
-/// Collect all `WriteOp`s needed to persist a single FTS index.
-fn ops_for_index(
-    index_key: &str,
+/// Serialize all term postings for `index_key` into a single msgpack blob.
+///
+/// Returns `None` if the memtable has no terms (empty index — nothing to write).
+fn serialize_postings_blob(
+    _index_key: &str,
     idx: &FtsIndex<MemoryBackend>,
-    ops: &mut Vec<WriteOp>,
-) -> NodeDbResult<()> {
-    const TID: u64 = 0;
-
+) -> NodeDbResult<Option<Vec<u8>>> {
     let mt = idx.memtable();
+    let mut entries: Vec<(String, Vec<SerPosting>)> = Vec::new();
 
-    // ── Memtable postings ─────────────────────────────────────────────────────
-    // `mt.terms()` returns the fully scoped keys "tid:collection:term".
-    // We persist the full scoped key so restore can call `mt.insert(scoped, p)`
-    // identically.
     for scoped_term in mt.terms() {
         let postings = mt.get_postings(&scoped_term);
         if postings.is_empty() {
             continue;
         }
         let ser: Vec<SerPosting> = postings.iter().map(compact_to_ser).collect();
-        let bytes =
-            zerompk::to_msgpack_vec(&ser).map_err(|e| NodeDbError::serialization("msgpack", e))?;
-        // Use URL-safe base64 of the scoped_term bytes to avoid key collisions
-        // with colons in the collection name.
-        let mt_key = format!("fts:{index_key}:mt:{scoped_term}");
-        ops.push(WriteOp::Put {
-            ns: Namespace::Fts,
-            key: mt_key.into_bytes(),
-            value: bytes,
-        });
+        entries.push((scoped_term, ser));
     }
 
-    // ── Doc lengths (backend — written per-doc by index_document) ─────────────
-    // Collect all surrogates seen in memtable postings.
+    if entries.is_empty() {
+        return Ok(None);
+    }
+
+    let bytes =
+        zerompk::to_msgpack_vec(&entries).map_err(|e| NodeDbError::serialization("msgpack", e))?;
+    Ok(Some(bytes))
+}
+
+/// Collect KV `WriteOp`s for doc-lengths and meta blobs (always on B+ tree).
+fn metadata_ops_for_index(
+    index_key: &str,
+    idx: &FtsIndex<MemoryBackend>,
+    ops: &mut Vec<WriteOp>,
+) -> NodeDbResult<()> {
+    const TID: u64 = 0;
+    let mt = idx.memtable();
+
+    // ── Doc lengths (per-doc lengths needed by BM25 scoring) ─────────────────
     let mut surrogates: Vec<u32> = mt
         .terms()
         .iter()
@@ -153,15 +165,17 @@ fn ops_for_index(
     Ok(())
 }
 
-/// Flush the full FTS state to storage.
-/// Serialize FTS state into write ops synchronously (no I/O, safe to call
-/// while holding a mutex guard).
+/// Serialize FTS state into write ops (no I/O, safe to call while holding a
+/// mutex guard).  Returns `(kv_ops, segment_writes)` where `segment_writes`
+/// is a list of `(index_key, blob)` tuples that should be written via
+/// `FtsSegmentExt::write_fts_segment` if available.
 pub(crate) fn serialize_fts(
     indices: &HashMap<String, FtsIndex<MemoryBackend>>,
     id_to_surrogate: &HashMap<String, u32>,
     next_surrogate: u32,
-) -> NodeDbResult<Vec<WriteOp>> {
+) -> NodeDbResult<(Vec<WriteOp>, Vec<(String, Vec<u8>)>)> {
     let mut ops: Vec<WriteOp> = Vec::new();
+    let mut segment_writes: Vec<(String, Vec<u8>)> = Vec::new();
 
     // ── Collection list ───────────────────────────────────────────────────────
     let index_keys: Vec<String> = indices.keys().cloned().collect();
@@ -191,10 +205,78 @@ pub(crate) fn serialize_fts(
 
     // ── Per-index data ────────────────────────────────────────────────────────
     for (key, idx) in indices {
-        ops_for_index(key, idx, &mut ops)?;
+        // Always collect metadata ops (doc-lengths, meta blobs) onto B+ tree.
+        metadata_ops_for_index(key, idx, &mut ops)?;
+
+        // Collect posting data: will be dispatched to pagedb segments or
+        // unpacked into per-term KV entries at write time.  Indices with no
+        // terms produce no segment_write entry; that's fine.
+        if let Some(blob) = serialize_postings_blob(key, idx)? {
+            segment_writes.push((key.clone(), blob));
+        }
     }
 
-    Ok(ops)
+    Ok((ops, segment_writes))
+}
+
+/// Write pre-serialized FTS state to storage.
+///
+/// `ops` contains B+ tree writes (collections, surrogates, doclens, meta).
+/// `segment_writes` contains `(index_key, posting_blob)` pairs that are
+/// written via `FtsSegmentExt` when available, or unpacked into per-term KV
+/// entries on the fallback path.
+///
+/// Callers serialize inside the FTS mutex (sync, no I/O) and call this
+/// function after releasing the lock to perform async I/O.
+pub(crate) async fn write_serialized_fts<S>(
+    storage: &S,
+    mut ops: Vec<WriteOp>,
+    segment_writes: Vec<(String, Vec<u8>)>,
+) -> NodeDbResult<()>
+where
+    S: StorageEngine,
+{
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(seg_ext) = storage.as_fts_segment_ext() {
+        // pagedb path: write posting blobs as encrypted segments, then flush
+        // the B+ tree batch (collections, surrogates, doclens, meta).
+        for (index_key, blob) in &segment_writes {
+            seg_ext
+                .write_fts_segment(index_key, blob)
+                .await
+                .map_err(|e| {
+                    NodeDbError::storage(format!("fts segment write '{index_key}': {e}"))
+                })?;
+        }
+        storage
+            .batch_write(&ops)
+            .await
+            .map_err(|e| NodeDbError::storage(format!("fts checkpoint batch_write: {e}")))?;
+        return Ok(());
+    }
+
+    // KV fallback path (WASM / RedbStorage / test doubles): unpack the posting
+    // blobs back into per-term KV entries.
+    for (index_key, blob) in &segment_writes {
+        if let Ok(entries) = zerompk::from_msgpack::<Vec<(String, Vec<SerPosting>)>>(blob) {
+            for (scoped_term, postings) in entries {
+                let bytes = zerompk::to_msgpack_vec(&postings)
+                    .map_err(|e| NodeDbError::serialization("msgpack", e))?;
+                let mt_key = format!("fts:{index_key}:mt:{scoped_term}");
+                ops.push(WriteOp::Put {
+                    ns: Namespace::Fts,
+                    key: mt_key.into_bytes(),
+                    value: bytes,
+                });
+            }
+        }
+    }
+
+    storage
+        .batch_write(&ops)
+        .await
+        .map_err(|e| NodeDbError::storage(format!("fts checkpoint batch_write: {e}")))?;
+    Ok(())
 }
 
 /// Restore FTS state from storage on cold open.
@@ -254,31 +336,66 @@ where
         let backend = MemoryBackend::new();
         let idx = FtsIndex::new(backend);
 
-        // ── Memtable postings ─────────────────────────────────────────────────
-        let mt_prefix = format!("fts:{index_key}:mt:").into_bytes();
-        let mt_entries = storage.scan_prefix(Namespace::Fts, &mt_prefix).await?;
-        let mt_prefix_str = format!("fts:{index_key}:mt:");
-        for (raw_key, value) in &mt_entries {
-            let key_str = String::from_utf8_lossy(raw_key);
-            let scoped_term = key_str
-                .strip_prefix(&mt_prefix_str)
-                .unwrap_or("")
-                .to_string();
-            if scoped_term.is_empty() {
-                continue;
-            }
-            if let Ok(ser) = zerompk::from_msgpack::<Vec<SerPosting>>(value) {
-                for sp in ser {
-                    idx.memtable().insert(&scoped_term, ser_to_compact(sp));
+        // ── Posting data: try pagedb segment path first, fall back to KV ─────
+        let mut restored_from_segment = false;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(seg_ext) = storage.as_fts_segment_ext() {
+            match seg_ext.open_fts_segment(index_key).await {
+                Ok(Some(blob)) => {
+                    if let Ok(entries) =
+                        zerompk::from_msgpack::<Vec<(String, Vec<SerPosting>)>>(&blob)
+                    {
+                        for (scoped_term, postings) in entries {
+                            for sp in postings {
+                                idx.memtable().insert(&scoped_term, ser_to_compact(sp));
+                            }
+                        }
+                        restored_from_segment = true;
+                    } else {
+                        tracing::warn!(
+                            index_key,
+                            "fts segment blob corrupt — falling back to KV postings"
+                        );
+                    }
+                }
+                Ok(None) => {
+                    // No segment yet (first open after migration, or empty index).
+                    // Will fall through to KV scan below.
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        index_key,
+                        error = %e,
+                        "fts segment open failed — falling back to KV postings"
+                    );
                 }
             }
         }
 
-        // Memtable stats (doc_count, tok_sum) are NOT used for BM25 scoring;
-        // `index_stats` reads from backend `collection_stats` which is restored
-        // via `increment_stats` below.  We do not restore memtable stats.
+        // KV fallback: legacy per-term posting entries.
+        if !restored_from_segment {
+            let mt_prefix = format!("fts:{index_key}:mt:").into_bytes();
+            let mt_entries = storage.scan_prefix(Namespace::Fts, &mt_prefix).await?;
+            let mt_prefix_str = format!("fts:{index_key}:mt:");
+            for (raw_key, value) in &mt_entries {
+                let key_str = String::from_utf8_lossy(raw_key);
+                let scoped_term = key_str
+                    .strip_prefix(&mt_prefix_str)
+                    .unwrap_or("")
+                    .to_string();
+                if scoped_term.is_empty() {
+                    continue;
+                }
+                if let Ok(ser) = zerompk::from_msgpack::<Vec<SerPosting>>(value) {
+                    for sp in ser {
+                        idx.memtable().insert(&scoped_term, ser_to_compact(sp));
+                    }
+                }
+            }
+        }
 
-        // ── Doc lengths (backend) ─────────────────────────────────────────────
+        // ── Doc lengths (always on B+ tree) ──────────────────────────────────
         let doclens_key = format!("fts:{index_key}:doclens");
         if let Some(data) = storage.get(Namespace::Fts, doclens_key.as_bytes()).await?
             && let Ok(pairs) = zerompk::from_msgpack::<Vec<(u32, u32)>>(&data)
@@ -291,7 +408,7 @@ where
             }
         }
 
-        // ── Meta blobs ────────────────────────────────────────────────────────
+        // ── Meta blobs (always on B+ tree) ────────────────────────────────────
         for &subkey in META_SUBKEYS {
             let meta_key = format!("fts:{index_key}:meta:{subkey}");
             if let Some(data) = storage.get(Namespace::Fts, meta_key.as_bytes()).await? {

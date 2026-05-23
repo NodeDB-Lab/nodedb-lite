@@ -12,3 +12,6 @@ pub mod search;
 pub mod sidecar;
 pub mod state;
 pub use state::VectorState;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod pagedb_backing;

@@ -1,10 +1,13 @@
 //! Segment read/write helpers for the Lite array engine.
 //!
-//! Segments are stored as raw byte blobs in the `Array` namespace under the
-//! key `segment:{name}:{id}`. The bytes are the exact output of
-//! `nodedb_array::SegmentWriter::finish()`, which includes the header,
-//! tile frames, and footer — the reader can round-trip them without any
-//! extra envelope.
+//! On pagedb-backed storage (`as_array_segment_ext()` returns `Some`), tile
+//! data is stored in pagedb encrypted segments under `arr/tile/{name}/{id}`.
+//! On all other backends (RedbStorage, WASM), the legacy KV blob path is used:
+//! bytes stored in the `Array` namespace under `segment:{name}:{id}`.
+//!
+//! The on-disk bytes are identical in both paths — the exact output of
+//! `nodedb_array::SegmentWriter::finish()`, which includes the header, tile
+//! frames, and footer.  `SegmentReader::open` can parse them directly.
 
 use std::sync::Arc;
 
@@ -17,7 +20,11 @@ use crate::error::LiteError;
 use crate::storage::engine::StorageEngine;
 
 /// Flush a batch of `(TileId, SparseTile)` pairs into a new segment and
-/// persist the bytes under `segment:{name}:{id}`.
+/// persist the bytes.
+///
+/// When `as_array_segment_ext()` is available (pagedb backend), the bytes are
+/// stored as an encrypted pagedb segment.  Otherwise they are stored as a KV
+/// blob in the `Array` namespace.
 ///
 /// Returns the serialized segment bytes so the caller can record the
 /// `byte_len` in the manifest without a second storage read.
@@ -40,20 +47,39 @@ pub async fn write_segment<S: StorageEngine>(
         detail: format!("segment finish: {e}"),
     })?;
 
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(ext) = storage.as_array_segment_ext() {
+        ext.write_array_segment(name, seg_id, &bytes).await?;
+        return Ok(bytes);
+    }
+
     let key = segment_key(name, seg_id);
     storage.put(Namespace::Array, &key, &bytes).await?;
     Ok(bytes)
 }
 
-/// Load segment bytes for `seg_id` and open a `SegmentReader` over them.
+/// Load segment bytes for `seg_id`.
 ///
-/// The returned `Vec<u8>` owns the bytes; the `SegmentReader` borrows from it.
-/// The caller receives both so it can keep the bytes alive.
+/// When `as_array_segment_ext()` is available (pagedb backend), the bytes are
+/// read from the encrypted pagedb segment.  Otherwise they are read from the
+/// KV blob in the `Array` namespace.
 pub async fn load_segment<S: StorageEngine>(
     storage: &Arc<S>,
     name: &str,
     seg_id: u64,
 ) -> Result<Vec<u8>, LiteError> {
+    // On pagedb-backed storage, attempt to read from the encrypted segment.
+    // Fall through to the KV path if the segment is not found there — this
+    // handles data written via the legacy KV path (e.g. pre-migration data
+    // or tests that write directly to KV).
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(ext) = storage.as_array_segment_ext() {
+        if let Some(bytes) = ext.open_array_segment(name, seg_id).await? {
+            return Ok(bytes.into_vec());
+        }
+        // Not in pagedb — fall through to KV lookup below.
+    }
+
     let key = segment_key(name, seg_id);
     storage
         .get(Namespace::Array, &key)
@@ -70,12 +96,28 @@ pub fn open_reader(bytes: &[u8]) -> Result<SegmentReader<'_>, LiteError> {
     })
 }
 
-/// Delete the segment bytes for `seg_id` from storage.
+/// Delete the segment for `seg_id` from storage.
+///
+/// On pagedb backend, the segment is tombstoned and reaped by the next GC
+/// cycle.  On KV backends, the blob is deleted immediately.
 pub async fn delete_segment<S: StorageEngine>(
     storage: &Arc<S>,
     name: &str,
     seg_id: u64,
 ) -> Result<(), LiteError> {
+    // On pagedb-backed storage, tombstone the encrypted segment and also
+    // remove any legacy KV entry for the same segment (dual cleanup ensures
+    // no stale KV blobs after migration).
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(ext) = storage.as_array_segment_ext() {
+        ext.delete_array_segment(name, seg_id).await?;
+        // Best-effort cleanup of any legacy KV entry.
+        let _ = storage
+            .delete(Namespace::Array, &segment_key(name, seg_id))
+            .await;
+        return Ok(());
+    }
+
     storage
         .delete(Namespace::Array, &segment_key(name, seg_id))
         .await
@@ -259,5 +301,65 @@ mod tests {
             .unwrap();
         delete_segment(&storage, "g", 0).await.unwrap();
         assert!(load_segment(&storage, "g", 0).await.is_err());
+    }
+
+    /// Verify that `write_segment` dispatches through the pagedb segment path
+    /// when the storage backend supports `as_array_segment_ext()`.
+    ///
+    /// The segment bytes must be absent from the KV namespace (proving the
+    /// pagedb path was taken), and must be readable back via `load_segment`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn pagedb_path_writes_to_segment_not_kv() {
+        use nodedb_types::Namespace;
+
+        let s = schema();
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+        let tile = make_tile(&s);
+        let tile_id = TileId::snapshot(0);
+
+        write_segment(&storage, "arr_test", 7, 0xCAFE, &[(tile_id, &tile)])
+            .await
+            .unwrap();
+
+        // The KV namespace must be empty — no blob was written there.
+        let kv_key = crate::engine::array::manifest::segment_key("arr_test", 7);
+        let kv_val = storage.get(Namespace::Array, &kv_key).await.unwrap();
+        assert!(
+            kv_val.is_none(),
+            "expected no KV entry on pagedb-backed storage"
+        );
+
+        // But load_segment must succeed via the pagedb path.
+        let bytes = load_segment(&storage, "arr_test", 7).await.unwrap();
+        let reader = open_reader(&bytes).unwrap();
+        assert_eq!(reader.tile_count(), 1);
+    }
+
+    /// Format bit-identity: bytes written by `write_segment` must parse via
+    /// `nodedb_array::SegmentReader::open` — same as the Origin-side reader.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn format_bit_identity_with_origin_reader() {
+        let s = schema();
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+        let tile = make_tile(&s);
+        let tile_id = TileId::new(1, 100);
+
+        let written_bytes =
+            write_segment(&storage, "identity_test", 0, 0xDEAD, &[(tile_id, &tile)])
+                .await
+                .unwrap();
+
+        // The bytes returned by write_segment must be parseable by SegmentReader
+        // (the same path used by Origin's SegmentHandle).
+        let reader = nodedb_array::SegmentReader::open(&written_bytes).unwrap();
+        assert_eq!(reader.tile_count(), 1);
+        assert_eq!(reader.tiles()[0].tile_id, tile_id);
+        assert_eq!(reader.schema_hash(), 0xDEAD);
+
+        // The bytes retrieved via load_segment must also be parseable.
+        let loaded = load_segment(&storage, "identity_test", 0).await.unwrap();
+        assert_eq!(loaded, written_bytes, "loaded bytes must be bit-identical");
     }
 }
