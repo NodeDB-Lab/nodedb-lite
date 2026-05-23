@@ -14,7 +14,7 @@ use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
 use crate::query::visitor::adapter::LiteFut;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::coerce::{coerce_attrs, coerce_coords};
 use super::schema::{LITE_TENANT, load_schema};
@@ -32,7 +32,7 @@ type PutCellTuple = (
 ///
 /// Coerces coord/attr literals against the stored schema and encodes them as
 /// `Vec<PutCellWire>` (same msgpack layout the physical visitor decodes).
-pub(crate) fn lower_insert_array<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(crate) fn lower_insert_array<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     name: &str,
     rows: &[ArrayInsertRow],
@@ -74,7 +74,7 @@ pub(crate) fn lower_insert_array<'a, S: StorageEngine + StorageEngineSync + 'a>(
 /// Lower `SqlPlan::DeleteArray` → `ArrayOp::Delete`.
 ///
 /// The Lite physical visitor for `ArrayOp::Delete` decodes `Vec<Vec<CoordValue>>`.
-pub(crate) fn lower_delete_array<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(crate) fn lower_delete_array<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     name: &str,
     coords: &[Vec<ArrayCoordLiteral>],
@@ -112,7 +112,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_array() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         lower_create_array(
             &engine,
             "arr_del",

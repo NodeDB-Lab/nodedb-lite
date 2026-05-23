@@ -16,11 +16,11 @@ use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
 use crate::query::visitor::scan_post::apply_scan_post_processing;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::visitor::LiteFut;
 
-pub(super) fn lower_constant_result<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_constant_result<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     columns: &[String],
     values: &[SqlValue],
@@ -33,7 +33,7 @@ pub(super) fn lower_constant_result<'a, S: StorageEngine + StorageEngineSync + '
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn lower_scan<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_scan<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     engine_type: EngineType,
@@ -63,7 +63,7 @@ pub(super) fn lower_scan<'a, S: StorageEngine + StorageEngineSync + 'a>(
     }))
 }
 
-pub(super) fn lower_point_get<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_point_get<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     engine_type: EngineType,
@@ -78,7 +78,7 @@ pub(super) fn lower_point_get<'a, S: StorageEngine + StorageEngineSync + 'a>(
     }))
 }
 
-pub(super) fn lower_insert<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_insert<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     engine_type: EngineType,
@@ -94,7 +94,7 @@ pub(super) fn lower_insert<'a, S: StorageEngine + StorageEngineSync + 'a>(
     }))
 }
 
-pub(super) fn lower_update<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_update<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     engine_type: EngineType,
@@ -111,7 +111,7 @@ pub(super) fn lower_update<'a, S: StorageEngine + StorageEngineSync + 'a>(
     }))
 }
 
-pub(super) fn lower_delete<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_delete<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     engine_type: EngineType,
@@ -126,7 +126,7 @@ pub(super) fn lower_delete<'a, S: StorageEngine + StorageEngineSync + 'a>(
     }))
 }
 
-pub(super) fn lower_truncate<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_truncate<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
 ) -> Result<LiteFut<'a>, LiteError> {
@@ -136,7 +136,7 @@ pub(super) fn lower_truncate<'a, S: StorageEngine + StorageEngineSync + 'a>(
     }))
 }
 
-pub(super) fn lower_create_index<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_create_index<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     field: &str,
@@ -160,7 +160,7 @@ pub(super) fn lower_create_index<'a, S: StorageEngine + StorageEngineSync + 'a>(
 /// catalog lookup the field name is not known from the index name alone, so
 /// the caller must supply the collection via the ON clause. The drop is
 /// best-effort at field-level granularity using the index-name as the field.
-pub(super) fn lower_drop_index<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_drop_index<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     index_name: &str,
     collection: Option<&str>,

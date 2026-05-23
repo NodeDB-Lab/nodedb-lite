@@ -10,38 +10,40 @@ use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
 use crate::query::visitor::adapter::LiteFut;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::schema::{LITE_TENANT, load_audit_retain};
 
 /// Lower `SqlPlan::ArrayFlush` → `ArrayOp::Flush`.
-pub(crate) fn lower_array_flush<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(crate) fn lower_array_flush<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     name: &str,
 ) -> Result<LiteFut<'a>, LiteError> {
-    {
-        let state = engine
+    let name_owned = name.to_string();
+    Ok(Box::pin(async move {
+        if !engine
             .array_state
             .lock()
-            .map_err(|_| LiteError::LockPoisoned)?;
-        if !state.arrays.contains_key(name) {
+            .await
+            .arrays
+            .contains_key(&name_owned)
+        {
             return Err(LiteError::BadRequest {
-                detail: format!("ARRAY_FLUSH: array '{name}' not found"),
+                detail: format!("ARRAY_FLUSH: array '{name_owned}' not found"),
             });
         }
-    }
-    let aid = ArrayId::new(LITE_TENANT, name);
-    let op = ArrayOp::Flush {
-        array_id: aid,
-        wal_lsn: 0,
-    };
-    let mut phys = LiteDataPlaneVisitor { engine };
-    let fut = phys.array(&op)?;
-    Ok(Box::pin(fut))
+        let aid = ArrayId::new(LITE_TENANT, &name_owned);
+        let op = ArrayOp::Flush {
+            array_id: aid,
+            wal_lsn: 0,
+        };
+        let mut phys = LiteDataPlaneVisitor { engine };
+        phys.array(&op)?.await
+    }))
 }
 
 /// Lower `SqlPlan::ArrayCompact` → `ArrayOp::Compact`.
-pub(crate) fn lower_array_compact<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(crate) fn lower_array_compact<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     name: &str,
 ) -> Result<LiteFut<'a>, LiteError> {
@@ -66,7 +68,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_array_flush() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         lower_create_array(
             &engine,
             "arr_fl",
@@ -90,7 +92,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_array_compact() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         lower_create_array(
             &engine,
             "arr_cmp",

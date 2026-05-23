@@ -11,7 +11,7 @@ use nodedb_sql::types_expr::SqlExpr;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::filter_convert::sql_filters_to_metadata;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::adapter::LiteFut;
 
@@ -67,7 +67,7 @@ fn build_join_projections(projection: &[Projection]) -> Vec<JoinProjection> {
 /// which dispatches to `LiteDataPlaneVisitor`. To close the loop, we produce
 /// the physical outer plan by visiting the SQL outer plan here.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn lower_lateral_top_k<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_lateral_top_k<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     outer: &SqlPlan,
     outer_alias: Option<&str>,
@@ -114,7 +114,7 @@ pub(super) fn lower_lateral_top_k<'a, S: StorageEngine + StorageEngineSync + 'a>
 
 /// Lower `SqlPlan::LateralLoop` to `QueryOp::LateralLoop`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn lower_lateral_loop<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_lateral_loop<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     outer: &SqlPlan,
     outer_alias: Option<&str>,
@@ -158,12 +158,16 @@ mod tests {
     use nodedb_sql::types::SqlPlan;
     use nodedb_sql::types::query::EngineType;
 
+    use crate::PagedbStorageMem;
     use crate::query::engine::LiteQueryEngine;
-    use crate::storage::redb_storage::RedbStorage;
 
-    fn make_engine() -> LiteQueryEngine<RedbStorage> {
+    async fn make_engine() -> LiteQueryEngine<PagedbStorageMem> {
         use std::sync::Mutex;
-        let storage = Arc::new(RedbStorage::open_in_memory().expect("in-memory redb"));
+        let storage = Arc::new(
+            PagedbStorageMem::open_in_memory()
+                .await
+                .expect("in-memory pagedb"),
+        );
         let crdt = Arc::new(Mutex::new(
             crate::engine::crdt::CrdtEngine::new(1).expect("crdt"),
         ));
@@ -181,8 +185,10 @@ mod tests {
             Arc::clone(&storage),
             100,
         ));
-        let array_state = Arc::new(Mutex::new(
-            crate::engine::array::engine::ArrayEngineState::open(&storage).expect("array"),
+        let array_state = Arc::new(tokio::sync::Mutex::new(
+            crate::engine::array::engine::ArrayEngineState::open(&storage)
+                .await
+                .expect("array"),
         ));
         let fts_state = Arc::new(crate::engine::fts::FtsState::new());
         let spatial = Arc::new(Mutex::new(
@@ -221,7 +227,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lateral_top_k_lower() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         let outer = scan_plan("users");
         let result = super::lower_lateral_top_k(
             &engine,
@@ -241,7 +247,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lateral_loop_lower() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         let outer = scan_plan("departments");
         let inner = scan_plan("employees");
         let result = super::lower_lateral_loop(

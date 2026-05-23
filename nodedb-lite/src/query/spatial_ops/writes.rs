@@ -7,14 +7,14 @@ use nodedb_types::result::QueryResult;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// `SpatialOp::Insert` — index a geometry for a document surrogate.
 ///
 /// The surrogate is used as the stable doc ID string, matching the
 /// hex-encoded key that Origin uses so that cross-engine prefilter
 /// bitmap intersects work without translation.
-pub fn spatial_insert<S: StorageEngine + StorageEngineSync>(
+pub fn spatial_insert<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     field: &str,
@@ -35,7 +35,7 @@ pub fn spatial_insert<S: StorageEngine + StorageEngineSync>(
 }
 
 /// `SpatialOp::Delete` — remove a document's geometry from the R-tree index.
-pub fn spatial_delete<S: StorageEngine + StorageEngineSync>(
+pub fn spatial_delete<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     field: &str,

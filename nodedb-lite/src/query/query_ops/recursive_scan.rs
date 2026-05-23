@@ -16,7 +16,7 @@ use crate::query::engine::LiteQueryEngine;
 use crate::query::query_ops::joins::common::{
     apply_filters, decode_filters, maps_to_result, scan_collection,
 };
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// Iterative fixed-point CTE scan over a collection.
 ///
@@ -24,7 +24,7 @@ use crate::storage::engine::{StorageEngine, StorageEngineSync};
 /// joining the collection against it via `join_link`, stopping when no new
 /// rows emerge, the iteration cap is hit, or the `limit` is reached.
 #[allow(clippy::too_many_arguments)]
-pub async fn execute_recursive_scan<S: StorageEngine + StorageEngineSync>(
+pub async fn execute_recursive_scan<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     base_filters: &[u8],

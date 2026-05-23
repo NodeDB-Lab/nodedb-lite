@@ -11,7 +11,7 @@ use nodedb_types::{BoundingBox, Surrogate, SurrogateBitmap, geometry_bbox};
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// Parameters for `SpatialOp::Scan`.
 pub struct ScanParams {
@@ -29,7 +29,7 @@ pub struct ScanParams {
 
 /// Execute a spatial scan: R-tree candidate generation → prefilter → OGC
 /// refinement → attribute filters → RLS → projection + limit.
-pub fn spatial_scan<S: StorageEngine + StorageEngineSync>(
+pub fn spatial_scan<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     params: ScanParams,
 ) -> Result<QueryResult, LiteError> {

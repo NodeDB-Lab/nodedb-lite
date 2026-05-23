@@ -15,7 +15,7 @@ use nodedb_types::value::Value;
 use crate::engine::vector::search::run_vector_search;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::adapter::LitePhysicalFut;
 use super::vector_write::{
@@ -29,7 +29,7 @@ pub(super) fn execute_vector_op<'a, S>(
     op: &VectorOp,
 ) -> Result<LitePhysicalFut<'a>, LiteError>
 where
-    S: StorageEngine + StorageEngineSync + 'a,
+    S: StorageEngine + 'a,
 {
     match op {
         // ── A. Wired ─────────────────────────────────────────────────────────
@@ -270,6 +270,7 @@ mod tests {
     use nodedb_physical::physical_plan::VectorOp;
     use nodedb_types::Surrogate;
 
+    use crate::PagedbStorageMem;
     use crate::engine::array::ArrayEngineState;
     use crate::engine::columnar::ColumnarEngine;
     use crate::engine::crdt::CrdtEngine;
@@ -279,11 +280,14 @@ mod tests {
     use crate::engine::vector::VectorState;
     use crate::error::LiteError;
     use crate::query::engine::LiteQueryEngine;
-    use crate::storage::redb_storage::RedbStorage;
 
-    fn make_engine() -> LiteQueryEngine<RedbStorage> {
+    async fn make_engine() -> LiteQueryEngine<PagedbStorageMem> {
         use std::sync::Mutex;
-        let storage = Arc::new(RedbStorage::open_in_memory().expect("in-memory redb"));
+        let storage = Arc::new(
+            PagedbStorageMem::open_in_memory()
+                .await
+                .expect("in-memory pagedb"),
+        );
         let crdt = Arc::new(Mutex::new(CrdtEngine::new(1).expect("CrdtEngine init")));
         let strict = Arc::new(StrictEngine::new(Arc::clone(&storage)));
         let columnar = Arc::new(ColumnarEngine::new(Arc::clone(&storage)));
@@ -292,8 +296,10 @@ mod tests {
             crate::engine::timeseries::engine::TimeseriesEngine::new(),
         ));
         let vector_state = Arc::new(VectorState::new(Arc::clone(&storage), 100));
-        let array_state = Arc::new(Mutex::new(
-            ArrayEngineState::open(&storage).expect("ArrayEngineState::open"),
+        let array_state = Arc::new(tokio::sync::Mutex::new(
+            ArrayEngineState::open(&storage)
+                .await
+                .expect("ArrayEngineState::open"),
         ));
         let fts_state = Arc::new(FtsState::new());
         let spatial = Arc::new(Mutex::new(
@@ -314,9 +320,9 @@ mod tests {
         )
     }
 
-    #[test]
-    fn vector_op_seal_returns_bad_request() {
-        let engine = make_engine();
+    #[tokio::test]
+    async fn vector_op_seal_returns_bad_request() {
+        let engine = make_engine().await;
         let op = VectorOp::Seal {
             collection: "col".to_string(),
             field_name: String::new(),
@@ -333,9 +339,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn vector_op_sparse_insert_returns_bad_request() {
-        let engine = make_engine();
+    #[tokio::test]
+    async fn vector_op_sparse_insert_returns_bad_request() {
+        let engine = make_engine().await;
         let op = VectorOp::SparseInsert {
             collection: "col".to_string(),
             field_name: "sparse".to_string(),
@@ -354,9 +360,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn vector_op_multi_vector_score_search_returns_bad_request() {
-        let engine = make_engine();
+    #[tokio::test]
+    async fn vector_op_multi_vector_score_search_returns_bad_request() {
+        let engine = make_engine().await;
         let op = VectorOp::MultiVectorScoreSearch {
             collection: "col".to_string(),
             field_name: String::new(),
@@ -379,7 +385,7 @@ mod tests {
 
     #[tokio::test]
     async fn vector_op_insert_routes_to_vector_insert_impl() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         let op = VectorOp::Insert {
             collection: "col".to_string(),
             vector: vec![1.0f32, 0.0, 0.0, 0.0],
@@ -398,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn vector_op_delete_by_vector_id_round_trip() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         // Insert first.
         let insert_op = VectorOp::Insert {
             collection: "col".to_string(),

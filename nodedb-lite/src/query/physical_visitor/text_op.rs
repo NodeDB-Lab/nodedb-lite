@@ -16,14 +16,14 @@ use crate::engine::fts::run_text_search;
 use crate::engine::vector::search::run_vector_search;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::adapter::LitePhysicalFut;
 
 /// Dispatch a `TextOp` to the appropriate Lite execution path.
 ///
 /// Returns a pinned future that resolves to a `QueryResult`.
-pub(super) fn execute_text_op<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     op: &TextOp,
 ) -> Result<LitePhysicalFut<'a>, LiteError> {

@@ -11,7 +11,7 @@ use crate::query::engine::LiteQueryEngine;
 use crate::query::query_ops::joins::common::{
     apply_filters, decode_filters, maps_to_result, scan_collection,
 };
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// Compute per-field facet counts for a filtered collection.
 ///
@@ -20,7 +20,7 @@ use crate::storage::engine::{StorageEngine, StorageEngineSync};
 /// `limit_per_facet` (0 = unlimited).
 ///
 /// Output rows have three columns: `field`, `value`, `count`.
-pub async fn execute_facet_counts<S: StorageEngine + StorageEngineSync>(
+pub async fn execute_facet_counts<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     filters: &[u8],

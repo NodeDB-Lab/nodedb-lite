@@ -21,7 +21,7 @@ use crate::query::query_ops::joins::common::{
 };
 use nodedb_sql::types::SqlPlan;
 
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// SQL-plan-aware entry for `LiteVisitor::lateral_top_k`.
 ///
@@ -30,7 +30,7 @@ use crate::storage::engine::{StorageEngine, StorageEngineSync};
 /// in-memory sentinel plan.  This avoids requiring a second visitor pass
 /// to produce a `PhysicalPlan` from the SQL outer plan.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn execute_lateral_top_k_sql<S: StorageEngine + StorageEngineSync>(
+pub(crate) async fn execute_lateral_top_k_sql<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     outer_sql: &SqlPlan,
     outer_alias: &str,
@@ -94,7 +94,7 @@ pub(crate) async fn execute_lateral_top_k_sql<S: StorageEngine + StorageEngineSy
 /// rows, and merges them with the outer row.  Supports LEFT join semantics
 /// (preserve outer rows with no inner match).
 #[allow(clippy::too_many_arguments)]
-pub async fn execute_lateral_top_k<S: StorageEngine + StorageEngineSync>(
+pub async fn execute_lateral_top_k<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     outer_plan: &PhysicalPlan,
     outer_alias: &str,
@@ -171,7 +171,7 @@ pub async fn execute_lateral_top_k<S: StorageEngine + StorageEngineSync>(
 /// variants (LateralTopK, LateralLoop).  It creates a fresh `LiteDataPlaneVisitor`,
 /// dispatches the plan through `nodedb_physical::dispatch`, and materialises
 /// the result into column-keyed maps.
-pub(crate) async fn execute_nested_plan<S: StorageEngine + StorageEngineSync>(
+pub(crate) async fn execute_nested_plan<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     plan: &PhysicalPlan,
 ) -> Result<Vec<HashMap<String, Value>>, LiteError> {

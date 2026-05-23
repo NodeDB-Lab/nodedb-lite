@@ -15,11 +15,11 @@ use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::filter_convert::sql_filters_to_metadata;
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::visitor::LiteFut;
 
-pub(super) fn lower_text_search<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_text_search<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     query: &FtsQuery,

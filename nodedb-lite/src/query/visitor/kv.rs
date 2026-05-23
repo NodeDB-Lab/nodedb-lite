@@ -10,7 +10,7 @@ use nodedb_types::Surrogate;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::adapter::LiteFut;
 
@@ -52,7 +52,7 @@ fn encode_kv_value(value_cols: &[(String, SqlValue)]) -> Result<Vec<u8>, LiteErr
 // ── KvInsert ─────────────────────────────────────────────────────────────────
 
 /// Lower `SqlPlan::KvInsert` → `KvOp::{Insert, InsertIfAbsent, Put, InsertOnConflictUpdate}`.
-pub(super) fn lower_kv_insert<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_kv_insert<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     entries: &[(SqlValue, Vec<(String, SqlValue)>)],
@@ -169,15 +169,19 @@ mod tests {
     use nodedb_sql::types::KvInsertIntent;
     use nodedb_sql::types_expr::SqlValue;
 
+    use crate::PagedbStorageMem;
     use crate::engine::array::engine::ArrayEngineState;
     use crate::engine::fts::FtsState;
     use crate::engine::spatial::SpatialIndexManager;
     use crate::engine::vector::VectorState;
     use crate::query::engine::LiteQueryEngine;
-    use crate::storage::redb_storage::RedbStorage;
 
-    fn make_engine() -> LiteQueryEngine<RedbStorage> {
-        let storage = Arc::new(RedbStorage::open_in_memory().expect("in-memory redb"));
+    async fn make_engine() -> LiteQueryEngine<PagedbStorageMem> {
+        let storage = Arc::new(
+            PagedbStorageMem::open_in_memory()
+                .await
+                .expect("in-memory pagedb"),
+        );
         let crdt = Arc::new(Mutex::new(
             crate::engine::crdt::CrdtEngine::new(1).expect("crdt"),
         ));
@@ -192,7 +196,9 @@ mod tests {
             crate::engine::timeseries::engine::TimeseriesEngine::new(),
         ));
         let vector_state = Arc::new(VectorState::new(Arc::clone(&storage), 100));
-        let array_state = Arc::new(Mutex::new(ArrayEngineState::open(&storage).expect("array")));
+        let array_state = Arc::new(tokio::sync::Mutex::new(
+            ArrayEngineState::open(&storage).await.expect("array"),
+        ));
         let fts_state = Arc::new(FtsState::new());
         let spatial = Arc::new(Mutex::new(SpatialIndexManager::new()));
         LiteQueryEngine::new(
@@ -212,7 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_insert_plain() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         let entries = vec![(
             SqlValue::String("key1".to_string()),
             vec![("value".to_string(), SqlValue::String("hello".to_string()))],
@@ -225,7 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_insert_duplicate_raises() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         let entries = vec![(
             SqlValue::String("dup_key".to_string()),
             vec![("value".to_string(), SqlValue::Int(42))],
@@ -244,7 +250,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_insert_if_absent_no_op() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         let entries = vec![(
             SqlValue::String("absent_key".to_string()),
             vec![("value".to_string(), SqlValue::Int(1))],
@@ -270,7 +276,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_insert_multi_column_value() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         let entries = vec![(
             SqlValue::String("mkey".to_string()),
             vec![

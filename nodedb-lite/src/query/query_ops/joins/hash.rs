@@ -10,7 +10,7 @@ use nodedb_types::result::QueryResult;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::common::{
     apply_filters, apply_projection, decode_filters, hash_join, maps_to_result, scan_collection,
@@ -18,7 +18,7 @@ use super::common::{
 use crate::query::query_ops::aggregate::execute_aggregate;
 
 #[allow(clippy::too_many_arguments)]
-pub async fn execute_hash_join<S: StorageEngine + StorageEngineSync>(
+pub async fn execute_hash_join<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     left_collection: &str,
     right_collection: &str,

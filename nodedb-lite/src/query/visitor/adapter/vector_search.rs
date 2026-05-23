@@ -18,7 +18,7 @@ use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::filter_convert::sql_filters_to_metadata;
 use crate::query::physical_visitor::execute_surrogate_scan;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::visitor::LiteFut;
 
@@ -42,7 +42,7 @@ fn coerce_literal(lit: &ArrayCoordLiteral, dtype: DimType) -> Result<DomainBound
 
 /// Build a `RoaringBitmap` from an `ArrayPrefilter` by running a surrogate
 /// scan against the array engine. Returns `None` when `prefilter` is `None`.
-async fn build_prefilter_bitmap<S: StorageEngine + StorageEngineSync>(
+async fn build_prefilter_bitmap<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     prefilter: Option<&ArrayPrefilter>,
 ) -> Result<Option<roaring::RoaringBitmap>, LiteError> {
@@ -54,10 +54,7 @@ async fn build_prefilter_bitmap<S: StorageEngine + StorageEngineSync>(
     // Resolve named dim ranges to positional Vec<Option<DimRange>> using the
     // array schema stored in the engine's array_state catalog.
     let slice_msgpack = {
-        let state = engine
-            .array_state
-            .lock()
-            .map_err(|_| LiteError::LockPoisoned)?;
+        let state = engine.array_state.lock().await;
         let array_state =
             state
                 .arrays
@@ -98,12 +95,13 @@ async fn build_prefilter_bitmap<S: StorageEngine + StorageEngineSync>(
         &engine.storage,
         &prefilter.array_name,
         &slice_msgpack,
-    )?;
+    )
+    .await?;
     Ok(Some(bitmap))
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn lower_vector_search<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_vector_search<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     field: &str,

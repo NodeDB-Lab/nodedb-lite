@@ -39,7 +39,7 @@ use crate::query::visitor::search::{
 use crate::query::visitor::set_ops::{lower_except, lower_intersect, lower_union};
 use crate::query::visitor::timeseries::{lower_timeseries_ingest, lower_timeseries_scan};
 use crate::query::visitor::vector_primary::lower_vector_primary_insert;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::basic::{
     lower_constant_result, lower_create_index, lower_delete, lower_drop_index, lower_insert,
@@ -51,11 +51,11 @@ use super::vector_search::lower_vector_search;
 pub(crate) type LiteFut<'a> =
     Pin<Box<dyn Future<Output = Result<QueryResult, LiteError>> + Send + 'a>>;
 
-pub(crate) struct LiteVisitor<'a, S: StorageEngine + StorageEngineSync> {
+pub(crate) struct LiteVisitor<'a, S: StorageEngine> {
     pub(crate) engine: &'a LiteQueryEngine<S>,
 }
 
-impl<'a, S: StorageEngine + StorageEngineSync + 'a> PlanVisitor for LiteVisitor<'a, S> {
+impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
     type Output = LiteFut<'a>;
     type Error = LiteError;
 

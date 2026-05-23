@@ -9,7 +9,7 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use crate::engine::timeseries::engine::TimeseriesEngine;
 
@@ -30,7 +30,7 @@ pub struct ScanParams {
 }
 
 /// Execute a timeseries scan, optionally bucketed and gap-filled.
-pub fn scan<S: StorageEngine + StorageEngineSync>(
+pub fn scan<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     params: ScanParams,

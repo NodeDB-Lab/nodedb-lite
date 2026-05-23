@@ -10,15 +10,19 @@ use nodedb_sql::types_array::{
     ArrayAttrAst, ArrayAttrType, ArrayDimAst, ArrayDimType, ArrayDomainBound,
 };
 
+use crate::PagedbStorageMem;
 use crate::engine::array::engine::ArrayEngineState;
 use crate::engine::fts::FtsState;
 use crate::engine::spatial::SpatialIndexManager;
 use crate::engine::vector::VectorState;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::redb_storage::RedbStorage;
 
-pub(super) fn make_engine() -> LiteQueryEngine<RedbStorage> {
-    let storage = Arc::new(RedbStorage::open_in_memory().expect("in-memory redb"));
+pub(super) async fn make_engine() -> LiteQueryEngine<PagedbStorageMem> {
+    let storage = Arc::new(
+        PagedbStorageMem::open_in_memory()
+            .await
+            .expect("in-memory pagedb"),
+    );
     let crdt = Arc::new(Mutex::new(
         crate::engine::crdt::CrdtEngine::new(1).expect("crdt"),
     ));
@@ -33,7 +37,9 @@ pub(super) fn make_engine() -> LiteQueryEngine<RedbStorage> {
         crate::engine::timeseries::engine::TimeseriesEngine::new(),
     ));
     let vector_state = Arc::new(VectorState::new(Arc::clone(&storage), 100));
-    let array_state = Arc::new(Mutex::new(ArrayEngineState::open(&storage).expect("array")));
+    let array_state = Arc::new(tokio::sync::Mutex::new(
+        ArrayEngineState::open(&storage).await.expect("array"),
+    ));
     let fts_state = Arc::new(FtsState::new());
     let spatial = Arc::new(Mutex::new(SpatialIndexManager::new()));
     LiteQueryEngine::new(

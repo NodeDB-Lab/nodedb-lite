@@ -10,7 +10,7 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// Per-process, per-collection deduplication set for WAL-LSN replay.
 /// Keyed by (collection, lsn). Cleared on process restart — that is
@@ -25,7 +25,7 @@ static SEEN_LSNS: std::sync::LazyLock<Mutex<HashSet<(String, u64)>>> =
 /// Decodes `payload` per `format` ("ilp", "msgpack", "samples"), performs
 /// WAL-LSN deduplication when `wal_lsn` is `Some`, and delegates to
 /// `ingest_metric` for each decoded sample.
-pub fn ingest<S: StorageEngine + StorageEngineSync>(
+pub fn ingest<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     payload: &[u8],

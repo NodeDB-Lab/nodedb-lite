@@ -17,7 +17,7 @@ use crate::engine::vector::state::ensure_hnsw;
 use crate::error::LiteError;
 use crate::nodedb::LockExt;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::adapter::LitePhysicalFut;
 
@@ -50,7 +50,7 @@ pub(super) fn vector_insert<'a, S>(
     doc_id: String,
 ) -> LitePhysicalFut<'a>
 where
-    S: StorageEngine + StorageEngineSync + 'a,
+    S: StorageEngine + 'a,
 {
     let vector_state = Arc::clone(&engine.vector_state);
     let crdt = Arc::clone(&engine.crdt);
@@ -133,7 +133,7 @@ pub(super) fn vector_delete_by_id<'a, S>(
     vector_id: u32,
 ) -> LitePhysicalFut<'a>
 where
-    S: StorageEngine + StorageEngineSync + 'a,
+    S: StorageEngine + 'a,
 {
     let vector_state = Arc::clone(&engine.vector_state);
     let crdt = Arc::clone(&engine.crdt);
@@ -177,7 +177,7 @@ pub(super) fn vector_delete_by_surrogate<'a, S>(
     field_name: String,
 ) -> LitePhysicalFut<'a>
 where
-    S: StorageEngine + StorageEngineSync + 'a,
+    S: StorageEngine + 'a,
 {
     let doc_id = surrogate.to_string();
     let vector_state = Arc::clone(&engine.vector_state);
@@ -228,7 +228,7 @@ pub(super) fn vector_direct_upsert<'a, S>(
     storage_dtype: VectorStorageDtype,
 ) -> LitePhysicalFut<'a>
 where
-    S: StorageEngine + StorageEngineSync + 'a,
+    S: StorageEngine + 'a,
 {
     let vector_state = Arc::clone(&engine.vector_state);
     let crdt = Arc::clone(&engine.crdt);
@@ -324,7 +324,7 @@ pub(super) fn vector_set_params<'a, S>(
     metric_str: String,
 ) -> Result<LitePhysicalFut<'a>, LiteError>
 where
-    S: StorageEngine + StorageEngineSync + 'a,
+    S: StorageEngine + 'a,
 {
     let metric = parse_metric(&metric_str)?;
     let vector_state = Arc::clone(&engine.vector_state);
@@ -364,7 +364,7 @@ pub(super) fn vector_query_stats<'a, S>(
     index_key: String,
 ) -> LitePhysicalFut<'a>
 where
-    S: StorageEngine + StorageEngineSync + 'a,
+    S: StorageEngine + 'a,
 {
     let vector_state = Arc::clone(&engine.vector_state);
     Box::pin(async move {

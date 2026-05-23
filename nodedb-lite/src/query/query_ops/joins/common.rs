@@ -11,7 +11,7 @@ use nodedb_types::value::Value;
 use crate::error::LiteError;
 use crate::query::document_ops::reads::scan;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 // ─── Collection scan ─────────────────────────────────────────────────────────
 
@@ -19,7 +19,7 @@ use crate::storage::engine::{StorageEngine, StorageEngineSync};
 ///
 /// Uses document_ops::reads::scan (schemaless/strict), then converts each row
 /// to a column-keyed map using the result's column names.
-pub async fn scan_collection<S: StorageEngine + StorageEngineSync>(
+pub async fn scan_collection<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
 ) -> Result<Vec<HashMap<String, Value>>, LiteError> {

@@ -18,7 +18,7 @@ use nodedb_types::TenantId;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// Lite is single-tenant; all `ArrayId` allocations use tenant 0.
 pub(super) const LITE_TENANT: TenantId = TenantId::new(0);
@@ -108,13 +108,17 @@ pub(super) fn extract_temporal(scope: &TemporalScope) -> (Option<i64>, Option<i6
 }
 
 /// Read the schema for `name` from the locked array state.
-pub(super) fn load_schema<S: StorageEngine + StorageEngineSync>(
+///
+/// Uses `try_lock` because this is called from query-planning context (sync).
+/// The array catalog lock is always available during planning — the execution
+/// future that holds it does not run until after planning returns.
+pub(super) fn load_schema<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     name: &str,
 ) -> Result<ArraySchema, LiteError> {
     let state = engine
         .array_state
-        .lock()
+        .try_lock()
         .map_err(|_| LiteError::LockPoisoned)?;
     state
         .arrays
@@ -126,13 +130,15 @@ pub(super) fn load_schema<S: StorageEngine + StorageEngineSync>(
 }
 
 /// Read `audit_retain_ms` for `name` from the locked array state.
-pub(super) fn load_audit_retain<S: StorageEngine + StorageEngineSync>(
+///
+/// Uses `try_lock` — same rationale as `load_schema`.
+pub(super) fn load_audit_retain<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     name: &str,
 ) -> Result<Option<i64>, LiteError> {
     let state = engine
         .array_state
-        .lock()
+        .try_lock()
         .map_err(|_| LiteError::LockPoisoned)?;
     state
         .arrays

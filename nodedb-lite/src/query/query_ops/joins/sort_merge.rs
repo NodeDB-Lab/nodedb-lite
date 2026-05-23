@@ -11,12 +11,12 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::common::{maps_to_result, merge_rows, scan_collection};
 use crate::query::query_ops::aggregate::value_cmp;
 
-pub async fn execute_sort_merge_join<S: StorageEngine + StorageEngineSync>(
+pub async fn execute_sort_merge_join<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     left_collection: &str,
     right_collection: &str,

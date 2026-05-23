@@ -22,14 +22,14 @@ use crate::query::query_ops::joins::common::{
 use nodedb_sql::types::SqlPlan;
 
 use crate::query::query_ops::lateral_top_k::{execute_nested_plan, prefix_row};
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// SQL-plan-aware entry for `LiteVisitor::lateral_loop`.
 ///
 /// Executes `outer_sql` via `engine.execute_plan`, then for each outer row
 /// re-executes `inner_sql` with correlated equality filters injected.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn execute_lateral_loop_sql<S: StorageEngine + StorageEngineSync>(
+pub(crate) async fn execute_lateral_loop_sql<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     outer_sql: &SqlPlan,
     outer_alias: &str,
@@ -101,7 +101,7 @@ pub(crate) async fn execute_lateral_loop_sql<S: StorageEngine + StorageEngineSyn
 /// Emits every matching inner row merged with the outer row.  Supports LEFT
 /// join semantics.
 #[allow(clippy::too_many_arguments)]
-pub async fn execute_lateral_loop<S: StorageEngine + StorageEngineSync>(
+pub async fn execute_lateral_loop<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     outer_plan: &PhysicalPlan,
     outer_alias: &str,

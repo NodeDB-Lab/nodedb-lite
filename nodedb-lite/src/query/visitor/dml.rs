@@ -22,7 +22,7 @@ use crate::query::document_ops::writes::{point_delete, point_insert, point_updat
 use crate::query::engine::LiteQueryEngine;
 use crate::query::filter_convert::sql_value_to_value;
 use crate::query::value_utils::value_to_string;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::adapter::LiteFut;
 
@@ -125,7 +125,7 @@ fn resolve_updates_with_source(
 /// Executes the source plan, converts each returned row to a field-value
 /// pair list, and inserts them into the target collection. Routing (strict
 /// vs schemaless CRDT) is detected via `is_strict`.
-pub(super) fn lower_insert_select<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_insert_select<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     target: &str,
     source: &SqlPlan,
@@ -198,7 +198,7 @@ fn value_to_sql_value(v: Value) -> nodedb_sql::types::SqlValue {
 
 /// `UPDATE target SET ... FROM source WHERE target.col = source.col`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn lower_update_from<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_update_from<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     _engine_type: EngineType,
@@ -258,7 +258,7 @@ pub(super) fn lower_update_from<'a, S: StorageEngine + StorageEngineSync + 'a>(
 
 /// `MERGE INTO target USING source ON ... WHEN ...`
 #[allow(clippy::too_many_arguments)]
-pub(super) fn lower_merge<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(super) fn lower_merge<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     target: &str,
     _engine_type: EngineType,
@@ -339,7 +339,7 @@ pub(super) fn lower_merge<'a, S: StorageEngine + StorageEngineSync + 'a>(
     }))
 }
 
-async fn apply_merge_action<S: StorageEngine + StorageEngineSync>(
+async fn apply_merge_action<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     target: &str,
     doc_id: &str,

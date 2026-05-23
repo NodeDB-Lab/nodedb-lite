@@ -13,13 +13,13 @@ use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
 use crate::query::visitor::adapter::LiteFut;
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::coerce::{coerce_coord, coord_to_domain_bound, map_binary_op, map_reducer};
 use super::schema::{LITE_TENANT, extract_temporal, load_schema};
 
 /// Lower `SqlPlan::ArraySlice` → `ArrayOp::Slice`.
-pub(crate) fn lower_array_slice<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(crate) fn lower_array_slice<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     name: &str,
     slice_ast: &ArraySliceAst,
@@ -87,7 +87,7 @@ pub(crate) fn lower_array_slice<'a, S: StorageEngine + StorageEngineSync + 'a>(
 }
 
 /// Lower `SqlPlan::ArrayProject` → `ArrayOp::Project`.
-pub(crate) fn lower_array_project<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(crate) fn lower_array_project<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     name: &str,
     attr_projection: &[String],
@@ -126,7 +126,7 @@ pub(crate) fn lower_array_project<'a, S: StorageEngine + StorageEngineSync + 'a>
 }
 
 /// Lower `SqlPlan::ArrayAgg` → `ArrayOp::Aggregate`.
-pub(crate) fn lower_array_agg<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(crate) fn lower_array_agg<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     name: &str,
     attr: &str,
@@ -173,7 +173,7 @@ pub(crate) fn lower_array_agg<'a, S: StorageEngine + StorageEngineSync + 'a>(
 }
 
 /// Lower `SqlPlan::ArrayElementwise` → `ArrayOp::Elementwise`.
-pub(crate) fn lower_array_elementwise<'a, S: StorageEngine + StorageEngineSync + 'a>(
+pub(crate) fn lower_array_elementwise<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     left: &str,
     right: &str,
@@ -232,7 +232,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_insert_and_slice_array() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         lower_create_array(
             &engine,
             "arr_ins",
@@ -284,7 +284,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_array_agg() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         lower_create_array(
             &engine,
             "arr_agg",
@@ -327,7 +327,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_array_project() {
-        let engine = make_engine();
+        let engine = make_engine().await;
         lower_create_array(
             &engine,
             "arr_proj",
@@ -366,7 +366,7 @@ mod tests {
     async fn test_array_elementwise() {
         let dims = dim1_ast();
         let attrs = attr1_ast();
-        let engine = make_engine();
+        let engine = make_engine().await;
 
         for arr in ["el_a", "el_b"] {
             lower_create_array(
