@@ -258,7 +258,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .map_err(NodeDbError::storage)?,
         );
         #[cfg(not(target_arch = "wasm32"))]
-        let array_op_log = Arc::new(crate::sync::array::RedbOpLog::new(Arc::clone(&storage)));
+        let array_op_log = Arc::new(crate::sync::array::KvOpLogStore::new(Arc::clone(&storage)));
         #[cfg(not(target_arch = "wasm32"))]
         let array_pending = Arc::new(crate::sync::array::PendingQueue::new(Arc::clone(&storage)));
         #[cfg(not(target_arch = "wasm32"))]
@@ -415,7 +415,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 }
             }
 
-            // ── Legacy B+ tree path (WASM, RedbStorage, or pre-migration data) ──
+            // ── Legacy B+ tree path (WASM or pre-migration data) ──
             let key = format!("csr:{name}");
             if let Some(envelope) = storage.get(Namespace::Graph, key.as_bytes()).await? {
                 match crate::storage::checksum::unwrap(&envelope) {

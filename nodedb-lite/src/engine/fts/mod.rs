@@ -13,5 +13,5 @@ pub use nodedb_fts::backend::FtsBackend;
 pub use nodedb_fts::backend::memory::MemoryBackend;
 pub use nodedb_fts::posting::{MatchOffset, Posting, QueryMode, TextSearchResult};
 
-/// Type alias for Lite's persistent FTS index (serialized to redb on flush).
+/// Type alias for Lite's persistent FTS index (serialized to KV store on flush).
 pub type LiteFtsIndex = FtsIndex<MemoryBackend>;

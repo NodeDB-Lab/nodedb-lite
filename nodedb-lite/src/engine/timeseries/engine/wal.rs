@@ -20,7 +20,7 @@ pub struct WalEntry {
 }
 
 impl TimeseriesEngine {
-    /// Get pending WAL entries (for persistence to redb by the caller).
+    /// Get pending WAL entries (for persistence to the KV store by the caller).
     pub fn pending_wal_entries(&self, since_seq: u64) -> &[WalEntry] {
         let start = self.wal_entries.partition_point(|e| e.seq <= since_seq);
         &self.wal_entries[start..]

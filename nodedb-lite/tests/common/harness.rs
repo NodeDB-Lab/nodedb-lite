@@ -18,7 +18,7 @@ use nodedb_lite::sync::array::catchup::CatchupTracker;
 use nodedb_lite::sync::array::inbound::apply::LiteApplyEngine;
 use nodedb_lite::sync::array::inbound::dispatcher::ArrayInbound;
 use nodedb_lite::sync::array::inbound::outcome::InboundOutcome;
-use nodedb_lite::sync::array::op_log_redb::RedbOpLog;
+use nodedb_lite::sync::array::op_log_store::KvOpLogStore;
 use nodedb_lite::sync::array::outbound::ArrayOutbound;
 use nodedb_lite::sync::array::pending::PendingQueue;
 use nodedb_lite::sync::array::replica_state::ReplicaState;
@@ -37,7 +37,7 @@ pub struct SyncHarness {
     pub outbound: ArrayOutbound<PagedbStorageMem>,
     pub schemas: Arc<SchemaRegistry<PagedbStorageMem>>,
     pub pending: Arc<PendingQueue<PagedbStorageMem>>,
-    pub op_log: Arc<RedbOpLog<PagedbStorageMem>>,
+    pub op_log: Arc<KvOpLogStore<PagedbStorageMem>>,
     pub storage: Arc<PagedbStorageMem>,
     /// Direct handle to the shared engine state for AS-OF queries in tests.
     pub array_state: Arc<tokio::sync::Mutex<ArrayEngineState>>,
@@ -66,7 +66,7 @@ impl SyncHarness {
             Arc::clone(&storage),
             Arc::clone(&replica),
         ));
-        let op_log = Arc::new(RedbOpLog::new(Arc::clone(&storage)));
+        let op_log = Arc::new(KvOpLogStore::new(Arc::clone(&storage)));
         let pending = Arc::new(PendingQueue::new(Arc::clone(&storage)));
         let array_state = Arc::new(tokio::sync::Mutex::new(ArrayEngineState::new()));
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Sidecar persistence: store/restore codec sidecars from redb.
+//! Sidecar persistence: store/restore codec sidecars from the KV store.
 //!
 //! Persisting on every insert is avoided (training-free codecs are fast, but
 //! storage writes add per-insert latency).  Instead, callers persist on
@@ -19,7 +19,7 @@ pub(super) fn sidecar_storage_key(index_key: &str) -> String {
     format!("sidecar:{index_key}")
 }
 
-/// Persist the current in-memory sidecar for `index_key` to redb.
+/// Persist the current in-memory sidecar for `index_key` to the KV store.
 ///
 /// Best-effort: when the sidecar is absent the call is a no-op.  Serialization
 /// or storage failures are logged as warnings — the in-memory sidecar remains

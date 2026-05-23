@@ -47,7 +47,7 @@ const CREATE_ORIGIN: &str =
 
 const FIELD: &str = "location";
 
-// ── Helper: open a Lite DB backed by in-memory redb ─────────────────────────
+// ── Helper: open a Lite DB backed by in-memory storage ─────────────────────────
 
 async fn open_lite() -> Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()

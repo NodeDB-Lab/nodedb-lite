@@ -145,7 +145,7 @@ impl<S: StorageEngine> StrictEngine<S> {
 
     /// Add a column to an existing strict collection.
     ///
-    /// Bumps the schema version. Existing tuples in redb are NOT rewritten —
+    /// Bumps the schema version. Existing tuples are NOT rewritten —
     /// the decoder checks `schema_version` in the tuple header and returns
     /// null/default for columns added after the tuple was written.
     pub async fn alter_add_column(

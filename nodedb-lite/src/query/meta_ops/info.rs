@@ -13,7 +13,7 @@ use crate::storage::engine::StorageEngine;
 /// every blob keyed under `{name}*` across all data-bearing namespaces.
 ///
 /// This is exact for the bytes the storage layer hands back, not an estimate;
-/// it does not include redb's internal page overhead, but it is deterministic
+/// it does not include internal page overhead, but it is deterministic
 /// and reflects what would be reclaimed by dropping the collection.
 pub async fn handle_query_collection_size<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,

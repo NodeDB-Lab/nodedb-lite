@@ -18,8 +18,12 @@ use crate::query::graph_ops::{
 };
 use crate::storage::engine::StorageEngine;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) type GraphFut<'a> =
     Pin<Box<dyn Future<Output = Result<QueryResult, LiteError>> + Send + 'a>>;
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) type GraphFut<'a> = Pin<Box<dyn Future<Output = Result<QueryResult, LiteError>> + 'a>>;
 
 /// Dispatch a `GraphOp` to the correct Lite handler.
 pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(

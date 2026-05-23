@@ -6,7 +6,7 @@
 //! 1. Looks up the current `schema_hlc` from the [`SchemaRegistry`].
 //! 2. Mints a fresh HLC via [`ReplicaState::next_hlc`].
 //! 3. Builds the [`ArrayOp`].
-//! 4. Appends to the durable [`RedbOpLog`] (permanent record for GC).
+//! 4. Appends to the durable [`KvOpLogStore`] (permanent record for GC).
 //! 5. Enqueues in the durable [`PendingQueue`] (transport buffer).
 //!
 //! The caller must ensure the local engine write has already succeeded before
@@ -24,7 +24,7 @@ use nodedb_array::types::coord::value::CoordValue;
 
 use crate::error::LiteError;
 use crate::storage::engine::StorageEngine;
-use crate::sync::array::op_log_redb::RedbOpLog;
+use crate::sync::array::op_log_store::KvOpLogStore;
 use crate::sync::array::pending::PendingQueue;
 use crate::sync::array::replica_state::ReplicaState;
 use crate::sync::array::schema_registry::SchemaRegistry;
@@ -34,7 +34,7 @@ use crate::sync::array::schema_registry::SchemaRegistry;
 /// All fields are `Arc`-wrapped so the struct can be shared across the
 /// `NodeDbLite` struct and any future transport tasks.
 pub struct ArrayOutbound<S: StorageEngine> {
-    pub(crate) op_log: Arc<RedbOpLog<S>>,
+    pub(crate) op_log: Arc<KvOpLogStore<S>>,
     pub(crate) pending: Arc<PendingQueue<S>>,
     pub(crate) schemas: Arc<SchemaRegistry<S>>,
     pub(crate) replica: Arc<ReplicaState>,
@@ -43,7 +43,7 @@ pub struct ArrayOutbound<S: StorageEngine> {
 impl<S: StorageEngine> ArrayOutbound<S> {
     /// Create an [`ArrayOutbound`] from its component parts.
     pub fn new(
-        op_log: Arc<RedbOpLog<S>>,
+        op_log: Arc<KvOpLogStore<S>>,
         pending: Arc<PendingQueue<S>>,
         schemas: Arc<SchemaRegistry<S>>,
         replica: Arc<ReplicaState>,
@@ -57,7 +57,7 @@ impl<S: StorageEngine> ArrayOutbound<S> {
     }
 
     /// Access the underlying op-log (for sharing with inbound handler).
-    pub fn op_log(&self) -> &Arc<RedbOpLog<S>> {
+    pub fn op_log(&self) -> &Arc<KvOpLogStore<S>> {
         &self.op_log
     }
 
@@ -223,7 +223,7 @@ mod tests {
             Arc::clone(&storage),
             Arc::clone(&replica),
         ));
-        let op_log = Arc::new(RedbOpLog::new(Arc::clone(&storage)));
+        let op_log = Arc::new(KvOpLogStore::new(Arc::clone(&storage)));
         let pending = Arc::new(PendingQueue::new(Arc::clone(&storage)));
         let ob = ArrayOutbound::new(op_log, pending, schemas, replica);
         (ob, storage)

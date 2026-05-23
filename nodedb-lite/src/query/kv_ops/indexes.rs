@@ -12,7 +12,7 @@ use crate::query::engine::LiteQueryEngine;
 use crate::query::value_utils::value_to_string;
 use crate::storage::engine::{StorageEngine, WriteOp};
 
-use super::reads::{decode_value, is_expired, split_redb_key};
+use super::reads::{decode_value, is_expired, split_kv_key};
 
 /// Index key prefix in Meta namespace.
 fn meta_prefix(collection: &str, field: &str) -> String {
@@ -55,7 +55,7 @@ pub async fn kv_register_index<S: StorageEngine>(
 
     let mut indexed: u64 = 0;
     for (composite_key, raw_value) in &entries {
-        let Some((coll, user_key_bytes)) = split_redb_key(composite_key) else {
+        let Some((coll, user_key_bytes)) = split_kv_key(composite_key) else {
             continue;
         };
         if coll != collection {

@@ -28,7 +28,7 @@ const MANIFEST_PREFIX: &str = "manifest:";
 pub struct SegmentRef {
     /// Monotonically increasing segment ID within this array.
     pub id: u64,
-    /// Byte length of the segment payload stored in redb.
+    /// Byte length of the segment payload stored in the KV store.
     pub byte_len: u64,
 }
 

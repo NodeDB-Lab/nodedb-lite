@@ -51,7 +51,7 @@ pub struct LiteConfig {
 
     /// Enable CRDT sync for KV operations. Default: `true`.
     ///
-    /// When `false`, KV operations go directly to redb (B-tree), bypassing
+    /// When `false`, KV operations go directly to the B+ tree, bypassing
     /// Loro entirely. This gives SQLite-class performance for local-only use.
     /// Other engines (vector, graph, document) still use Loro for their storage.
     ///

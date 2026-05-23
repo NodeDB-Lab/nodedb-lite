@@ -3,7 +3,7 @@
 //!
 //! On Origin, WalAppend is the Raft-durable commit path that assigns a
 //! cluster-wide LSN. On Lite the same semantics — durability + monotonic
-//! ordering — are satisfied by redb's transactional commit combined with an
+//! ordering — are satisfied by the KV store's transactional commit combined with an
 //! atomic LSN counter persisted in the Meta namespace.
 
 use std::sync::Arc;
@@ -61,8 +61,8 @@ async fn next_lsn<S: StorageEngine>(storage: &Arc<S>) -> Result<u64, LiteError> 
 /// Handle a `MetaOp::WalAppend`.
 ///
 /// Writes `payload` to Namespace::Meta under a key derived from the assigned
-/// LSN, then commits via the storage `put` path (backed by a redb write
-/// transaction, O_DIRECT durable). Returns the assigned LSN as `Value::Integer`.
+/// LSN, then commits via the storage `put` path (durable write transaction).
+/// Returns the assigned LSN as `Value::Integer`.
 pub async fn handle_wal_append<S: StorageEngine>(
     storage: &Arc<S>,
     payload: &[u8],

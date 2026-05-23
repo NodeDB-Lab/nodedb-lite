@@ -13,7 +13,7 @@
 //!
 //! **Name length constraint**: `u8` accommodates names up to 255 bytes.
 //! The array schema validator enforces this upper bound. If a name longer
-//! than 255 bytes arrives at [`RedbOpLog::append`], the method returns
+//! than 255 bytes arrives at [`KvOpLogStore::append`], the method returns
 //! [`ArrayError::SegmentCorruption`] rather than silently truncating.
 //!
 //! # Runtime requirement
@@ -44,11 +44,11 @@ use crate::storage::engine::{StorageEngine, WriteOp};
 /// `OpLog` trait into async storage via `tokio::task::block_in_place`.
 ///
 /// See the module-level documentation for the composite key layout.
-pub struct RedbOpLog<S: StorageEngine> {
+pub struct KvOpLogStore<S: StorageEngine> {
     storage: Arc<S>,
 }
 
-impl<S: StorageEngine> RedbOpLog<S> {
+impl<S: StorageEngine> KvOpLogStore<S> {
     /// Wrap an existing storage backend.
     pub fn new(storage: Arc<S>) -> Self {
         Self { storage }
@@ -162,7 +162,7 @@ where
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
 }
 
-impl<S: StorageEngine> OpLog for RedbOpLog<S> {
+impl<S: StorageEngine> OpLog for KvOpLogStore<S> {
     /// Append an operation to the log.
     ///
     /// Idempotent: re-appending the same `(array, hlc)` overwrites the stored
@@ -299,12 +299,12 @@ mod tests {
         }
     }
 
-    async fn make_log() -> RedbOpLog<PagedbStorageMem> {
+    async fn make_log() -> KvOpLogStore<PagedbStorageMem> {
         let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
-        RedbOpLog::new(storage)
+        KvOpLogStore::new(storage)
     }
 
-    // All tests that exercise RedbOpLog methods must run on the multi-thread
+    // All tests that exercise KvOpLogStore methods must run on the multi-thread
     // Tokio runtime because block_in_place requires it.
 
     #[tokio::test(flavor = "multi_thread")]
@@ -426,7 +426,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn decode_corruption_propagates() {
         let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
-        let log = RedbOpLog::new(Arc::clone(&storage));
+        let log = KvOpLogStore::new(Arc::clone(&storage));
 
         // Write a valid key with garbage value directly via storage.
         let valid_key = make_key("arr", hlc(99, 0)).unwrap();
@@ -447,7 +447,7 @@ mod tests {
 
         {
             let storage = Arc::new(PagedbStorageDefault::open(&path).await.unwrap());
-            let log = RedbOpLog::new(Arc::clone(&storage));
+            let log = KvOpLogStore::new(Arc::clone(&storage));
             log.append(&make_op("arr", 10)).unwrap();
             log.append(&make_op("arr", 20)).unwrap();
         }
@@ -455,7 +455,7 @@ mod tests {
         // Reopen the same file.
         {
             let storage = Arc::new(PagedbStorageDefault::open(&path).await.unwrap());
-            let log = RedbOpLog::new(storage);
+            let log = KvOpLogStore::new(storage);
             assert_eq!(log.len().unwrap(), 2);
             let ops: Vec<_> = log
                 .scan_from(Hlc::ZERO)

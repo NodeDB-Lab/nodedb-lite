@@ -2,7 +2,7 @@
 //!
 //! On pagedb-backed storage (`as_array_segment_ext()` returns `Some`), tile
 //! data is stored in pagedb encrypted segments under `arr/tile/{name}/{id}`.
-//! On all other backends (RedbStorage, WASM), the legacy KV blob path is used:
+//! On WASM (where `as_array_segment_ext()` returns `None`), the legacy KV blob path is used:
 //! bytes stored in the `Array` namespace under `segment:{name}:{id}`.
 //!
 //! The on-disk bytes are identical in both paths — the exact output of

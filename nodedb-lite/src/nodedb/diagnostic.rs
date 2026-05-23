@@ -2,7 +2,7 @@
 //!
 //! `db.diagnostic_dump()` produces a structured report containing:
 //! - Redacted sync config (tokens masked)
-//! - Storage stats (redb namespace counts)
+//! - Storage stats (namespace counts)
 //! - Engine stats (from health API)
 //! - Pending delta summary (count + oldest timestamp, not actual data)
 //! - Flow control state

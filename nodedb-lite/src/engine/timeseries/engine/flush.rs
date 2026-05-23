@@ -1,16 +1,16 @@
-//! Flush memtable to Gorilla-compressed redb entries.
+//! Flush memtable to Gorilla-compressed KV entries.
 
 use nodedb_codec::gorilla::GorillaEncoder;
 use nodedb_types::timeseries::{PartitionMeta, PartitionState};
 
 use super::core::{FlushedPartition, TimeseriesEngine};
 
-/// A key-value entry for redb persistence.
-pub type RedbEntry = (Vec<u8>, Vec<u8>);
+/// A key-value entry for KV store persistence.
+pub type KvFlushEntry = (Vec<u8>, Vec<u8>);
 
 /// Result of flushing a collection's memtable.
 pub struct FlushResult {
-    /// redb key prefix for this partition.
+    /// KV key prefix for this partition.
     pub key_prefix: String,
     /// Gorilla-encoded timestamps.
     pub ts_block: Vec<u8>,
@@ -23,10 +23,10 @@ pub struct FlushResult {
 }
 
 impl FlushResult {
-    /// redb key-value pairs to persist this partition.
+    /// KV key-value pairs to persist this partition.
     ///
     /// Returns `Err` if metadata serialization fails.
-    pub fn to_redb_entries(&self) -> Result<Vec<RedbEntry>, sonic_rs::Error> {
+    pub fn to_kv_entries(&self) -> Result<Vec<KvFlushEntry>, sonic_rs::Error> {
         let meta_bytes = sonic_rs::to_vec(&self.meta)?;
         Ok(vec![
             (
@@ -47,7 +47,7 @@ impl FlushResult {
 }
 
 impl TimeseriesEngine {
-    /// Flush a collection's memtable to Gorilla-compressed redb entries.
+    /// Flush a collection's memtable to Gorilla-compressed KV entries.
     pub fn flush(&mut self, collection: &str) -> Option<FlushResult> {
         let coll = self.collections.get_mut(collection)?;
         if coll.timestamps.is_empty() {

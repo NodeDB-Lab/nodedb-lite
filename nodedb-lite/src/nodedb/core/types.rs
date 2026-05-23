@@ -118,7 +118,7 @@ pub struct NodeDbLite<S: StorageEngine> {
 pub(crate) struct KvWriteBuffer {
     /// Pending write operations for batch commit.
     pub ops: Vec<crate::storage::engine::WriteOp>,
-    /// Read overlay: maps redb composite key → value (None = deleted).
+    /// Read overlay: maps composite KV key → value (None = deleted).
     /// Lets `kv_get` see uncommitted writes without hitting storage.
     pub overlay: HashMap<Vec<u8>, Option<Vec<u8>>>,
 }

@@ -9,7 +9,7 @@ use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::storage::engine::{StorageEngine, WriteOp};
 
-use super::reads::{decode_value, encode_value, is_expired, now_ms, redb_key, split_redb_key};
+use super::reads::{decode_value, encode_value, is_expired, kv_key, now_ms, split_kv_key};
 
 // ─── Point writes ────────────────────────────────────────────────────────────
 
@@ -26,7 +26,7 @@ pub async fn kv_put<S: StorageEngine>(
     } else {
         0
     };
-    let rkey = redb_key(collection, key);
+    let rkey = kv_key(collection, key);
     let encoded = encode_value(deadline, value);
     engine
         .storage
@@ -50,7 +50,7 @@ pub async fn kv_insert<S: StorageEngine>(
     value: &[u8],
     ttl_ms: u64,
 ) -> Result<QueryResult, LiteError> {
-    let rkey = redb_key(collection, key);
+    let rkey = kv_key(collection, key);
     let existing = engine
         .storage
         .get(Namespace::Kv, &rkey)
@@ -77,7 +77,7 @@ pub async fn kv_insert_if_absent<S: StorageEngine>(
     value: &[u8],
     ttl_ms: u64,
 ) -> Result<QueryResult, LiteError> {
-    let rkey = redb_key(collection, key);
+    let rkey = kv_key(collection, key);
     let existing = engine
         .storage
         .get(Namespace::Kv, &rkey)
@@ -110,7 +110,7 @@ pub async fn kv_insert_on_conflict_update<S: StorageEngine>(
         nodedb_physical::physical_plan::document::UpdateValue,
     )],
 ) -> Result<QueryResult, LiteError> {
-    let rkey = redb_key(collection, key);
+    let rkey = kv_key(collection, key);
     let existing = engine
         .storage
         .get(Namespace::Kv, &rkey)
@@ -198,7 +198,7 @@ pub async fn kv_delete<S: StorageEngine>(
         .iter()
         .map(|k| WriteOp::Delete {
             ns: Namespace::Kv,
-            key: redb_key(collection, k),
+            key: kv_key(collection, k),
         })
         .collect();
     let count = ops.len() as u64;
@@ -234,7 +234,7 @@ pub async fn kv_batch_put<S: StorageEngine>(
         .iter()
         .map(|(k, v)| WriteOp::Put {
             ns: Namespace::Kv,
-            key: redb_key(collection, k),
+            key: kv_key(collection, k),
             value: encode_value(deadline, v),
         })
         .collect();
@@ -260,7 +260,7 @@ pub async fn kv_expire<S: StorageEngine>(
     key: &[u8],
     ttl_ms: u64,
 ) -> Result<QueryResult, LiteError> {
-    let rkey = redb_key(collection, key);
+    let rkey = kv_key(collection, key);
     let stored = engine
         .storage
         .get(Namespace::Kv, &rkey)
@@ -303,7 +303,7 @@ pub async fn kv_persist<S: StorageEngine>(
     collection: &str,
     key: &[u8],
 ) -> Result<QueryResult, LiteError> {
-    let rkey = redb_key(collection, key);
+    let rkey = kv_key(collection, key);
     let stored = engine
         .storage
         .get(Namespace::Kv, &rkey)
@@ -359,7 +359,7 @@ pub async fn kv_truncate<S: StorageEngine>(
 
     let mut ops: Vec<WriteOp> = Vec::with_capacity(entries.len());
     for (composite_key, _) in &entries {
-        let Some((coll, _)) = split_redb_key(composite_key) else {
+        let Some((coll, _)) = split_kv_key(composite_key) else {
             continue;
         };
         if coll != collection {
@@ -399,7 +399,7 @@ pub async fn kv_incr<S: StorageEngine>(
     delta: i64,
     ttl_ms: u64,
 ) -> Result<QueryResult, LiteError> {
-    let rkey = redb_key(collection, key);
+    let rkey = kv_key(collection, key);
     let stored = engine
         .storage
         .get(Namespace::Kv, &rkey)
@@ -466,7 +466,7 @@ pub async fn kv_incr_float<S: StorageEngine>(
     key: &[u8],
     delta: f64,
 ) -> Result<QueryResult, LiteError> {
-    let rkey = redb_key(collection, key);
+    let rkey = kv_key(collection, key);
     let stored = engine
         .storage
         .get(Namespace::Kv, &rkey)
@@ -525,7 +525,7 @@ pub async fn kv_cas<S: StorageEngine>(
     expected: &[u8],
     new_value: &[u8],
 ) -> Result<QueryResult, LiteError> {
-    let rkey = redb_key(collection, key);
+    let rkey = kv_key(collection, key);
     let stored = engine
         .storage
         .get(Namespace::Kv, &rkey)
@@ -574,7 +574,7 @@ pub async fn kv_get_set<S: StorageEngine>(
     key: &[u8],
     new_value: &[u8],
 ) -> Result<QueryResult, LiteError> {
-    let rkey = redb_key(collection, key);
+    let rkey = kv_key(collection, key);
     let stored = engine
         .storage
         .get(Namespace::Kv, &rkey)
@@ -621,7 +621,7 @@ pub async fn kv_field_set<S: StorageEngine>(
     key: &[u8],
     field_updates: &[(String, Vec<u8>)],
 ) -> Result<QueryResult, LiteError> {
-    let rkey = redb_key(collection, key);
+    let rkey = kv_key(collection, key);
     let stored = engine
         .storage
         .get(Namespace::Kv, &rkey)
@@ -692,8 +692,8 @@ pub async fn kv_transfer<S: StorageEngine>(
     field: &str,
     amount: f64,
 ) -> Result<QueryResult, LiteError> {
-    let src_rkey = redb_key(collection, source_key);
-    let dst_rkey = redb_key(collection, dest_key);
+    let src_rkey = kv_key(collection, source_key);
+    let dst_rkey = kv_key(collection, dest_key);
 
     let src_raw = engine
         .storage
@@ -810,7 +810,7 @@ pub async fn kv_transfer_item<S: StorageEngine>(
     item_key: &[u8],
     dest_key: &[u8],
 ) -> Result<QueryResult, LiteError> {
-    let src_rkey = redb_key(source_collection, item_key);
+    let src_rkey = kv_key(source_collection, item_key);
     let src_raw = engine
         .storage
         .get(Namespace::Kv, &src_rkey)
@@ -835,7 +835,7 @@ pub async fn kv_transfer_item<S: StorageEngine>(
     }
     let item_bytes = src_user_bytes.to_vec();
 
-    let dst_rkey = redb_key(dest_collection, dest_key);
+    let dst_rkey = kv_key(dest_collection, dest_key);
     let ops = vec![
         WriteOp::Delete {
             ns: Namespace::Kv,

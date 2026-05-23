@@ -115,7 +115,7 @@ impl TimeseriesEngine {
             }
             BudgetPolicy::Downsample => {
                 // Identify partitions to downsample and return instructions
-                // for the caller to execute. The engine doesn't hold a redb
+                // for the caller to execute. The engine doesn't hold a KV store
                 // handle — the caller reads data, calls `downsample_partition()`,
                 // and writes the result back.
                 //
@@ -162,7 +162,7 @@ impl TimeseriesEngine {
 pub struct DownsamplePlan {
     /// Collection name.
     pub collection: String,
-    /// redb key prefix of the partition to downsample.
+    /// KV key prefix of the partition to downsample.
     pub key_prefix: String,
     /// Current row count.
     pub row_count: u64,
@@ -175,7 +175,7 @@ impl TimeseriesEngine {
     /// Plan which partitions should be downsampled to save space.
     ///
     /// Returns the oldest partitions sorted by min_ts. The caller reads
-    /// each partition's data from redb, calls `downsample_data()`, and
+    /// each partition's data from the KV store, calls `downsample_data()`, and
     /// writes the result back.
     pub fn plan_downsample(&self) -> Vec<DownsamplePlan> {
         let mut plans = Vec::new();
@@ -222,7 +222,7 @@ impl TimeseriesEngine {
 
     /// Downsample raw timestamp+value data into coarser resolution.
     ///
-    /// The caller provides the decoded data from redb. This function
+    /// The caller provides the decoded data from the KV store. This function
     /// averages values within each `interval_ms` bucket and returns
     /// the downsampled (timestamp, value) pairs.
     ///
@@ -256,7 +256,7 @@ impl TimeseriesEngine {
     }
 
     /// Apply a completed downsample: update partition metadata after the
-    /// caller has written the downsampled data back to redb.
+    /// caller has written the downsampled data back to the KV store.
     pub fn apply_downsample(
         &mut self,
         collection: &str,
@@ -416,7 +416,7 @@ impl TimeseriesEngine {
 
         // Export flushed partitions (decode Gorilla blocks).
         for partition in &coll.partitions {
-            // Partition data is stored in redb — the caller must have loaded it.
+            // Partition data is stored in the KV store — the caller must have loaded it.
             // For in-memory partitions, we have metadata only.
             total_rows += partition.meta.row_count;
         }

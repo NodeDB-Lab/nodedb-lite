@@ -128,7 +128,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // When the pagedb segment extension is available (native PagedbStorage):
         //   - graph topology blob → B+ tree (graph_checkpoint_to_bytes; empty vector slots)
         //   - vector data → pagedb segment (written after batch_write)
-        // Otherwise (WASM or non-pagedb native backends like RedbStorage):
+        // Otherwise (WASM or legacy backends):
         //   - full checkpoint blob → B+ tree (checkpoint_to_bytes)
         #[cfg(not(target_arch = "wasm32"))]
         let seg_ext = self.storage.as_vector_segment_ext();

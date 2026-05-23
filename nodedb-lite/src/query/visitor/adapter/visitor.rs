@@ -48,8 +48,14 @@ use super::basic::{
 use super::text_search::lower_text_search;
 use super::vector_search::lower_vector_search;
 
+// On wasm32 the StorageEngine futures are `!Send`, so we cannot require Send
+// on the visitor future type.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) type LiteFut<'a> =
     Pin<Box<dyn Future<Output = Result<QueryResult, LiteError>> + Send + 'a>>;
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) type LiteFut<'a> = Pin<Box<dyn Future<Output = Result<QueryResult, LiteError>> + 'a>>;
 
 pub(crate) struct LiteVisitor<'a, S: StorageEngine> {
     pub(crate) engine: &'a LiteQueryEngine<S>,

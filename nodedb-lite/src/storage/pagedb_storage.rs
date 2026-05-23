@@ -3,7 +3,7 @@
 //! Uses pagedb's B+ tree API for all sorted/sparse state that flows through
 //! the `StorageEngine` trait. One `Db<V>` per `PagedbStorage`; namespacing is
 //! achieved by prefixing every key with a single namespace byte, identical to
-//! the redb-era encoding in `redb_storage.rs`.
+//! the original key-encoding convention (namespace byte first).
 //!
 //! Two VFS variants are exposed via the generic parameter `V`:
 //! - `PagedbStorage::<DefaultVfs>::open(path)` — native, platform async I/O.
@@ -38,6 +38,12 @@ pub type PagedbStorageDefault = PagedbStorage<DefaultVfs>;
 /// `PagedbStorage` backed by an in-memory VFS (tests / ephemeral use).
 pub type PagedbStorageMem = PagedbStorage<MemVfs>;
 
+/// `PagedbStorage` backed by the browser OPFS VFS (persistent, wasm32 only).
+///
+/// Constructed via [`PagedbStorage::open_opfs`].
+#[cfg(target_arch = "wasm32")]
+pub type PagedbStorageOpfs = PagedbStorage<pagedb::vfs::opfs::OpfsVfs>;
+
 // ─── Error mapping ───────────────────────────────────────────────────────────
 
 /// Map `PagedbError` → `LiteError`.
@@ -60,6 +66,15 @@ impl From<PagedbError> for LiteError {
             PagedbError::Quota { .. } => LiteError::Storage {
                 detail: format!("pagedb quota exceeded: {e}"),
             },
+            // `Unsupported` is returned by the OPFS VFS shim when the `opfs`
+            // feature is absent, and also by `OpfsVfs::new` if the worker
+            // spawn fails. Surface it as `WorkerFailed` so callers can
+            // distinguish it from generic I/O failures without string-matching.
+            PagedbError::Unsupported => LiteError::WorkerFailed {
+                detail: "pagedb OPFS VFS returned Unsupported — ensure the opfs feature is \
+                         enabled and the worker URL is correct"
+                    .to_string(),
+            },
             other => LiteError::Storage {
                 detail: other.to_string(),
             },
@@ -77,7 +92,7 @@ fn is_corruption(e: &PagedbError) -> bool {
 
 /// Build a composite key: `[namespace_byte, ...key_bytes]`.
 ///
-/// Mirrors `RedbStorage::make_key`. The namespace byte is always the first
+/// Prepends the namespace byte. The namespace byte is always the first
 /// byte; B+ tree order is preserved because all keys within a namespace share
 /// the same leading byte and are sorted lexicographically among themselves.
 pub(crate) fn prefix_key(ns: Namespace, key: &[u8]) -> Vec<u8> {
@@ -156,7 +171,7 @@ impl PagedbStorage<DefaultVfs> {
     ///
     /// On corruption (`PagedbError::Corruption` / `ChecksumFailure`), the
     /// directory is renamed to `{path}.corrupt.{unix_secs}` and a fresh
-    /// database is created — matching the recovery contract in `RedbStorage`.
+    /// database is created (same recovery contract as the previous backend).
     /// Data recovery happens via re-sync from Origin.
     ///
     /// # KEK placeholder
@@ -435,11 +450,62 @@ where
     }
 }
 
+// ─── WASM-only OPFS constructor ───────────────────────────────────────────────
+
+#[cfg(target_arch = "wasm32")]
+impl PagedbStorage<pagedb::vfs::opfs::OpfsVfs> {
+    /// Open or create a persistent database backed by the browser's Origin
+    /// Private File System (OPFS).
+    ///
+    /// `worker_url` is the URL of the JS bootstrap script that calls
+    /// `OpfsWorker::registrar().register()` inside a dedicated Web Worker.
+    /// The embedder (nodedb-lite-wasm) must export a `run_opfs_worker`
+    /// function that the worker script invokes on startup.
+    ///
+    /// # Corruption recovery
+    ///
+    /// OPFS does not support `std::fs::rename`, so the
+    /// rename-and-recreate recovery path used by the native `open()` is not
+    /// available here. On a corruption error the call fails immediately with
+    /// `LiteError::WorkerFailed`. Recovery is the caller's responsibility
+    /// (e.g. delete the OPFS directory and re-sync from Origin).
+    ///
+    /// # KEK placeholder
+    ///
+    /// The key-encryption key is currently hardcoded to `[0u8; 32]`.
+    /// Replace before any production use.
+    pub async fn open_opfs(worker_url: &str) -> Result<Self, LiteError> {
+        // TODO(PAGEDB_GAPS #13): replace with proper KEK before any production use.
+        let kek = [0u8; 32];
+        let realm = RealmId::new([0u8; 16]);
+
+        let vfs =
+            pagedb::vfs::opfs::OpfsVfs::new(worker_url).map_err(|e| LiteError::WorkerFailed {
+                detail: format!("failed to spawn OPFS worker at '{worker_url}': {e}"),
+            })?;
+
+        let db = Db::open(vfs, kek, 4096, realm, lite_open_options())
+            .await
+            .map_err(|e| match e {
+                pagedb::errors::PagedbError::Corruption(_)
+                | pagedb::errors::PagedbError::ChecksumFailure => LiteError::WorkerFailed {
+                    detail: format!(
+                        "OPFS database is corrupted — delete the OPFS directory and \
+                         re-sync from Origin to recover. Original error: {e}"
+                    ),
+                },
+                other => LiteError::from(other),
+            })?;
+
+        Ok(Self { db: Arc::new(db) })
+    }
+}
+
 // ─── StorageEngine impl — WASM ────────────────────────────────────────────────
 //
-// Stage 4 will add the OPFS-backed constructor and VFS. For now the trait impl
-// compiles on WASM for any `V: Vfs + Clone` — the `?Send` bound is required
-// because WASM is single-threaded. Native code uses the `Send + Sync` impl above.
+// The trait impl compiles on WASM for any `V: Vfs + Clone` — the `?Send`
+// bound is required because WASM is single-threaded. Native code uses the
+// `Send + Sync` impl above.
 
 #[cfg(target_arch = "wasm32")]
 #[async_trait(?Send)]

@@ -12,6 +12,13 @@ homepage.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Enable the pagedb OPFS VFS and the persistent-storage JS API.
+# This is the default for browser builds — disable only when testing in Node.js
+# environments that do not provide the Web Worker API.
+default = ["opfs"]
+opfs = ["pagedb/opfs"]
+
 [dependencies]
 nodedb-lite = { workspace = true }
 nodedb-types = { workspace = true }
@@ -23,18 +30,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sonic-rs = { workspace = true }
 wasm-bindgen-futures = "0.4"
+# pagedb is a direct dep here so we can export `run_opfs_worker` which calls
+# into pagedb's OpfsWorker registrar. The `opfs` feature pulls in gloo-worker,
+# wasm-bindgen bindings, and the OpfsWorker type itself.
+pagedb = { workspace = true, features = ["opfs"] }
 web-sys = { version = "0.3", features = [
     "console",
-    "FileSystemSyncAccessHandle",
-    "FileSystemReadWriteOptions",
-    "FileSystemDirectoryHandle",
-    "FileSystemFileHandle",
-    "FileSystemGetFileOptions",
-    "WorkerGlobalScope",
-    "WorkerNavigator",
-    "StorageManager",
 ] }
-redb = { workspace = true }
 nodedb-array = { workspace = true }
 zerompk = { workspace = true }
 

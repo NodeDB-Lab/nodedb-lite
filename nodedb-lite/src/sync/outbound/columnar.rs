@@ -5,7 +5,7 @@
 //! frames to Origin. Each batch gets a monotonic `batch_id` for ACK
 //! correlation.
 //!
-//! The queue is in-memory only (no redb persistence). If Lite restarts
+//! The queue is in-memory only (no durable persistence). If Lite restarts
 //! before a batch is ACKed, the rows are already in the local `ColumnarEngine`
 //! segments; full catch-up replay is future work. PREVIEW targets
 //! live-session replication (device never goes offline between insert and

@@ -15,7 +15,7 @@ use crate::storage::engine::StorageEngine;
 
 const DEADLINE_PREFIX_LEN: usize = 8;
 
-pub(super) fn redb_key(collection: &str, key: &[u8]) -> Vec<u8> {
+pub(super) fn kv_key(collection: &str, key: &[u8]) -> Vec<u8> {
     let mut k = Vec::with_capacity(collection.len() + 1 + key.len());
     k.extend_from_slice(collection.as_bytes());
     k.push(0);
@@ -46,7 +46,7 @@ pub(super) fn is_expired(deadline_ms: u64) -> bool {
     deadline_ms != 0 && now_ms() >= deadline_ms
 }
 
-pub(super) fn split_redb_key(composite: &[u8]) -> Option<(&str, &[u8])> {
+pub(super) fn split_kv_key(composite: &[u8]) -> Option<(&str, &[u8])> {
     let sep = composite.iter().position(|&b| b == 0)?;
     let coll = std::str::from_utf8(&composite[..sep]).ok()?;
     let key = &composite[sep + 1..];
@@ -66,7 +66,7 @@ pub async fn kv_get<S: StorageEngine>(
     key: &[u8],
     _surrogate_ceiling: Option<u32>,
 ) -> Result<QueryResult, LiteError> {
-    let rkey = redb_key(collection, key);
+    let rkey = kv_key(collection, key);
     let stored = engine
         .storage
         .get(Namespace::Kv, &rkey)
@@ -107,7 +107,7 @@ pub async fn kv_get_ttl<S: StorageEngine>(
     collection: &str,
     key: &[u8],
 ) -> Result<QueryResult, LiteError> {
-    let rkey = redb_key(collection, key);
+    let rkey = kv_key(collection, key);
     let stored = engine
         .storage
         .get(Namespace::Kv, &rkey)
@@ -147,7 +147,7 @@ pub async fn kv_batch_get<S: StorageEngine>(
 ) -> Result<QueryResult, LiteError> {
     let mut rows: Vec<Vec<Value>> = Vec::with_capacity(keys.len());
     for key in keys {
-        let rkey = redb_key(collection, key);
+        let rkey = kv_key(collection, key);
         let stored = engine
             .storage
             .get(Namespace::Kv, &rkey)
@@ -184,7 +184,7 @@ pub async fn kv_field_get<S: StorageEngine>(
     key: &[u8],
     fields: &[String],
 ) -> Result<QueryResult, LiteError> {
-    let rkey = redb_key(collection, key);
+    let rkey = kv_key(collection, key);
     let stored = engine
         .storage
         .get(Namespace::Kv, &rkey)
@@ -233,7 +233,7 @@ pub async fn kv_scan<S: StorageEngine>(
     match_pattern: Option<&str>,
     _surrogate_ceiling: Option<u32>,
 ) -> Result<QueryResult, LiteError> {
-    let start = redb_key(collection, cursor);
+    let start = kv_key(collection, cursor);
     let entries = engine
         .storage
         .scan_range(Namespace::Kv, &start, count + 1)
@@ -244,7 +244,7 @@ pub async fn kv_scan<S: StorageEngine>(
 
     let mut rows: Vec<Vec<Value>> = Vec::with_capacity(count.min(entries.len()));
     for (composite_key, raw_value) in entries.iter().take(count) {
-        let Some((coll, user_key_bytes)) = split_redb_key(composite_key) else {
+        let Some((coll, user_key_bytes)) = split_kv_key(composite_key) else {
             continue;
         };
         if coll != collection {
@@ -278,7 +278,7 @@ pub async fn kv_scan<S: StorageEngine>(
 /// MaterializeScan: cursor-paginated raw KV scan for the clone materializer.
 ///
 /// Lite is single-node — no distributed cursor executor is needed. The scan
-/// iterates the redb KV table for `collection`, resuming from `cursor` if
+/// iterates the KV table for `collection`, resuming from `cursor` if
 /// provided, returning at most `count` live (non-expired) entries per call.
 ///
 /// Response payload is msgpack-encoded as a 2-element array:
@@ -294,7 +294,7 @@ pub async fn kv_materialize_scan<S: StorageEngine>(
     count: usize,
     _surrogate_ceiling: Option<u32>,
 ) -> Result<QueryResult, LiteError> {
-    let start = redb_key(collection, cursor);
+    let start = kv_key(collection, cursor);
     let raw_entries = engine
         .storage
         .scan_range(Namespace::Kv, &start, count + 1)
@@ -308,7 +308,7 @@ pub async fn kv_materialize_scan<S: StorageEngine>(
         if pairs.len() >= count {
             break;
         }
-        let Some((coll, user_key_bytes)) = split_redb_key(composite_key) else {
+        let Some((coll, user_key_bytes)) = split_kv_key(composite_key) else {
             continue;
         };
         if coll != collection {

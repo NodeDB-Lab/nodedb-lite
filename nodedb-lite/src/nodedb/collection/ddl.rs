@@ -5,7 +5,7 @@ use nodedb_types::error::{NodeDbError, NodeDbResult};
 use super::super::{LockExt, NodeDbLite};
 use crate::storage::engine::StorageEngine;
 
-/// Collection metadata stored in redb.
+/// Collection metadata stored in the KV store.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CollectionMeta {
     pub name: String,
@@ -94,7 +94,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             fts.drop_collection(name);
         }
 
-        // Delete collection metadata from redb.
+        // Delete collection metadata from the KV store.
         let key = format!("collection:{name}");
         self.storage
             .delete(nodedb_types::Namespace::Meta, key.as_bytes())

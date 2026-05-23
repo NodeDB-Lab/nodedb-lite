@@ -1,6 +1,6 @@
 //! Local sequence support for NodeDB-Lite.
 //!
-//! Stores sequence definitions in redb via the StorageEngine.
+//! Stores sequence definitions via the StorageEngine.
 //! Provides nextval/currval/setval for local use. Definitions sync
 //! from Origin via CRDT; counter state is ephemeral (in-memory only,
 //! reset to `start_value` on restart).

@@ -39,8 +39,15 @@ mod query;
 mod spatial;
 mod timeseries;
 
+// On wasm32 the StorageEngine futures are `!Send` (async_trait(?Send)), so we
+// cannot require Send on the physical future type.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) type LitePhysicalFut<'a> =
     Pin<Box<dyn Future<Output = Result<QueryResult, LiteError>> + Send + 'a>>;
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) type LitePhysicalFut<'a> =
+    Pin<Box<dyn Future<Output = Result<QueryResult, LiteError>> + 'a>>;
 
 pub(crate) struct LiteDataPlaneVisitor<'a, S: StorageEngine> {
     pub(crate) engine: &'a LiteQueryEngine<S>,

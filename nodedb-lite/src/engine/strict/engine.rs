@@ -96,7 +96,7 @@ impl CollectionState {
 
 /// Encode a PK value into sortable bytes for the storage key.
 ///
-/// Uses big-endian for integers (preserves sort order in redb scans),
+/// Uses big-endian for integers (preserves sort order in B+ tree scans),
 /// raw UTF-8 for strings, and raw bytes for UUIDs.
 fn encode_pk_component(key: &mut Vec<u8>, value: &Value) {
     match value {

@@ -249,7 +249,7 @@ async fn concurrent_strict_reads_and_writes() {
                 .strict_engine()
                 .get("accounts", &Value::Integer(i))
                 .await;
-            // Row should always exist — redb MVCC ensures consistent reads.
+            // Row should always exist — the KV store ensures consistent reads under snapshot isolation.
             assert!(row.is_ok());
             if let Ok(Some(vals)) = row {
                 assert_eq!(vals[0], Value::Integer(i));

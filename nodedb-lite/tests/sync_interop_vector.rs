@@ -55,7 +55,7 @@ const CREATE_ORIGIN: &str = "CREATE COLLECTION vec_sync_test \
 // NOTE: The Lite vector engine auto-creates collections on first `vector_insert`.
 // No explicit DDL is required on the Lite side.
 
-// ── Helper: open a Lite DB backed by in-memory redb ─────────────────────────
+// ── Helper: open a Lite DB backed by in-memory storage ─────────────────────────
 
 async fn open_lite() -> Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()

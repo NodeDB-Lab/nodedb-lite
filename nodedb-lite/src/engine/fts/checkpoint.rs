@@ -20,7 +20,7 @@
 //! |-----------------------|--------------------------------------------------|
 //! | `fts/seg/{index_key}` | MessagePack `Vec<(String, Vec<SerPosting>)>`     |
 //!
-//! When pagedb segments are unavailable (WASM / `RedbStorage`), posting data
+//! When pagedb segments are unavailable (WASM / legacy backends), posting data
 //! falls back to the legacy KV path:
 //!
 //! | Key                               | Value                              |
@@ -255,7 +255,7 @@ where
         return Ok(());
     }
 
-    // KV fallback path (WASM / RedbStorage / test doubles): unpack the posting
+    // KV fallback path (WASM / legacy backends / test doubles): unpack the posting
     // blobs back into per-term KV entries.
     for (index_key, blob) in &segment_writes {
         if let Ok(entries) = zerompk::from_msgpack::<Vec<(String, Vec<SerPosting>)>>(blob) {

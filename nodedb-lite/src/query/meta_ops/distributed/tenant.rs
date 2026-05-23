@@ -4,7 +4,7 @@
 //! # Tenancy model on Lite
 //!
 //! Lite is currently single-tenant by default (tenant_id = 0). Multi-tenancy
-//! is supported by prefixing every redb key with `t/<tenant_id>/` for tenants
+//! is supported by prefixing every KV key with `t/<tenant_id>/` for tenants
 //! other than 0. Keys without the `t/` prefix are treated as belonging to
 //! tenant 0 — existing data continues to work without migration.
 //!

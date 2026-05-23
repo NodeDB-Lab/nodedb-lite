@@ -1,6 +1,6 @@
 //! Lite catalog for function, trigger, and procedure definitions.
 //!
-//! Stores definitions in redb `Namespace::Meta` using typed keys:
+//! Stores definitions in `Namespace::Meta` using typed keys:
 //! - `function:{name}` → serialized StoredFunction
 //! - `trigger:{name}` → serialized StoredTrigger
 //! - `procedure:{name}` → serialized StoredProcedure

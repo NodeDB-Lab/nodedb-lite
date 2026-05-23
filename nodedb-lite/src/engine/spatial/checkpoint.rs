@@ -13,7 +13,7 @@
 //!
 //! The R-tree blob (`spatial:{collection}:{field}:rtree`) is stored in a pagedb
 //! segment when `as_spatial_segment_ext()` is available, or falls back to the
-//! `Namespace::Spatial` KV path (e.g. WASM / RedbStorage). In both cases the
+//! `Namespace::Spatial` KV path (e.g. WASM). In both cases the
 //! bytes stored are the CRC32C-wrapped R-tree checkpoint produced by
 //! `crate::storage::checksum::wrap`.
 
@@ -96,7 +96,7 @@ where
         return Ok(());
     }
 
-    // Legacy KV path (WASM / RedbStorage).
+    // Legacy KV path (WASM fallback).
     let mut rtree_ops: Vec<WriteOp> = Vec::with_capacity(checkpoints.len());
     for (collection, field, rtree_bytes) in checkpoints {
         let rtree_key = format!("spatial:{collection}:{field}:rtree");

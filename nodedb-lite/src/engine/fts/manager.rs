@@ -7,8 +7,7 @@
 //! - Persistent: checkpoint serialized to `Namespace::Fts` on `flush()`,
 //!   restored on `NodeDbLite::open` without re-tokenizing source documents.
 //!
-//! This is the canonical FTS implementation for Lite. Origin uses
-//! `FtsIndex<RedbBackend>` in `engine/sparse/fts_redb/` for persistence.
+//! This is the canonical FTS implementation for Lite.
 
 use std::collections::HashMap;
 

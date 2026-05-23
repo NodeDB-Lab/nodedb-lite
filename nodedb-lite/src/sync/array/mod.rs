@@ -4,7 +4,7 @@
 //! sync protocol. The design has three independent paths:
 //!
 //! 1. **Outbound** — local writes call [`ArrayOutbound`], which appends the op
-//!    to a durable redb-backed [`RedbOpLog`] and enqueues it on
+//!    to a durable KV-backed [`KvOpLogStore`] and enqueues it on
 //!    [`PendingQueue`] for the transport layer to drain. The send path is
 //!    fire-and-forget from the engine's perspective.
 //!
@@ -33,7 +33,7 @@
 pub mod ack_sender;
 pub mod catchup;
 pub mod inbound;
-pub mod op_log_redb;
+pub mod op_log_store;
 pub mod outbound;
 pub mod pending;
 pub mod replica_state;
@@ -42,7 +42,7 @@ pub mod schema_registry;
 pub use ack_sender::spawn as spawn_ack_sender;
 pub use catchup::CatchupTracker;
 pub use inbound::{ArrayInbound, InboundOutcome, LiteApplyEngine};
-pub use op_log_redb::RedbOpLog;
+pub use op_log_store::KvOpLogStore;
 pub use outbound::ArrayOutbound;
 pub use pending::PendingQueue;
 pub use replica_state::ReplicaState;

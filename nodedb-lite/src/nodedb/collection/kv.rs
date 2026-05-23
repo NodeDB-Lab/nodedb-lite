@@ -2,21 +2,22 @@
 //!
 //! Two modes based on `sync_enabled`:
 //!
-//! - **sync off**: direct redb B-tree via `Namespace::Kv`. No Loro, no CRDT,
+//! - **sync off**: direct KV store via `Namespace::Kv`. No Loro, no CRDT,
 //!   no delta tracking. Same performance class as SQLite.
 //!
-//! - **sync on**: writes go to redb (source of truth) AND Loro CRDT (for
-//!   delta tracking). Reads always come from redb. Sync log entries are
-//!   generated for LWW replication to Origin.
+//! - **sync on**: writes go to the KV store (source of truth) AND Loro CRDT
+//!   (for delta tracking). Reads always come from the KV store. Sync log
+//!   entries are generated for LWW replication to Origin.
 //!
-//! Writes are buffered in memory and flushed as a single redb transaction
+//! Writes are buffered in memory and flushed as a single KV transaction
 //! on `kv_flush()` or when the buffer exceeds `KV_FLUSH_THRESHOLD`. An
-//! in-memory overlay lets reads see uncommitted writes without hitting redb.
+//! in-memory overlay lets reads see uncommitted writes without hitting the
+//! KV store.
 //!
 //! ## Value encoding
 //!
-//! Every value stored in redb is prefixed by an 8-byte little-endian u64
-//! representing the expiry deadline in milliseconds since the Unix epoch.
+//! Every value stored in the KV store is prefixed by an 8-byte little-endian
+//! u64 representing the expiry deadline in milliseconds since the Unix epoch.
 //! A value of `0` means no expiry. This prefix is transparent to callers —
 //! all public methods encode/decode it automatically.
 
@@ -37,8 +38,8 @@ const KV_FLUSH_THRESHOLD: usize = 1024;
 /// Size of the deadline prefix in bytes (u64 LE).
 const DEADLINE_PREFIX_LEN: usize = 8;
 
-/// Build the redb composite key: `{collection}\0{key}`.
-fn redb_key(collection: &str, key: &[u8]) -> Vec<u8> {
+/// Build the composite KV key: `{collection}\0{key}`.
+fn kv_key(collection: &str, key: &[u8]) -> Vec<u8> {
     let mut k = Vec::with_capacity(collection.len() + 1 + key.len());
     k.extend_from_slice(collection.as_bytes());
     k.push(0);
@@ -46,8 +47,8 @@ fn redb_key(collection: &str, key: &[u8]) -> Vec<u8> {
     k
 }
 
-/// Extract `(collection, key_bytes)` from a redb composite key.
-fn split_redb_key(composite: &[u8]) -> Option<(&str, &[u8])> {
+/// Extract `(collection, key_bytes)` from a composite KV key.
+fn split_kv_key(composite: &[u8]) -> Option<(&str, &[u8])> {
     let sep = composite.iter().position(|&b| b == 0)?;
     let coll = std::str::from_utf8(&composite[..sep]).ok()?;
     let key = &composite[sep + 1..];
@@ -93,7 +94,7 @@ fn is_expired(deadline_ms: u64) -> bool {
 impl<S: StorageEngine> NodeDbLite<S> {
     /// KV PUT: store a key-value pair with no expiry.
     ///
-    /// Buffered in memory — call `kv_flush()` to commit to redb, or let
+    /// Buffered in memory — call `kv_flush()` to commit, or let
     /// the auto-flush threshold handle it.
     pub async fn kv_put(&self, collection: &str, key: &str, value: &[u8]) -> NodeDbResult<()> {
         self.kv_put_with_deadline(collection, key, value, 0).await
@@ -123,7 +124,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         value: &[u8],
         deadline_ms: u64,
     ) -> NodeDbResult<()> {
-        let rkey = redb_key(collection, key.as_bytes());
+        let rkey = kv_key(collection, key.as_bytes());
         let encoded = encode_value(deadline_ms, value);
 
         let mut buf = self.kv_write_buf.lock_or_recover();
@@ -159,9 +160,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// deleted from storage on read.
     ///
     /// Checks the in-memory write buffer first (for uncommitted writes),
-    /// then falls through to redb.
+    /// then falls through to the KV store.
     pub async fn kv_get(&self, collection: &str, key: &str) -> NodeDbResult<Option<Vec<u8>>> {
-        let rkey = redb_key(collection, key.as_bytes());
+        let rkey = kv_key(collection, key.as_bytes());
 
         // Check write buffer overlay first.
         let buf = self.kv_write_buf.lock_or_recover();
@@ -225,7 +226,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
     /// KV DELETE: remove a key.
     pub async fn kv_delete(&self, collection: &str, key: &str) -> NodeDbResult<bool> {
-        let rkey = redb_key(collection, key.as_bytes());
+        let rkey = kv_key(collection, key.as_bytes());
 
         let mut buf = self.kv_write_buf.lock_or_recover();
         buf.overlay.insert(rkey.clone(), None);
@@ -260,7 +261,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// - `end = None` means scan to the end of the collection.
     /// - `limit = None` means no cap on results.
     ///
-    /// Flushes the write buffer before scanning so redb reflects all pending
+    /// Flushes the write buffer before scanning so the KV store reflects all pending
     /// writes.
     pub async fn kv_range_scan(
         &self,
@@ -315,7 +316,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             {
                 break;
             }
-            let Some((coll, user_key_bytes)) = split_redb_key(&composite_key) else {
+            let Some((coll, user_key_bytes)) = split_kv_key(&composite_key) else {
                 continue;
             };
             if coll != collection {
@@ -325,7 +326,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 continue;
             };
             if is_expired(deadline) {
-                expired_keys.push(redb_key(collection, user_key_bytes));
+                expired_keys.push(kv_key(collection, user_key_bytes));
                 continue;
             }
             results.push((user_key_bytes.to_vec(), user_bytes.to_vec()));
@@ -375,7 +376,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let mut delete_ops: Vec<WriteOp> = Vec::new();
 
         for (composite_key, raw_value) in entries {
-            let Some((coll, _user_key_bytes)) = split_redb_key(&composite_key) else {
+            let Some((coll, _user_key_bytes)) = split_kv_key(&composite_key) else {
                 continue;
             };
             if coll != collection {
@@ -411,7 +412,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// Returns up to `count` key-value pairs where key >= cursor (inclusive).
     /// Pass an empty cursor to start from the beginning of the collection.
     ///
-    /// Flushes the write buffer first to ensure redb has all data, then
+    /// Flushes the write buffer first to ensure the KV store has all data, then
     /// uses the storage's B-tree range scan — O(log N + count).
     pub async fn kv_scan(
         &self,
@@ -422,7 +423,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // Flush pending writes so storage is up to date.
         self.kv_flush_inner().await?;
 
-        let start = redb_key(collection, cursor.as_bytes());
+        let start = kv_key(collection, cursor.as_bytes());
         let entries = self
             .storage
             .scan_range(Namespace::Kv, &start, count)
@@ -431,7 +432,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         let mut results = Vec::with_capacity(entries.len());
         for (composite_key, raw_value) in entries {
-            let Some((coll, key_bytes)) = split_redb_key(&composite_key) else {
+            let Some((coll, key_bytes)) = split_kv_key(&composite_key) else {
                 continue;
             };
             if coll != collection {
@@ -490,7 +491,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // Flush pending writes first.
         self.kv_flush_inner().await?;
 
-        let prefix = redb_key(collection, b"");
+        let prefix = kv_key(collection, b"");
         let entries = self
             .storage
             .scan_range(Namespace::Kv, &prefix, usize::MAX)
@@ -499,7 +500,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         let mut keys = Vec::with_capacity(entries.len());
         for (composite_key, raw_value) in entries {
-            let Some((coll, key_bytes)) = split_redb_key(&composite_key) else {
+            let Some((coll, key_bytes)) = split_kv_key(&composite_key) else {
                 continue;
             };
             if coll != collection {

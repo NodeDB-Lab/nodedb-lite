@@ -99,8 +99,8 @@ pub trait StorageEngine: Send + Sync + 'static {
 
     /// Return this engine's vector segment operations interface if supported.
     ///
-    /// `PagedbStorage` returns `Some(self)`. `RedbStorage` and any test double
-    /// return `None`, falling back to the legacy blob checkpoint path.
+    /// `PagedbStorage` returns `Some(self)`. Test doubles return `None`,
+    /// falling back to the legacy blob checkpoint path.
     ///
     /// Only available on non-WASM targets (mmap is required).
     #[cfg(not(target_arch = "wasm32"))]
@@ -112,8 +112,8 @@ pub trait StorageEngine: Send + Sync + 'static {
 
     /// Return this engine's array segment operations interface if supported.
     ///
-    /// `PagedbStorage` returns `Some(self)`. `RedbStorage` and any test double
-    /// return `None`, falling back to the KV blob path.
+    /// `PagedbStorage` returns `Some(self)`. Test doubles return `None`,
+    /// falling back to the KV blob path.
     ///
     /// Only available on non-WASM targets.
     #[cfg(not(target_arch = "wasm32"))]
@@ -125,9 +125,9 @@ pub trait StorageEngine: Send + Sync + 'static {
 
     /// Return this engine's FTS segment operations interface if supported.
     ///
-    /// `PagedbStorage` returns `Some(self)`. `RedbStorage` and any test double
-    /// return `None`, falling back to the KV blob path where each term's
-    /// postings are stored as a separate B+ tree entry.
+    /// `PagedbStorage` returns `Some(self)`. Test doubles return `None`,
+    /// falling back to the KV blob path where each term's postings are stored
+    /// as a separate B+ tree entry.
     ///
     /// Only available on non-WASM targets.
     #[cfg(not(target_arch = "wasm32"))]
@@ -137,8 +137,8 @@ pub trait StorageEngine: Send + Sync + 'static {
 
     /// Return this engine's columnar segment operations interface if supported.
     ///
-    /// `PagedbStorage` returns `Some(self)`. `RedbStorage` and any test double
-    /// return `None`, falling back to the KV blob path for large segment bytes.
+    /// `PagedbStorage` returns `Some(self)`. Test doubles return `None`,
+    /// falling back to the KV blob path for large segment bytes.
     ///
     /// Only available on non-WASM targets.
     #[cfg(not(target_arch = "wasm32"))]
@@ -150,9 +150,9 @@ pub trait StorageEngine: Send + Sync + 'static {
 
     /// Return this engine's graph segment operations interface if supported.
     ///
-    /// `PagedbStorage` returns `Some(self)`. `RedbStorage` and any test double
-    /// return `None`, falling back to the legacy `Namespace::Graph` KV blob path
-    /// for CSR adjacency checkpoints.
+    /// `PagedbStorage` returns `Some(self)`. Test doubles return `None`,
+    /// falling back to the legacy `Namespace::Graph` KV blob path for CSR
+    /// adjacency checkpoints.
     ///
     /// Only available on non-WASM targets.
     #[cfg(not(target_arch = "wasm32"))]
@@ -164,9 +164,9 @@ pub trait StorageEngine: Send + Sync + 'static {
 
     /// Return this engine's spatial segment operations interface if supported.
     ///
-    /// `PagedbStorage` returns `Some(self)`. `RedbStorage` and any test double
-    /// return `None`, falling back to the legacy `Namespace::Spatial` KV blob path
-    /// for R-tree checkpoint blobs.
+    /// `PagedbStorage` returns `Some(self)`. Test doubles return `None`,
+    /// falling back to the legacy `Namespace::Spatial` KV blob path for R-tree
+    /// checkpoint blobs.
     ///
     /// Only available on non-WASM targets.
     #[cfg(not(target_arch = "wasm32"))]

@@ -36,38 +36,14 @@ pub enum LiteError {
     /// Feature or SQL construct not supported in this Lite beta release.
     #[error("unsupported: {detail}")]
     Unsupported { detail: String },
-}
 
-impl From<redb::Error> for LiteError {
-    fn from(e: redb::Error) -> Self {
-        Self::Storage {
-            detail: e.to_string(),
-        }
-    }
-}
-
-impl From<redb::DatabaseError> for LiteError {
-    fn from(e: redb::DatabaseError) -> Self {
-        Self::Storage {
-            detail: e.to_string(),
-        }
-    }
-}
-
-impl From<redb::TransactionError> for LiteError {
-    fn from(e: redb::TransactionError) -> Self {
-        Self::Storage {
-            detail: e.to_string(),
-        }
-    }
-}
-
-impl From<redb::StorageError> for LiteError {
-    fn from(e: redb::StorageError) -> Self {
-        Self::Storage {
-            detail: e.to_string(),
-        }
-    }
+    /// The OPFS worker bridge failed to start or encountered an IPC error.
+    ///
+    /// This variant is produced when `PagedbStorage::open_opfs` cannot spawn
+    /// the dedicated Web Worker or when the worker signals a corruption-class
+    /// failure that cannot be recovered automatically (OPFS has no rename).
+    #[error("OPFS worker bridge failed: {detail}")]
+    WorkerFailed { detail: String },
 }
 
 impl From<nodedb_types::columnar::SchemaError> for LiteError {

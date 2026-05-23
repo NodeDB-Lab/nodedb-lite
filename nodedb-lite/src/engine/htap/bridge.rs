@@ -3,7 +3,7 @@
 //! When a materialized view is created, every INSERT/UPDATE/DELETE on the source
 //! strict collection is replicated to the target columnar collection. In Lite,
 //! this happens synchronously at the API level (no background WAL reader needed,
-//! since redb handles durability).
+//! since the KV store handles durability).
 //!
 //! The bridge tracks:
 //! - Source → target collection mapping

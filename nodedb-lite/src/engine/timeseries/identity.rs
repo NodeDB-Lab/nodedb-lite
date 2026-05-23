@@ -1,13 +1,13 @@
 //! Lite instance identity: UUID v7 + monotonic epoch for fork detection.
 //!
-//! - `lite_id`: UUID v7 generated on first `open()`, persisted in redb metadata
+//! - `lite_id`: UUID v7 generated on first `open()`, persisted in KV store metadata
 //! - `epoch`: monotonic u64 counter incremented on every `open()`
 //! - Fork detection: Origin rejects sync if `epoch <= last_seen_epoch[lite_id]`
 
 use crate::error::LiteError;
 use crate::storage::engine::StorageEngine;
 
-/// redb metadata keys.
+/// KV store metadata keys.
 const LITE_ID_KEY: &[u8] = b"meta:lite_id";
 const EPOCH_KEY: &[u8] = b"meta:epoch";
 
@@ -23,7 +23,7 @@ pub struct LiteIdentity {
 impl LiteIdentity {
     /// Load or create identity from storage.
     ///
-    /// On first call (no identity in redb): generates UUID v7, sets epoch=1.
+    /// On first call (no identity in KV store): generates UUID v7, sets epoch=1.
     /// On subsequent calls: reads existing ID, increments epoch.
     pub async fn load_or_create<S: StorageEngine>(storage: &S) -> Result<Self, LiteError> {
         let ns = nodedb_types::Namespace::Meta;

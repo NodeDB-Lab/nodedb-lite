@@ -16,7 +16,7 @@ use nodedb_types::Namespace;
 
 use crate::engine::array::engine::ArrayEngineState;
 use crate::storage::engine::StorageEngine;
-use crate::sync::array::op_log_redb::RedbOpLog;
+use crate::sync::array::op_log_store::KvOpLogStore;
 use crate::sync::array::schema_registry::SchemaRegistry;
 
 /// Key prefix for `last_applied_hlc` entries persisted under `Namespace::Meta`.
@@ -51,7 +51,7 @@ pub struct LiteApplyEngine<S: StorageEngine> {
     pub(super) storage: Arc<S>,
     pub(super) array_state: Arc<tokio::sync::Mutex<ArrayEngineState>>,
     pub(super) schemas: Arc<SchemaRegistry<S>>,
-    pub(super) op_log: Arc<RedbOpLog<S>>,
+    pub(super) op_log: Arc<KvOpLogStore<S>>,
     /// In-memory cache of the last applied HLC per array.
     /// Persisted under `Namespace::Meta` `"array.last_applied:{name}"`.
     last_applied: Mutex<HashMap<String, Hlc>>,
@@ -63,7 +63,7 @@ impl<S: StorageEngine> LiteApplyEngine<S> {
         storage: Arc<S>,
         array_state: Arc<tokio::sync::Mutex<ArrayEngineState>>,
         schemas: Arc<SchemaRegistry<S>>,
-        op_log: Arc<RedbOpLog<S>>,
+        op_log: Arc<KvOpLogStore<S>>,
     ) -> Self {
         let last_applied = Self::load_last_applied(&storage).await;
         Self {

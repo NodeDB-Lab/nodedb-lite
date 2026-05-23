@@ -44,7 +44,7 @@ pub struct HealthStatus {
 /// Storage subsystem health.
 #[derive(Debug, Serialize)]
 pub struct StorageHealth {
-    /// Whether redb is accessible (can read/write).
+    /// Whether the storage backend is accessible (can read/write).
     pub accessible: bool,
 }
 
@@ -119,7 +119,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// Borrow the underlying storage engine.
     ///
     /// Public so benchmark code can call backend-specific methods like
-    /// `RedbStorage::db_size_bytes()` for compression-ratio measurement.
+    /// backend-specific methods (e.g. size reporting) for compression-ratio measurement.
     pub fn storage(&self) -> &S {
         &self.storage
     }

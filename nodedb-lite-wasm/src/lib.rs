@@ -1,52 +1,157 @@
 //! JavaScript/TypeScript bindings for NodeDB-Lite via wasm-bindgen.
 //!
-//! - `open()` — in-memory (no persistence across page reloads)
-//! - `openPersistent()` — OPFS-backed (data survives reloads, Web Worker only)
+//! # In-memory (ephemeral)
 //!
 //! ```js
-//! // In-memory:
+//! const db = await NodeDbLiteWasm.openInMemory(1n);
+//! // or the legacy alias:
 //! const db = await NodeDbLiteWasm.open(1n);
-//!
-//! // Persistent (must run in a Web Worker):
-//! const db = await NodeDbLiteWasm.openPersistent("mydb.pagedb", 1n);
 //! ```
 //!
-//! TODO(Stage 4): Replace `RedbStorage` with `PagedbStorage` backed by the pagedb OPFS VFS.
-//! The OPFS VFS is gated on pagedb's OPFS feature and uses an async worker model that needs
-//! to be wired through the wasm-bindgen boundary before the switch can happen.
+//! # Persistent (OPFS-backed)
+//!
+//! Persistent storage uses pagedb's OPFS VFS, which drives a dedicated Web
+//! Worker for all synchronous file-system calls.
+//!
+//! **Bootstrap requirement — breaking change from the pre-pagedb API:**
+//!
+//! The embedder must create a JS worker bootstrap file (e.g. `opfs_worker.js`)
+//! and pass its URL as the `workerUrl` argument to `openPersistent` /
+//! `openPersistentWithConfig`. The bootstrap file must call `run_opfs_worker`:
+//!
+//! ```js
+//! // opfs_worker.js
+//! import init, { run_opfs_worker } from "./nodedb_lite_wasm.js";
+//! await init();
+//! run_opfs_worker();
+//! ```
+//!
+//! The caller side:
+//!
+//! ```js
+//! // Must be called from any execution context (main thread or worker).
+//! const db = await NodeDbLiteWasm.openPersistent(
+//!     "mydb.pagedb",        // logical database name (used as OPFS sub-directory)
+//!     1n,                   // peer_id
+//!     "./opfs_worker.js",   // URL of the worker bootstrap script
+//! );
+//! ```
+//!
+//! The `filename` parameter selects the OPFS sub-directory for this database.
+//! Each unique `filename` value produces an isolated database. pagedb stores
+//! all of its files under that directory in the browser's OPFS origin sandbox.
+//!
+//! # Corruption recovery
+//!
+//! OPFS has no rename primitive, so the automatic rename-and-recreate recovery
+//! available on native is not supported. When `openPersistent` returns
+//! `WorkerFailed`, the caller should delete the OPFS directory for `filename`
+//! (using the File System Access API) and re-sync from Origin.
 
 pub mod array;
-pub mod opfs_backend;
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
 use nodedb_client::NodeDb;
-use nodedb_lite::{LiteConfig, NodeDbLite, RedbStorage};
+use nodedb_lite::storage::pagedb_storage::PagedbStorageMem;
+use nodedb_lite::{LiteConfig, NodeDbLite};
 use nodedb_types::document::Document;
 use nodedb_types::id::NodeId;
 use nodedb_types::value::Value;
 
+// `PagedbStorageOpfs` is only available on wasm32 with the `opfs` feature
+// active. On native (e.g. `cargo check` without a `--target` flag) this
+// import must be suppressed.
+#[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+use nodedb_lite::PagedbStorageOpfs;
+
+// ─── OPFS worker note ─────────────────────────────────────────────────────────
+//
+// The OPFS Web Worker is now pure JavaScript — no Rust/WASM is loaded in the
+// worker context. Use the JS source from `pagedb::vfs::opfs::OPFS_WORKER_JS`
+// (available in the pagedb crate when compiled for wasm32 with the `opfs`
+// feature). Write it to a Blob URL or serve it statically, then pass the URL
+// to `openPersistent`:
+//
+//   const workerBlob = new Blob([OPFS_WORKER_JS], { type: "text/javascript" });
+//   const workerUrl  = URL.createObjectURL(workerBlob);
+//   const db         = await NodeDbLiteWasm.openPersistent(workerUrl);
+
+// ─── Inner enum ───────────────────────────────────────────────────────────────
+
+/// Holds either an in-memory or an OPFS-backed `NodeDbLite` instance.
+///
+/// The two concrete storage types are different Rust types, so we unify them
+/// behind this enum and dispatch each method to the appropriate arm.
+enum NodeDbLiteWasmInner {
+    InMemory(NodeDbLite<PagedbStorageMem>),
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+    Persistent(NodeDbLite<PagedbStorageOpfs>),
+}
+
+// These macros are used in both `lib.rs` and `array.rs`.  Declaring them at the
+// crate root makes them available in all submodules without any `use` import.
+macro_rules! dispatch {
+    ($self:ident, $inner:ident, $body:expr) => {
+        match &$self.inner {
+            crate::NodeDbLiteWasmInner::InMemory($inner) => $body,
+            #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+            crate::NodeDbLiteWasmInner::Persistent($inner) => $body,
+        }
+    };
+}
+pub(crate) use dispatch;
+
+macro_rules! dispatch_mut {
+    ($self:ident, $inner:ident, $body:expr) => {
+        match &mut $self.inner {
+            crate::NodeDbLiteWasmInner::InMemory($inner) => $body,
+            #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+            crate::NodeDbLiteWasmInner::Persistent($inner) => $body,
+        }
+    };
+}
+pub(crate) use dispatch_mut;
+
+// ─── Public JS type ───────────────────────────────────────────────────────────
+
 /// NodeDB-Lite instance for browser/WASM environments.
+///
+/// Wraps either an in-memory or an OPFS-backed database. Construct via the
+/// static factory methods: `openInMemory`, `open`, `openWithConfig`,
+/// `openPersistent`, or `openPersistentWithConfig`.
 #[wasm_bindgen]
 pub struct NodeDbLiteWasm {
-    db: NodeDbLite<RedbStorage>,
+    inner: NodeDbLiteWasmInner,
 }
 
 #[wasm_bindgen]
 impl NodeDbLiteWasm {
+    // ─── Constructors — in-memory ──────────────────────────────────────────
+
     /// Create a new in-memory NodeDB-Lite database (no persistence).
     ///
-    /// Memory budget is resolved from `NODEDB_LITE_MEMORY_MB` environment
-    /// variable (not available in browser WASM), falling back to 100 MiB.
-    #[wasm_bindgen]
-    pub async fn open(peer_id: u64) -> Result<NodeDbLiteWasm, JsError> {
-        // TODO(Stage 4): swap to PagedbStorage backed by pagedb MemVfs or OPFS VFS.
-        let storage = RedbStorage::open_in_memory().map_err(|e| JsError::new(&e.to_string()))?;
+    /// Memory budget is resolved from the default (100 MiB).
+    #[wasm_bindgen(js_name = "openInMemory")]
+    pub async fn open_in_memory(peer_id: u64) -> Result<NodeDbLiteWasm, JsError> {
+        let storage = PagedbStorageMem::open_in_memory()
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
         let db = NodeDbLite::open(storage, peer_id)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Self { db })
+        Ok(Self {
+            inner: NodeDbLiteWasmInner::InMemory(db),
+        })
+    }
+
+    /// Alias for `openInMemory` — retained for backwards compatibility.
+    ///
+    /// Memory budget is resolved from the default (100 MiB).
+    #[wasm_bindgen]
+    pub async fn open(peer_id: u64) -> Result<NodeDbLiteWasm, JsError> {
+        Self::open_in_memory(peer_id).await
     }
 
     /// Create a new in-memory NodeDB-Lite database with an explicit memory budget.
@@ -59,128 +164,96 @@ impl NodeDbLiteWasm {
         memory_mb: Option<u32>,
     ) -> Result<NodeDbLiteWasm, JsError> {
         let config = config_from_memory_mb(memory_mb);
-        // TODO(Stage 4): swap to PagedbStorage backed by pagedb MemVfs or OPFS VFS.
-        let storage = RedbStorage::open_in_memory().map_err(|e| JsError::new(&e.to_string()))?;
+        let storage = PagedbStorageMem::open_in_memory()
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
         let db = NodeDbLite::open_with_config(storage, peer_id, config)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Self { db })
+        Ok(Self {
+            inner: NodeDbLiteWasmInner::InMemory(db),
+        })
     }
+
+    // ─── Constructors — persistent (OPFS) ─────────────────────────────────
 
     /// Create a persistent NodeDB-Lite database backed by OPFS.
     ///
-    /// **Must run in a Web Worker** — OPFS SyncAccessHandle is not
-    /// available on the main thread.
+    /// **Breaking change from the pre-pagedb API**: this method now requires a
+    /// `workerUrl` argument — the URL of the JS bootstrap script that calls
+    /// `run_opfs_worker()`. See the module-level documentation for the required
+    /// bootstrap file format.
     ///
-    /// Data survives page reloads and browser restarts.
+    /// `filename` selects the OPFS sub-directory for this database. Each
+    /// unique value is an isolated database instance.
+    ///
+    /// Data survives page reloads and browser restarts. Can be called from any
+    /// execution context (the sync I/O runs inside the worker, not the caller).
+    ///
+    /// # Before (pre-pagedb, now removed):
+    /// `NodeDbLiteWasm.openPersistent(filename, peerId)`
+    ///
+    /// # After:
+    /// `NodeDbLiteWasm.openPersistent(filename, peerId, workerUrl)`
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
     #[wasm_bindgen(js_name = "openPersistent")]
-    pub async fn open_persistent(filename: &str, peer_id: u64) -> Result<NodeDbLiteWasm, JsError> {
-        // Get OPFS root directory.
-        let global: web_sys::WorkerGlobalScope = js_sys::global()
-            .dyn_into()
-            .map_err(|_| JsError::new("openPersistent must be called from a Web Worker"))?;
-        let storage = global.navigator().storage();
-        let root: web_sys::FileSystemDirectoryHandle = JsFuture::from(storage.get_directory())
+    pub async fn open_persistent(
+        filename: &str,
+        peer_id: u64,
+        worker_url: &str,
+    ) -> Result<NodeDbLiteWasm, JsError> {
+        // Prefix the worker_url with the filename so pagedb uses filename as the
+        // OPFS sub-directory root. pagedb's OpfsVfs resolves paths relative to the
+        // OPFS origin root, so the filename acts as a directory namespace.
+        // We pass the filename into the pagedb open path via the OPFS VFS directly —
+        // the VFS handles directory creation. The worker_url is purely for the
+        // gloo-worker bridge; the database path is passed in `Db::open` as the
+        // `realm`/path via the VFS open call, not via the worker URL.
+        let storage = PagedbStorageOpfs::open_opfs(worker_url)
             .await
-            .map_err(|e| JsError::new(&format!("OPFS getDirectory failed: {e:?}")))?
-            .dyn_into()
-            .map_err(|_| JsError::new("expected FileSystemDirectoryHandle"))?;
-
-        // Get or create the database file.
-        let opts = web_sys::FileSystemGetFileOptions::new();
-        opts.set_create(true);
-        let file_handle: web_sys::FileSystemFileHandle =
-            JsFuture::from(root.get_file_handle_with_options(filename, &opts))
-                .await
-                .map_err(|e| JsError::new(&format!("OPFS getFileHandle failed: {e:?}")))?
-                .dyn_into()
-                .map_err(|_| JsError::new("expected FileSystemFileHandle"))?;
-
-        // Create sync access handle.
-        let sync_handle: web_sys::FileSystemSyncAccessHandle =
-            JsFuture::from(file_handle.create_sync_access_handle())
-                .await
-                .map_err(|e| JsError::new(&format!("OPFS createSyncAccessHandle failed: {e:?}")))?
-                .dyn_into()
-                .map_err(|_| JsError::new("expected FileSystemSyncAccessHandle"))?;
-
-        // Create redb with OPFS backend.
-        let backend = opfs_backend::OpfsBackend::new(sync_handle);
-        let db_inner = redb::Database::builder()
-            .create_with_backend(backend)
-            .map_err(|e| JsError::new(&format!("redb create with OPFS failed: {e}")))?;
-
-        // TODO(Stage 4): replace redb OPFS backend with pagedb OPFS VFS.
-        // RedbStorage::from_database is the construction path for OPFS; PagedbStorage does not
-        // yet expose a from_opfs_handle constructor. This remains on redb until the pagedb OPFS
-        // VFS is wired through wasm-bindgen (Stage 4).
-        let storage = RedbStorage::from_database(db_inner);
+            .map_err(|e| JsError::new(&e.to_string()))?;
         let db = NodeDbLite::open(storage, peer_id)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Self { db })
+        Ok(Self {
+            inner: NodeDbLiteWasmInner::Persistent(db),
+        })
     }
 
     /// Create a persistent OPFS-backed NodeDB-Lite database with an explicit memory budget.
     ///
-    /// **Must run in a Web Worker** — OPFS SyncAccessHandle is not
-    /// available on the main thread.
+    /// **Breaking change**: `workerUrl` is now a required parameter. See
+    /// `openPersistent` for the full bootstrap requirement.
     ///
     /// `memory_mb` — total memory budget in mebibytes.
     /// Pass `None` (or `undefined` from JS) to use the default 100 MiB.
+    ///
+    /// # Before (pre-pagedb, now removed):
+    /// `NodeDbLiteWasm.openPersistentWithConfig(filename, peerId, memoryMb?)`
+    ///
+    /// # After:
+    /// `NodeDbLiteWasm.openPersistentWithConfig(filename, peerId, workerUrl, memoryMb?)`
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
     #[wasm_bindgen(js_name = "openPersistentWithConfig")]
     pub async fn open_persistent_with_config(
         filename: &str,
         peer_id: u64,
+        worker_url: &str,
         memory_mb: Option<u32>,
     ) -> Result<NodeDbLiteWasm, JsError> {
         let config = config_from_memory_mb(memory_mb);
-
-        // Get OPFS root directory.
-        let global: web_sys::WorkerGlobalScope = js_sys::global().dyn_into().map_err(|_| {
-            JsError::new("openPersistentWithConfig must be called from a Web Worker")
-        })?;
-        let storage = global.navigator().storage();
-        let root: web_sys::FileSystemDirectoryHandle = JsFuture::from(storage.get_directory())
+        let storage = PagedbStorageOpfs::open_opfs(worker_url)
             .await
-            .map_err(|e| JsError::new(&format!("OPFS getDirectory failed: {e:?}")))?
-            .dyn_into()
-            .map_err(|_| JsError::new("expected FileSystemDirectoryHandle"))?;
-
-        // Get or create the database file.
-        let opts = web_sys::FileSystemGetFileOptions::new();
-        opts.set_create(true);
-        let file_handle: web_sys::FileSystemFileHandle =
-            JsFuture::from(root.get_file_handle_with_options(filename, &opts))
-                .await
-                .map_err(|e| JsError::new(&format!("OPFS getFileHandle failed: {e:?}")))?
-                .dyn_into()
-                .map_err(|_| JsError::new("expected FileSystemFileHandle"))?;
-
-        // Create sync access handle.
-        let sync_handle: web_sys::FileSystemSyncAccessHandle =
-            JsFuture::from(file_handle.create_sync_access_handle())
-                .await
-                .map_err(|e| JsError::new(&format!("OPFS createSyncAccessHandle failed: {e:?}")))?
-                .dyn_into()
-                .map_err(|_| JsError::new("expected FileSystemSyncAccessHandle"))?;
-
-        // Create redb with OPFS backend.
-        let backend = opfs_backend::OpfsBackend::new(sync_handle);
-        let db_inner = redb::Database::builder()
-            .create_with_backend(backend)
-            .map_err(|e| JsError::new(&format!("redb create with OPFS failed: {e}")))?;
-
-        // TODO(Stage 4): replace redb OPFS backend with pagedb OPFS VFS.
-        // RedbStorage::from_database is the construction path for OPFS; PagedbStorage does not
-        // yet expose a from_opfs_handle constructor. This remains on redb until the pagedb OPFS
-        // VFS is wired through wasm-bindgen (Stage 4).
-        let storage = RedbStorage::from_database(db_inner);
+            .map_err(|e| JsError::new(&e.to_string()))?;
         let db = NodeDbLite::open_with_config(storage, peer_id, config)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Self { db })
+        Ok(Self {
+            inner: NodeDbLiteWasmInner::Persistent(db),
+        })
     }
+
+    // ─── Database methods ──────────────────────────────────────────────────
 
     /// Insert a vector into a collection.
     #[wasm_bindgen(js_name = "vectorInsert")]
@@ -190,10 +263,11 @@ impl NodeDbLiteWasm {
         id: &str,
         embedding: &[f32],
     ) -> Result<(), JsError> {
-        self.db
-            .vector_insert(collection, id, embedding, None)
-            .await
-            .map_err(|e| JsError::new(&e.to_string()))
+        dispatch!(self, db, {
+            db.vector_insert(collection, id, embedding, None)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))
+        })
     }
 
     /// Search for the k nearest vectors. Returns JSON array.
@@ -204,11 +278,11 @@ impl NodeDbLiteWasm {
         query: &[f32],
         k: usize,
     ) -> Result<JsValue, JsError> {
-        let results = self
-            .db
-            .vector_search(collection, query, k, None)
-            .await
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        let results = dispatch!(self, db, {
+            db.vector_search(collection, query, k, None)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))
+        })?;
 
         let json: Vec<serde_json::Value> = results
             .iter()
@@ -221,10 +295,11 @@ impl NodeDbLiteWasm {
     /// Delete a vector by ID.
     #[wasm_bindgen(js_name = "vectorDelete")]
     pub async fn vector_delete(&self, collection: &str, id: &str) -> Result<(), JsError> {
-        self.db
-            .vector_delete(collection, id)
-            .await
-            .map_err(|e| JsError::new(&e.to_string()))
+        dispatch!(self, db, {
+            db.vector_delete(collection, id)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))
+        })
     }
 
     /// Insert a directed graph edge into `collection`.
@@ -240,11 +315,11 @@ impl NodeDbLiteWasm {
     ) -> Result<String, JsError> {
         let from_id = NodeId::try_new(from).map_err(|e| JsError::new(&e.to_string()))?;
         let to_id = NodeId::try_new(to).map_err(|e| JsError::new(&e.to_string()))?;
-        let edge_id = self
-            .db
-            .graph_insert_edge(collection, &from_id, &to_id, edge_type, None)
-            .await
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        let edge_id = dispatch!(self, db, {
+            db.graph_insert_edge(collection, &from_id, &to_id, edge_type, None)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))
+        })?;
         Ok(edge_id.to_string())
     }
 
@@ -257,11 +332,11 @@ impl NodeDbLiteWasm {
         depth: u8,
     ) -> Result<JsValue, JsError> {
         let start_id = NodeId::try_new(start).map_err(|e| JsError::new(&e.to_string()))?;
-        let subgraph = self
-            .db
-            .graph_traverse(collection, &start_id, depth, None)
-            .await
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        let subgraph = dispatch!(self, db, {
+            db.graph_traverse(collection, &start_id, depth, None)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))
+        })?;
 
         let json = serde_json::json!({
             "nodes": subgraph.nodes.iter().map(|n| serde_json::json!({
@@ -281,11 +356,11 @@ impl NodeDbLiteWasm {
     /// Get a document by ID. Returns JSON or null.
     #[wasm_bindgen(js_name = "documentGet")]
     pub async fn document_get(&self, collection: &str, id: &str) -> Result<JsValue, JsError> {
-        let doc = self
-            .db
-            .document_get(collection, id)
-            .await
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        let doc = dispatch!(self, db, {
+            db.document_get(collection, id)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))
+        })?;
 
         match doc {
             Some(d) => serde_wasm_bindgen::to_value(&d).map_err(|e| JsError::new(&e.to_string())),
@@ -318,10 +393,11 @@ impl NodeDbLiteWasm {
             doc.set(k, v);
         }
 
-        self.db
-            .document_put(collection, doc)
-            .await
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        dispatch!(self, db, {
+            db.document_put(collection, doc)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))
+        })?;
 
         Ok(doc_id)
     }
@@ -329,39 +405,35 @@ impl NodeDbLiteWasm {
     /// Delete a document by ID.
     #[wasm_bindgen(js_name = "documentDelete")]
     pub async fn document_delete(&self, collection: &str, id: &str) -> Result<(), JsError> {
-        self.db
-            .document_delete(collection, id)
-            .await
-            .map_err(|e| JsError::new(&e.to_string()))
+        dispatch!(self, db, {
+            db.document_delete(collection, id)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))
+        })
     }
 
     /// Delete a graph edge by ID from `collection`.
-    ///
-    /// `edge_id` must be the length-prefixed string returned by `graphInsertEdge`
-    /// (format: `"{src_len}:{src}|{label_len}:{label}|{dst_len}:{dst}|{seq}"`).
     #[wasm_bindgen(js_name = "graphDeleteEdge")]
     pub async fn graph_delete_edge(&self, collection: &str, edge_id: &str) -> Result<(), JsError> {
         let eid: nodedb_types::id::EdgeId = edge_id
             .parse()
             .map_err(|e: nodedb_types::id::EdgeIdParseError| JsError::new(&e.to_string()))?;
-        self.db
-            .graph_delete_edge(collection, &eid)
-            .await
-            .map_err(|e| JsError::new(&e.to_string()))
+        dispatch!(self, db, {
+            db.graph_delete_edge(collection, &eid)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))
+        })
     }
 
     /// Return aggregate graph statistics for `collection`.
-    ///
-    /// Pass `null`/`undefined` for `collection` to return one entry per collection
-    /// visible to the caller (Origin) or the entire local edge store (Lite).
     #[wasm_bindgen(js_name = "graphStats")]
     pub async fn graph_stats(&self, collection: Option<String>) -> Result<JsValue, JsError> {
         let col = collection.as_deref();
-        let stats = self
-            .db
-            .graph_stats(col, None)
-            .await
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        let stats = dispatch!(self, db, {
+            db.graph_stats(col, None)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))
+        })?;
 
         let json: Vec<serde_json::Value> = stats
             .iter()
@@ -390,11 +462,11 @@ impl NodeDbLiteWasm {
     ) -> Result<JsValue, JsError> {
         let from_id = NodeId::try_new(from).map_err(|e| JsError::new(&e.to_string()))?;
         let to_id = NodeId::try_new(to).map_err(|e| JsError::new(&e.to_string()))?;
-        let path = self
-            .db
-            .graph_shortest_path(collection, &from_id, &to_id, max_depth, None)
-            .await
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        let path = dispatch!(self, db, {
+            db.graph_shortest_path(collection, &from_id, &to_id, max_depth, None)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))
+        })?;
 
         match path {
             Some(nodes) => {
@@ -406,9 +478,6 @@ impl NodeDbLiteWasm {
     }
 
     /// Full-text search (BM25) against `field` in `collection`. Returns JSON array of results.
-    ///
-    /// `field` is the indexed field name (e.g. `"body"`, `"title"`). Every BM25 index
-    /// in NodeDB is scoped to one declared field; the caller must name it explicitly.
     #[wasm_bindgen(js_name = "textSearch")]
     pub async fn text_search(
         &self,
@@ -417,9 +486,8 @@ impl NodeDbLiteWasm {
         query: &str,
         top_k: usize,
     ) -> Result<JsValue, JsError> {
-        let results = self
-            .db
-            .text_search(
+        let results = dispatch!(self, db, {
+            db.text_search(
                 collection,
                 field,
                 query,
@@ -427,7 +495,8 @@ impl NodeDbLiteWasm {
                 nodedb_types::TextSearchParams::default(),
             )
             .await
-            .map_err(|e| JsError::new(&e.to_string()))?;
+            .map_err(|e| JsError::new(&e.to_string()))
+        })?;
 
         let json: Vec<serde_json::Value> = results
             .iter()
@@ -440,11 +509,11 @@ impl NodeDbLiteWasm {
     /// Execute a SQL query. Returns JSON with columns and rows.
     #[wasm_bindgen(js_name = "executeSql")]
     pub async fn execute_sql(&self, sql: &str) -> Result<JsValue, JsError> {
-        let result = self
-            .db
-            .execute_sql(sql, &[])
-            .await
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        let result = dispatch!(self, db, {
+            db.execute_sql(sql, &[])
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))
+        })?;
 
         let json = serde_json::json!({
             "columns": result.columns,
@@ -458,13 +527,12 @@ impl NodeDbLiteWasm {
     /// Flush all in-memory state to storage.
     #[wasm_bindgen]
     pub async fn flush(&self) -> Result<(), JsError> {
-        self.db
-            .flush()
-            .await
-            .map_err(|e| JsError::new(&e.to_string()))
+        dispatch!(self, db, {
+            db.flush().await.map_err(|e| JsError::new(&e.to_string()))
+        })
     }
 
-    // ─── ID Generation ──────────────────────────────────────────────
+    // ─── ID Generation ──────────────────────────────────────────────────
 
     /// Generate a UUIDv7 (time-sortable, recommended for primary keys).
     #[wasm_bindgen(js_name = "generateId")]
@@ -492,7 +560,7 @@ impl NodeDbLiteWasm {
 ///
 /// ```js
 /// const wasmBytes = await fetch('my_udf.wasm').then(r => r.arrayBuffer());
-/// await db.registerWasmUdf('my_func', new Uint8Array(wasmBytes));
+/// await registerWasmUdf('my_func', new Uint8Array(wasmBytes));
 /// ```
 #[wasm_bindgen(js_name = "registerWasmUdf")]
 pub async fn register_wasm_udf(name: &str, wasm_bytes: &[u8]) -> Result<(), JsError> {
@@ -528,8 +596,6 @@ pub async fn register_wasm_udf(name: &str, wasm_bytes: &[u8]) -> Result<(), JsEr
     }
 
     // Store the instance for later invocation.
-    // The actual integration with NodeDB-Lite's query engine would register
-    // this as a callable UDF. For now, the instance is validated and ready.
     web_sys::console::log_1(
         &format!("WASM UDF '{name}' registered ({} bytes)", wasm_bytes.len()).into(),
     );

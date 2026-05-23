@@ -7,7 +7,7 @@ pub mod outbound;
 pub mod shapes;
 pub mod transport;
 
-pub use array::RedbOpLog;
+pub use array::KvOpLogStore;
 pub use client::{SyncClient, SyncConfig, SyncState};
 pub use clock::VectorClock;
 pub use compensation::{CompensationEvent, CompensationHandler, CompensationRegistry};

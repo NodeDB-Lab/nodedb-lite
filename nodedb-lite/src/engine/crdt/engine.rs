@@ -538,13 +538,13 @@ impl CrdtEngine {
         })
     }
 
-    /// Build the redb key for a single pending delta: `delta:{mutation_id:016x}`.
+    /// Build the KV key for a single pending delta: `delta:{mutation_id:016x}`.
     /// Zero-padded hex ensures lexicographic ordering matches numeric ordering.
     pub fn delta_storage_key(mutation_id: u64) -> Vec<u8> {
         format!("delta:{mutation_id:016x}").into_bytes()
     }
 
-    /// Restore pending deltas from individual redb entries (append-only format).
+    /// Restore pending deltas from individual KV entries (append-only format).
     ///
     /// Each entry is stored under `Namespace::Crdt` with key `delta:{mutation_id:016x}`.
     /// Falls back to legacy bulk restore if no individual entries found.

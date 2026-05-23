@@ -55,7 +55,7 @@ async fn strict_insert_survives_restart() {
     .await
     .unwrap();
 
-    // Flush to persist to redb.
+    // Flush to persist.
     db.flush().await.unwrap();
 
     // Verify data is readable after flush.

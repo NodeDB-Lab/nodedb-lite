@@ -47,7 +47,7 @@ const COLLECTION: &str = "fts_sync_test";
 
 const CREATE_ORIGIN: &str = "CREATE COLLECTION fts_sync_test WITH (engine='document_schemaless')";
 
-// ── Helper: open a Lite DB backed by in-memory redb ─────────────────────────
+// ── Helper: open a Lite DB backed by in-memory storage ─────────────────────────
 
 async fn open_lite() -> Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()

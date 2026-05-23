@@ -15,7 +15,7 @@ use nodedb_array::sync::snapshot::{SnapshotChunk, SnapshotHeader};
 use crate::error::LiteError;
 use crate::storage::engine::StorageEngine;
 use crate::sync::array::catchup::CatchupTracker;
-use crate::sync::array::op_log_redb::RedbOpLog;
+use crate::sync::array::op_log_store::KvOpLogStore;
 use crate::sync::array::pending::PendingQueue;
 use crate::sync::array::replica_state::ReplicaState;
 use crate::sync::array::schema_registry::SchemaRegistry;
@@ -52,7 +52,7 @@ pub struct ArrayInbound<S: StorageEngine> {
     pub(super) replica: Arc<ReplicaState>,
     pub(super) pending: Arc<PendingQueue<S>>,
     #[allow(dead_code)]
-    pub(super) op_log: Arc<RedbOpLog<S>>,
+    pub(super) op_log: Arc<KvOpLogStore<S>>,
     /// Catchup tracker — updated when Origin sends `RetentionFloor` rejects.
     pub(super) catchup: Arc<CatchupTracker<S>>,
     /// In-flight snapshot chunk buffers.
@@ -67,7 +67,7 @@ impl<S: StorageEngine> ArrayInbound<S> {
         schemas: Arc<SchemaRegistry<S>>,
         replica: Arc<ReplicaState>,
         pending: Arc<PendingQueue<S>>,
-        op_log: Arc<RedbOpLog<S>>,
+        op_log: Arc<KvOpLogStore<S>>,
         catchup: Arc<CatchupTracker<S>>,
     ) -> Self {
         Self {

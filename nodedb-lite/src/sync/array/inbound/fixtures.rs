@@ -22,7 +22,7 @@ use nodedb_array::types::domain::{Domain, DomainBound};
 use crate::engine::array::engine::ArrayEngineState;
 use crate::storage::pagedb_storage::PagedbStorageMem;
 use crate::sync::array::catchup::CatchupTracker;
-use crate::sync::array::op_log_redb::RedbOpLog;
+use crate::sync::array::op_log_store::KvOpLogStore;
 use crate::sync::array::pending::PendingQueue;
 use crate::sync::array::replica_state::ReplicaState;
 use crate::sync::array::schema_registry::SchemaRegistry;
@@ -85,7 +85,7 @@ pub(crate) async fn make_inbound() -> InboundFixture {
         Arc::clone(&storage),
         Arc::clone(&replica),
     ));
-    let op_log = Arc::new(RedbOpLog::new(Arc::clone(&storage)));
+    let op_log = Arc::new(KvOpLogStore::new(Arc::clone(&storage)));
     let pending = Arc::new(PendingQueue::new(Arc::clone(&storage)));
     let array_state = Arc::new(tokio::sync::Mutex::new(ArrayEngineState::new()));
     let engine = Arc::new(

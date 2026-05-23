@@ -34,7 +34,6 @@ zerompk = { workspace = true }
 serde_json = { workspace = true }
 sonic-rs = { workspace = true }
 loro = { workspace = true }
-redb = { workspace = true }
 pagedb = { workspace = true }
 nodedb-sql = { workspace = true }
 nodedb-physical = { workspace = true }
@@ -44,6 +43,13 @@ aes-gcm = { workspace = true }
 argon2 = { workspace = true }
 zeroize = { workspace = true }
 getrandom = { workspace = true }
+
+# Enable pagedb's OPFS VFS only when building for the browser.
+# tokio's `sync` and `rt` modules work on wasm32-unknown-unknown;
+# `net`, `time`, and `rt-multi-thread` do not.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+pagedb = { workspace = true, features = ["opfs"] }
+tokio = { workspace = true, features = ["sync", "rt", "macros"] }
 
 # Async runtime (native only — WASM uses wasm-bindgen-futures)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

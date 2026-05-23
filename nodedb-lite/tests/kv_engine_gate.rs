@@ -6,7 +6,7 @@
 //! TTL and sorted-index are EXPERIMENTAL and are NOT exercised here.
 //!
 //! The KV implementation lives in `nodedb/collection/kv.rs` and is not a
-//! standalone engine module.  Both sync modes (direct-redb and CRDT-backed)
+//! standalone engine module.  Both sync modes (direct-kv and CRDT-backed)
 //! share the same public `kv_put` / `kv_get` / `kv_delete` surface tested
 //! below.
 
@@ -43,7 +43,7 @@ async fn kv_put_get_delete_roundtrip() {
         db.kv_put(col, k, v).await.expect("kv_put");
     }
 
-    // Flush to redb to ensure persistence layer is exercised.
+    // Flush to ensure persistence layer is exercised.
     db.kv_flush().await.expect("kv_flush");
 
     // Get each key back and assert value matches.
@@ -95,7 +95,7 @@ async fn kv_put_get_delete_roundtrip() {
 // ---------------------------------------------------------------------------
 
 /// Get a never-inserted key and assert the API returns `None` (the overlay
-/// path) and then `None` from redb as well (after a flush with no writes).
+/// path) and then `None` from the KV store as well (after a flush with no writes).
 #[tokio::test]
 async fn kv_get_missing_returns_none_or_error() {
     let db = open_db().await;

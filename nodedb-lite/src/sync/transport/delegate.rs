@@ -43,7 +43,7 @@ pub trait SyncDelegate: Send + Sync + 'static {
     fn import_remote(&self, data: &[u8]);
     /// Import a definition sync message (function/trigger/procedure) from Origin.
     /// Async because persisting the definition to storage involves
-    /// `redb::Database` writes through `spawn_blocking`.
+    /// KV store writes through `spawn_blocking`.
     async fn import_definition(&self, msg: &nodedb_types::sync::wire::DefinitionSyncMsg);
 
     /// Apply a single `ArrayDelta` frame from Origin.

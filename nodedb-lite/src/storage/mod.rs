@@ -18,7 +18,6 @@ mod pagedb_storage_fts;
 mod pagedb_storage_graph;
 #[cfg(not(target_arch = "wasm32"))]
 mod pagedb_storage_spatial;
-pub mod redb_storage;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod spatial_segment_ext;
 #[cfg(not(target_arch = "wasm32"))]

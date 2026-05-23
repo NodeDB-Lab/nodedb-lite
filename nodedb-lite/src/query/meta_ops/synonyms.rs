@@ -14,7 +14,7 @@ use crate::storage::engine::StorageEngine;
 /// Key prefix for synonym groups in `Namespace::Meta`.
 const SYNONYM_PREFIX: &str = "synonym/";
 
-/// `PutSynonymGroup` — persist a synonym group record to redb meta storage.
+/// `PutSynonymGroup` — persist a synonym group record to meta storage.
 ///
 /// The `record_json` field is stored verbatim under `synonym/<tenant>/<name>`.
 /// The group name is extracted from the JSON `"name"` field.
