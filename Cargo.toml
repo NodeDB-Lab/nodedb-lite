@@ -48,6 +48,7 @@ zerompk = { version = "0.5", features = ["std", "derive"] }
 # Storage
 pagedb = { version = "0", default-features = false }
 roaring = "0.11"
+lru = "0.12"
 arrow = { version = "58", default-features = false, features = ["ipc"] }
 crc32c = "0.6"
 

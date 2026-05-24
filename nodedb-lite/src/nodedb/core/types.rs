@@ -3,6 +3,7 @@
 //! `NodeDbLite` struct definition and storage key constants.
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 use crate::engine::columnar::ColumnarEngine;
@@ -104,6 +105,20 @@ pub struct NodeDbLite<S: StorageEngine> {
     /// Flushed on `kv_flush()`, threshold (1000 ops), or `flush()`.
     /// The HashMap overlay lets reads see uncommitted writes.
     pub(crate) kv_write_buf: Mutex<KvWriteBuffer>,
+    /// In-memory LRU cache for KV get hot path.
+    ///
+    /// Stores raw encoded bytes (8-byte LE deadline + user value) keyed by the
+    /// composite KV key (`{collection}\0{user_key}`). TTL expiry is re-checked
+    /// on every cache hit so no entry is served past its deadline.
+    ///
+    /// Capacity is controlled by [`crate::config::LiteConfig::kv_cache_capacity`].
+    pub(crate) kv_cache: Mutex<lru::LruCache<Vec<u8>, Vec<u8>>>,
+    /// Mirrors `kv_write_buf.overlay.len()` for lock-free fast-path reads.
+    /// Updated under the same lock as the overlay; readers may load with
+    /// `Acquire` to skip the mutex when the overlay is empty. Single-writer
+    /// design means `Release` stores happen-before the lock release; readers
+    /// that see 0 observe a consistent snapshot.
+    pub(crate) kv_overlay_len: AtomicUsize,
 }
 
 /// Buffered KV writes for batch commit.

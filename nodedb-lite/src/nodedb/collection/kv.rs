@@ -131,11 +131,16 @@ impl<S: StorageEngine> NodeDbLite<S> {
         buf.overlay.insert(rkey.clone(), Some(encoded.clone()));
         buf.ops.push(WriteOp::Put {
             ns: Namespace::Kv,
-            key: rkey,
+            key: rkey.clone(),
             value: encoded,
         });
         let should_flush = buf.ops.len() >= KV_FLUSH_THRESHOLD;
+        self.kv_overlay_len
+            .store(buf.overlay.len(), std::sync::atomic::Ordering::Release);
         drop(buf);
+
+        // Invalidate any cached value for this key so subsequent reads go to storage.
+        self.kv_cache.lock_or_recover().pop(&rkey);
 
         if should_flush {
             self.kv_flush_inner().await?;
@@ -164,25 +169,52 @@ impl<S: StorageEngine> NodeDbLite<S> {
     pub async fn kv_get(&self, collection: &str, key: &str) -> NodeDbResult<Option<Vec<u8>>> {
         let rkey = kv_key(collection, key.as_bytes());
 
-        // Check write buffer overlay first.
-        let buf = self.kv_write_buf.lock_or_recover();
-        if let Some(entry) = buf.overlay.get(&rkey) {
-            let result = match entry {
-                Some(stored) => decode_value(stored)
-                    .and_then(|(deadline, user_bytes)| {
-                        if is_expired(deadline) {
-                            None
-                        } else {
-                            Some(user_bytes.to_vec())
-                        }
-                    })
-                    .map(Some)
-                    .unwrap_or(None),
-                None => None,
-            };
-            return Ok(result);
+        // Fast path: when the overlay is empty (common case in read-heavy
+        // workloads between flushes), skip the mutex acquire entirely and
+        // go straight to storage. The single-writer design + Release stores
+        // on overlay mutation make this safe: observing `len == 0` means
+        // the writer either hasn't started or has completed; either way the
+        // overlay holds no relevant entry.
+        if self
+            .kv_overlay_len
+            .load(std::sync::atomic::Ordering::Acquire)
+            > 0
+        {
+            let buf = self.kv_write_buf.lock_or_recover();
+            if let Some(entry) = buf.overlay.get(&rkey) {
+                let result = match entry {
+                    Some(stored) => decode_value(stored)
+                        .and_then(|(deadline, user_bytes)| {
+                            if is_expired(deadline) {
+                                None
+                            } else {
+                                Some(user_bytes.to_vec())
+                            }
+                        })
+                        .map(Some)
+                        .unwrap_or(None),
+                    None => None,
+                };
+                return Ok(result);
+            }
+            drop(buf);
         }
-        drop(buf);
+
+        // Cache check: look up the composite key before hitting storage.
+        {
+            let mut cache = self.kv_cache.lock_or_recover();
+            if let Some(encoded) = cache.get(&rkey) {
+                match decode_value(encoded) {
+                    Some((deadline, user_bytes)) if !is_expired(deadline) => {
+                        return Ok(Some(user_bytes.to_vec()));
+                    }
+                    _ => {
+                        // Expired or corrupt — evict and fall through to storage.
+                        cache.pop(&rkey);
+                    }
+                }
+            }
+        }
 
         // Fall through to storage.
         let stored = self
@@ -193,18 +225,24 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         match stored {
             None => Ok(None),
-            Some(raw) => match decode_value(&raw) {
-                None => Ok(None),
-                Some((deadline, user_bytes)) => {
-                    if is_expired(deadline) {
-                        // Lazy expiration: schedule a delete.
-                        self.kv_lazy_delete(rkey).await?;
-                        Ok(None)
-                    } else {
-                        Ok(Some(user_bytes.to_vec()))
+            Some(raw) => {
+                let decoded = decode_value(&raw);
+                match decoded {
+                    None => Ok(None),
+                    Some((deadline, user_bytes)) => {
+                        if is_expired(deadline) {
+                            // Lazy expiration: schedule a delete.
+                            self.kv_lazy_delete(rkey).await?;
+                            Ok(None)
+                        } else {
+                            let result = user_bytes.to_vec();
+                            // Populate cache with the raw encoded bytes before returning.
+                            self.kv_cache.lock_or_recover().put(rkey, raw);
+                            Ok(Some(result))
+                        }
                     }
                 }
-            },
+            }
         }
     }
 
@@ -214,10 +252,14 @@ impl<S: StorageEngine> NodeDbLite<S> {
         buf.overlay.insert(rkey.clone(), None);
         buf.ops.push(WriteOp::Delete {
             ns: Namespace::Kv,
-            key: rkey,
+            key: rkey.clone(),
         });
         let should_flush = buf.ops.len() >= KV_FLUSH_THRESHOLD;
+        self.kv_overlay_len
+            .store(buf.overlay.len(), std::sync::atomic::Ordering::Release);
         drop(buf);
+        // Evict the expired entry so future reads don't serve stale data.
+        self.kv_cache.lock_or_recover().pop(&rkey);
         if should_flush {
             self.kv_flush_inner().await?;
         }
@@ -232,10 +274,15 @@ impl<S: StorageEngine> NodeDbLite<S> {
         buf.overlay.insert(rkey.clone(), None);
         buf.ops.push(WriteOp::Delete {
             ns: Namespace::Kv,
-            key: rkey,
+            key: rkey.clone(),
         });
         let should_flush = buf.ops.len() >= KV_FLUSH_THRESHOLD;
+        self.kv_overlay_len
+            .store(buf.overlay.len(), std::sync::atomic::Ordering::Release);
         drop(buf);
+
+        // Invalidate the cache so subsequent reads don't return stale data.
+        self.kv_cache.lock_or_recover().pop(&rkey);
 
         if should_flush {
             self.kv_flush_inner().await?;
@@ -335,15 +382,23 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // Lazy-delete expired keys discovered during scan.
         if !expired_keys.is_empty() {
             let mut buf = self.kv_write_buf.lock_or_recover();
-            for rkey in expired_keys {
+            for rkey in &expired_keys {
                 buf.overlay.insert(rkey.clone(), None);
                 buf.ops.push(WriteOp::Delete {
                     ns: Namespace::Kv,
-                    key: rkey,
+                    key: rkey.clone(),
                 });
             }
             let should_flush = buf.ops.len() >= KV_FLUSH_THRESHOLD;
+            self.kv_overlay_len
+                .store(buf.overlay.len(), std::sync::atomic::Ordering::Release);
             drop(buf);
+            // Evict expired keys from the cache.
+            let mut cache = self.kv_cache.lock_or_recover();
+            for rkey in &expired_keys {
+                cache.pop(rkey);
+            }
+            drop(cache);
             if should_flush {
                 self.kv_flush_inner().await?;
             }
@@ -475,6 +530,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         let ops = std::mem::take(&mut buf.ops);
         buf.overlay.clear();
+        self.kv_overlay_len
+            .store(0, std::sync::atomic::Ordering::Release);
         drop(buf);
 
         let count = ops.len();
@@ -572,6 +629,122 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .filter(|k| glob_matches(key_pattern, k))
             .collect();
         Ok(matched)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::LiteConfig;
+    use crate::storage::pagedb_storage::PagedbStorageMem;
+
+    async fn open_db() -> NodeDbLite<PagedbStorageMem> {
+        let storage = PagedbStorageMem::open_in_memory()
+            .await
+            .expect("open in-memory storage");
+        NodeDbLite::open(storage, 1).await.expect("open NodeDbLite")
+    }
+
+    async fn open_db_with_cache_capacity(cap: usize) -> NodeDbLite<PagedbStorageMem> {
+        let storage = PagedbStorageMem::open_in_memory()
+            .await
+            .expect("open in-memory storage");
+        let config = LiteConfig {
+            kv_cache_capacity: cap,
+            ..LiteConfig::default()
+        };
+        NodeDbLite::open_with_config(storage, 1, config)
+            .await
+            .expect("open NodeDbLite with config")
+    }
+
+    /// Two consecutive gets on the same key: both return the same value.
+    /// The second read is served from the in-process cache.
+    #[tokio::test]
+    async fn cache_hits_on_repeated_get() {
+        let db = open_db().await;
+        db.kv_put("col", "key", b"hello").await.unwrap();
+        // Prime the cache.
+        db.kv_flush().await.unwrap();
+        let v1 = db.kv_get("col", "key").await.unwrap();
+        assert_eq!(v1.as_deref(), Some(b"hello".as_ref()));
+        // Second get — served from cache.
+        let v2 = db.kv_get("col", "key").await.unwrap();
+        assert_eq!(v2.as_deref(), Some(b"hello".as_ref()));
+        // Verify the cache actually holds the entry.
+        assert_eq!(db.kv_cache.lock_or_recover().len(), 1);
+    }
+
+    /// After a put-get-put sequence the second get must return the new value,
+    /// not the stale cached one.
+    #[tokio::test]
+    async fn cache_invalidated_on_put() {
+        let db = open_db().await;
+        db.kv_put("col", "key", b"v1").await.unwrap();
+        db.kv_flush().await.unwrap();
+        let _ = db.kv_get("col", "key").await.unwrap(); // populate cache
+        db.kv_put("col", "key", b"v2").await.unwrap();
+        db.kv_flush().await.unwrap();
+        let v = db.kv_get("col", "key").await.unwrap();
+        assert_eq!(v.as_deref(), Some(b"v2".as_ref()));
+    }
+
+    /// After a put-get-delete sequence a subsequent get must return None.
+    #[tokio::test]
+    async fn cache_invalidated_on_delete() {
+        let db = open_db().await;
+        db.kv_put("col", "key", b"v").await.unwrap();
+        db.kv_flush().await.unwrap();
+        let _ = db.kv_get("col", "key").await.unwrap(); // populate cache
+        db.kv_delete("col", "key").await.unwrap();
+        db.kv_flush().await.unwrap();
+        let v = db.kv_get("col", "key").await.unwrap();
+        assert!(v.is_none(), "deleted key must not be returned from cache");
+    }
+
+    /// A key written with a very short TTL must not be served from cache after expiry.
+    #[tokio::test]
+    async fn expired_cached_value_evicted() {
+        let db = open_db().await;
+        // 1 ms TTL — expired almost immediately.
+        db.kv_put_with_ttl("col", "key", b"v", 1).await.unwrap();
+        db.kv_flush().await.unwrap();
+        let _ = db.kv_get("col", "key").await.unwrap(); // may or may not cache
+        // Sleep long enough that the deadline has definitely passed.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let v = db.kv_get("col", "key").await.unwrap();
+        assert!(v.is_none(), "expired key must return None");
+        // Cache must not hold the evicted entry.
+        assert_eq!(
+            db.kv_cache.lock_or_recover().len(),
+            0,
+            "expired entry must be evicted from cache"
+        );
+    }
+
+    /// The cache must not grow beyond the configured capacity.
+    #[tokio::test]
+    async fn cache_capacity_eviction() {
+        const CAP: usize = 5;
+        let db = open_db_with_cache_capacity(CAP).await;
+        let col = "cap_test";
+
+        // Write N+10 keys and flush so they land in storage.
+        for i in 0..(CAP + 10) {
+            db.kv_put(col, &i.to_string(), b"x").await.unwrap();
+        }
+        db.kv_flush().await.unwrap();
+
+        // Read all keys — each miss populates the cache.
+        for i in 0..(CAP + 10) {
+            let _ = db.kv_get(col, &i.to_string()).await.unwrap();
+        }
+
+        let cache_len = db.kv_cache.lock_or_recover().len();
+        assert!(
+            cache_len <= CAP,
+            "cache must not exceed capacity {CAP}, got {cache_len}"
+        );
     }
 }
 

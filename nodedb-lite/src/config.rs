@@ -72,6 +72,19 @@ pub struct LiteConfig {
     /// Argon2id parallelism lanes. Default: 1.
     #[serde(default = "default_argon2_p_cost")]
     pub argon2_p_cost: u32,
+
+    /// Maximum entries in the in-memory KV read cache. Default: 10_000.
+    ///
+    /// Each entry holds the raw encoded value (typically ~80 bytes for a
+    /// 64-byte payload + 8-byte TTL framing), so 10 000 entries ≈ 800 KB.
+    ///
+    /// A value of 0 is rejected at open time; use 1 as the effective minimum.
+    #[serde(default = "default_kv_cache_capacity")]
+    pub kv_cache_capacity: usize,
+}
+
+fn default_kv_cache_capacity() -> usize {
+    10_000
 }
 
 fn default_sync_enabled() -> bool {
@@ -102,6 +115,7 @@ impl Default for LiteConfig {
             argon2_m_cost: default_argon2_m_cost(),
             argon2_t_cost: default_argon2_t_cost(),
             argon2_p_cost: default_argon2_p_cost(),
+            kv_cache_capacity: default_kv_cache_capacity(),
         }
     }
 }

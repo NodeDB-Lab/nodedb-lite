@@ -102,6 +102,40 @@ pub(crate) fn prefix_key(ns: Namespace, key: &[u8]) -> Vec<u8> {
     k
 }
 
+/// Inline-stack composite key for hot read paths. Avoids heap allocation
+/// when the prefixed key fits in 64 bytes (typical Lite KV keys are
+/// `{ns_byte}{collection}\0{user_key}` ~ a few dozen bytes).
+pub(crate) enum KeyBuf {
+    Stack { data: [u8; 64], len: usize },
+    Heap(Vec<u8>),
+}
+
+impl KeyBuf {
+    #[inline]
+    pub(crate) fn new(ns: Namespace, key: &[u8]) -> Self {
+        let total = 1 + key.len();
+        if total <= 64 {
+            let mut data = [0u8; 64];
+            data[0] = ns as u8;
+            data[1..total].copy_from_slice(key);
+            KeyBuf::Stack { data, len: total }
+        } else {
+            let mut v = Vec::with_capacity(total);
+            v.push(ns as u8);
+            v.extend_from_slice(key);
+            KeyBuf::Heap(v)
+        }
+    }
+
+    #[inline]
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        match self {
+            KeyBuf::Stack { data, len } => &data[..*len],
+            KeyBuf::Heap(v) => v.as_slice(),
+        }
+    }
+}
+
 /// Strip the namespace prefix byte from a composite key returned by pagedb.
 ///
 /// Returns an empty slice if `composite` has length ≤ 1 (defensive).
@@ -259,9 +293,9 @@ where
     <V as Vfs>::File: Sync,
 {
     async fn get(&self, ns: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, LiteError> {
-        let composite = prefix_key(ns, key);
+        let composite = KeyBuf::new(ns, key);
         let txn = self.db.begin_read().await.map_err(LiteError::from)?;
-        txn.get(&composite).await.map_err(LiteError::from)
+        txn.get(composite.as_slice()).await.map_err(LiteError::from)
     }
 
     async fn put(&self, ns: Namespace, key: &[u8], value: &[u8]) -> Result<(), LiteError> {
@@ -511,9 +545,9 @@ impl PagedbStorage<pagedb::vfs::opfs::OpfsVfs> {
 #[async_trait(?Send)]
 impl<V: Vfs + Clone + 'static> StorageEngine for PagedbStorage<V> {
     async fn get(&self, ns: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, LiteError> {
-        let composite = prefix_key(ns, key);
+        let composite = KeyBuf::new(ns, key);
         let txn = self.db.begin_read().await.map_err(LiteError::from)?;
-        txn.get(&composite).await.map_err(LiteError::from)
+        txn.get(composite.as_slice()).await.map_err(LiteError::from)
     }
 
     async fn put(&self, ns: Namespace, key: &[u8], value: &[u8]) -> Result<(), LiteError> {

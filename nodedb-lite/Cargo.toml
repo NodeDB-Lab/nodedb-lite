@@ -23,6 +23,7 @@ nodedb-graph = { workspace = true }
 nodedb-vector = { workspace = true }
 nodedb-fts = { workspace = true }
 roaring = { workspace = true }
+lru = { workspace = true }
 nodedb-strict = { workspace = true }
 nodedb-columnar = { workspace = true }
 nodedb-array = { workspace = true }

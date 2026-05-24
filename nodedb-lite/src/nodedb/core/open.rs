@@ -3,6 +3,7 @@
 //! `NodeDbLite` constructors and cold-start restore helpers.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
 use nodedb_types::Namespace;
@@ -45,7 +46,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
     ) -> NodeDbResult<Self> {
         let governor = crate::memory::MemoryGovernor::from_config(&config);
         let sync_enabled = config.sync_enabled;
-        Self::open_inner(storage, peer_id, governor, sync_enabled).await
+        let kv_cache_capacity = NonZeroUsize::new(config.kv_cache_capacity)
+            .ok_or_else(|| NodeDbError::config("kv_cache_capacity must be greater than 0"))?;
+        Self::open_inner(storage, peer_id, governor, sync_enabled, kv_cache_capacity).await
     }
 
     /// Open with a custom memory budget (convenience wrapper using default percentages).
@@ -57,7 +60,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
         memory_budget: usize,
     ) -> NodeDbResult<Self> {
         let governor = crate::memory::MemoryGovernor::new(memory_budget);
-        Self::open_inner(storage, peer_id, governor, true).await
+        let kv_cache_capacity =
+            NonZeroUsize::new(crate::config::LiteConfig::default().kv_cache_capacity)
+                .expect("default kv_cache_capacity is non-zero");
+        Self::open_inner(storage, peer_id, governor, true, kv_cache_capacity).await
     }
 
     async fn open_inner(
@@ -65,6 +71,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         peer_id: u64,
         governor: crate::memory::MemoryGovernor,
         sync_enabled: bool,
+        kv_cache_capacity: NonZeroUsize,
     ) -> NodeDbResult<Self> {
         let storage = Arc::new(storage);
 
@@ -332,10 +339,12 @@ impl<S: StorageEngine> NodeDbLite<S> {
             #[cfg(not(target_arch = "wasm32"))]
             timeseries_outbound: timeseries_outbound_init,
             sync_enabled,
+            kv_cache: Mutex::new(lru::LruCache::new(kv_cache_capacity)),
             kv_write_buf: Mutex::new(KvWriteBuffer {
                 ops: Vec::with_capacity(1024),
                 overlay: HashMap::new(),
             }),
+            kv_overlay_len: std::sync::atomic::AtomicUsize::new(0),
         };
 
         // Rebuild text indices from CRDT state only when no checkpoint exists.
