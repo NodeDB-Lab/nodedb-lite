@@ -14,6 +14,8 @@ use nodedb_types::id::{EdgeId, NodeId};
 use nodedb_types::result::{SubGraph, SubGraphEdge, SubGraphNode};
 use nodedb_types::value::Value;
 
+use nodedb_graph::params::{AlgoParams, GraphAlgorithm};
+
 use crate::engine::array::ops::util::time::now_ms;
 use crate::engine::graph::history;
 use crate::engine::graph::index::{CsrIndex, Direction};
@@ -21,6 +23,7 @@ use crate::engine::graph::traversal::DEFAULT_MAX_VISITED;
 use crate::nodedb::LockExt;
 use crate::nodedb::NodeDbLite;
 use crate::nodedb::convert::{loro_value_to_document, value_to_loro};
+use crate::query::graph_ops::algorithms;
 use crate::storage::engine::StorageEngine;
 
 /// Returns the CRDT collection name for edges belonging to a graph collection.
@@ -314,6 +317,62 @@ impl<S: StorageEngine> NodeDbLite<S> {
             distinct_label_count: labels.len() as u64,
             labels,
         }])
+    }
+
+    /// Run PageRank (or Personalized PageRank) on the collection's CSR graph.
+    ///
+    /// Returns an empty `Vec` when the collection has no edges rather than an
+    /// error — an empty graph simply has no ranks to report.
+    pub(super) async fn graph_pagerank_impl(
+        &self,
+        collection: &str,
+        personalization: Option<std::collections::HashMap<String, f64>>,
+        damping: Option<f64>,
+        max_iterations: Option<u32>,
+    ) -> NodeDbResult<Vec<(String, f64)>> {
+        // Fast path: if the collection isn't in the CSR map it has no edges.
+        {
+            let csr_map = self.csr.lock_or_recover();
+            if !csr_map.contains_key(collection) {
+                return Ok(Vec::new());
+            }
+        }
+
+        let params = AlgoParams {
+            collection: collection.to_string(),
+            damping,
+            max_iterations: max_iterations.map(|v| v as usize),
+            personalization_vector: personalization,
+            ..Default::default()
+        };
+
+        let result = algorithms::run_algo(&self.csr, GraphAlgorithm::PageRank, &params)
+            .map_err(|e| NodeDbError::storage(format!("graph_pagerank: {e}")))?;
+
+        // `result.columns` == ["node_id", "rank"]; extract and sort descending.
+        let mut pairs: Vec<(String, f64)> = result
+            .rows
+            .into_iter()
+            .filter_map(|mut row| {
+                if row.len() < 2 {
+                    return None;
+                }
+                let rank = match row.pop() {
+                    Some(Value::Float(f)) => f,
+                    _ => return None,
+                };
+                let node_id = match row.pop() {
+                    Some(Value::String(s)) => s,
+                    _ => return None,
+                };
+                Some((node_id, rank))
+            })
+            .collect();
+
+        pairs.sort_unstable_by(|(_, a), (_, b)| {
+            b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(pairs)
     }
 
     /// Unweighted BFS shortest path from `from` to `to` within `collection`,
