@@ -107,6 +107,7 @@ impl<S: StorageEngine> CatchupTracker<S> {
     /// Updates both the in-memory map and the durable storage entry.
     /// Only persists if `hlc` is strictly greater than the current last-seen
     /// value (monotonic advancement).
+    #[allow(clippy::await_holding_lock)]
     pub async fn record(&self, array: &str, hlc: Hlc) -> Result<(), LiteError> {
         let mut state = self.state.lock().map_err(|_| LiteError::LockPoisoned)?;
         let current = state.get(array).copied().unwrap_or(Hlc::ZERO);

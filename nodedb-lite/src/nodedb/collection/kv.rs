@@ -117,6 +117,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     }
 
     /// Internal: write a key with an explicit deadline (0 = no expiry).
+    #[allow(clippy::await_holding_lock)]
     async fn kv_put_with_deadline(
         &self,
         collection: &str,
@@ -247,6 +248,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     }
 
     /// Internal: queue a lazy delete for an expired key.
+    #[allow(clippy::await_holding_lock)]
     async fn kv_lazy_delete(&self, rkey: Vec<u8>) -> NodeDbResult<()> {
         let mut buf = self.kv_write_buf.lock_or_recover();
         buf.overlay.insert(rkey.clone(), None);
@@ -267,6 +269,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     }
 
     /// KV DELETE: remove a key.
+    #[allow(clippy::await_holding_lock)]
     pub async fn kv_delete(&self, collection: &str, key: &str) -> NodeDbResult<bool> {
         let rkey = kv_key(collection, key.as_bytes());
 
@@ -310,6 +313,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     ///
     /// Flushes the write buffer before scanning so the KV store reflects all pending
     /// writes.
+    #[allow(clippy::await_holding_lock)]
     pub async fn kv_range_scan(
         &self,
         collection: &str,
@@ -522,6 +526,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     }
 
     /// Internal: flush write buffer to storage without touching CRDT.
+    #[allow(clippy::await_holding_lock)]
     async fn kv_flush_inner(&self) -> NodeDbResult<usize> {
         let mut buf = self.kv_write_buf.lock_or_recover();
         if buf.ops.is_empty() {
@@ -630,6 +635,39 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .collect();
         Ok(matched)
     }
+}
+
+/// Simple glob matching for shape subscriptions.
+fn glob_matches(pattern: &str, input: &str) -> bool {
+    let pat = pattern.as_bytes();
+    let inp = input.as_bytes();
+    let mut pi = 0;
+    let mut ii = 0;
+    let mut star_pi = usize::MAX;
+    let mut star_ii = 0;
+
+    while ii < inp.len() {
+        if pi < pat.len() && (pat[pi] == b'?' || pat[pi] == inp[ii]) {
+            pi += 1;
+            ii += 1;
+        } else if pi < pat.len() && pat[pi] == b'*' {
+            star_pi = pi;
+            star_ii = ii;
+            pi += 1;
+        } else if star_pi != usize::MAX {
+            pi = star_pi + 1;
+            star_ii += 1;
+            ii = star_ii;
+        } else {
+            return false;
+        }
+    }
+
+    while pi < pat.len() && pat[pi] == b'*' {
+        pi += 1;
+    }
+
+    pi == pat.len()
 }
 
 #[cfg(test)]
@@ -746,37 +784,4 @@ mod tests {
             "cache must not exceed capacity {CAP}, got {cache_len}"
         );
     }
-}
-
-/// Simple glob matching for shape subscriptions.
-fn glob_matches(pattern: &str, input: &str) -> bool {
-    let pat = pattern.as_bytes();
-    let inp = input.as_bytes();
-    let mut pi = 0;
-    let mut ii = 0;
-    let mut star_pi = usize::MAX;
-    let mut star_ii = 0;
-
-    while ii < inp.len() {
-        if pi < pat.len() && (pat[pi] == b'?' || pat[pi] == inp[ii]) {
-            pi += 1;
-            ii += 1;
-        } else if pi < pat.len() && pat[pi] == b'*' {
-            star_pi = pi;
-            star_ii = ii;
-            pi += 1;
-        } else if star_pi != usize::MAX {
-            pi = star_pi + 1;
-            star_ii += 1;
-            ii = star_ii;
-        } else {
-            return false;
-        }
-    }
-
-    while pi < pat.len() && pat[pi] == b'*' {
-        pi += 1;
-    }
-
-    pi == pat.len()
 }

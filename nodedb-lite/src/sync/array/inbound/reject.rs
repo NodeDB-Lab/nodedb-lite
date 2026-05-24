@@ -33,14 +33,14 @@ impl<S: StorageEngine> ArrayInbound<S> {
             "array op rejected by Origin"
         );
 
-        if msg.reason == ArrayRejectReason::RetentionFloor {
-            if let Err(e) = self.catchup.record_reject_retention_floor(&msg.array).await {
-                tracing::warn!(
-                    array = %msg.array,
-                    error = %e,
-                    "array_inbound: failed to persist catchup_needed flag"
-                );
-            }
+        if msg.reason == ArrayRejectReason::RetentionFloor
+            && let Err(e) = self.catchup.record_reject_retention_floor(&msg.array).await
+        {
+            tracing::warn!(
+                array = %msg.array,
+                error = %e,
+                "array_inbound: failed to persist catchup_needed flag"
+            );
         }
 
         Ok(InboundOutcome::RejectAcknowledged)

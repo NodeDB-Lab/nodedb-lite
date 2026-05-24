@@ -740,7 +740,7 @@ where
         let already_exists = txn.link_segment(&segment_name, &meta).await;
         match already_exists {
             Ok(()) => {}
-            Err(e) if matches!(e, pagedb::errors::PagedbError::AlreadyLinked) => {
+            Err(pagedb::errors::PagedbError::AlreadyLinked) => {
                 // Use replace_segment to atomically swap old → new.
                 txn.replace_segment(&segment_name, &meta)
                     .await
@@ -833,7 +833,7 @@ where
         let link_result = txn.link_segment(&segment_name, &meta).await;
         match link_result {
             Ok(()) => {}
-            Err(e) if matches!(e, pagedb::errors::PagedbError::AlreadyLinked) => {
+            Err(pagedb::errors::PagedbError::AlreadyLinked) => {
                 txn.replace_segment(&segment_name, &meta)
                     .await
                     .map_err(LiteError::from)?;

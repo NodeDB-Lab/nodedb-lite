@@ -100,7 +100,7 @@ where
         let link_result = txn.link_segment(&name, &meta).await;
         match link_result {
             Ok(()) => {}
-            Err(e) if matches!(e, pagedb::errors::PagedbError::AlreadyLinked) => {
+            Err(pagedb::errors::PagedbError::AlreadyLinked) => {
                 txn.replace_segment(&name, &meta)
                     .await
                     .map_err(LiteError::from)?;

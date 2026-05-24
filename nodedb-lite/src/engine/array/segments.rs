@@ -73,12 +73,12 @@ pub async fn load_segment<S: StorageEngine>(
     // handles data written via the legacy KV path (e.g. pre-migration data
     // or tests that write directly to KV).
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(ext) = storage.as_array_segment_ext() {
-        if let Some(bytes) = ext.open_array_segment(name, seg_id).await? {
-            return Ok(bytes.into_vec());
-        }
-        // Not in pagedb — fall through to KV lookup below.
+    if let Some(ext) = storage.as_array_segment_ext()
+        && let Some(bytes) = ext.open_array_segment(name, seg_id).await?
+    {
+        return Ok(bytes.into_vec());
     }
+    // Not in pagedb — fall through to KV lookup below.
 
     let key = segment_key(name, seg_id);
     storage

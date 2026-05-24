@@ -103,17 +103,6 @@ macro_rules! dispatch {
 }
 pub(crate) use dispatch;
 
-macro_rules! dispatch_mut {
-    ($self:ident, $inner:ident, $body:expr) => {
-        match &mut $self.inner {
-            crate::NodeDbLiteWasmInner::InMemory($inner) => $body,
-            #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
-            crate::NodeDbLiteWasmInner::Persistent($inner) => $body,
-        }
-    };
-}
-pub(crate) use dispatch_mut;
-
 // ─── Public JS type ───────────────────────────────────────────────────────────
 
 /// NodeDB-Lite instance for browser/WASM environments.

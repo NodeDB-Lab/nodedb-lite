@@ -124,29 +124,35 @@ impl<S: StorageEngine> SchemaRegistry<S> {
     /// Persists a Loro snapshot under the schema key so the registry
     /// survives restarts. Returns the freshly minted `schema_hlc`.
     pub async fn put_schema(&self, name: &str, schema: &ArraySchema) -> Result<Hlc, LiteError> {
-        let mut docs = self.docs.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let (schema_hlc, snapshot) = {
+            let mut docs = self.docs.lock().map_err(|_| LiteError::LockPoisoned)?;
 
-        let doc = if let Some(existing) = docs.get_mut(name) {
-            existing
-                .replace_schema(schema, &self.replica.hlc_gen())
-                .map_err(|e| LiteError::Storage {
-                    detail: format!("schema_registry put_schema '{name}': {e}"),
-                })?;
-            existing
-        } else {
-            let new_doc =
-                SchemaDoc::from_schema(self.replica.replica_id(), schema, &self.replica.hlc_gen())
+            let doc = if let Some(existing) = docs.get_mut(name) {
+                existing
+                    .replace_schema(schema, &self.replica.hlc_gen())
                     .map_err(|e| LiteError::Storage {
-                        detail: format!("schema_registry from_schema '{name}': {e}"),
+                        detail: format!("schema_registry put_schema '{name}': {e}"),
                     })?;
-            docs.insert(name.to_owned(), new_doc);
-            docs.get_mut(name).expect("just inserted")
-        };
+                existing
+            } else {
+                let new_doc = SchemaDoc::from_schema(
+                    self.replica.replica_id(),
+                    schema,
+                    &self.replica.hlc_gen(),
+                )
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("schema_registry from_schema '{name}': {e}"),
+                })?;
+                docs.insert(name.to_owned(), new_doc);
+                docs.get_mut(name).expect("just inserted")
+            };
 
-        let schema_hlc = doc.schema_hlc();
-        let snapshot = doc.export_snapshot().map_err(|e| LiteError::Storage {
-            detail: format!("schema_registry export '{name}': {e}"),
-        })?;
+            let schema_hlc = doc.schema_hlc();
+            let snapshot = doc.export_snapshot().map_err(|e| LiteError::Storage {
+                detail: format!("schema_registry export '{name}': {e}"),
+            })?;
+            (schema_hlc, snapshot)
+        }; // docs lock released here
 
         self.persist(name, schema_hlc, snapshot).await?;
         Ok(schema_hlc)
@@ -162,6 +168,7 @@ impl<S: StorageEngine> SchemaRegistry<S> {
     ///
     /// Creates the entry if absent. Persists the updated snapshot.
     /// Used by Phase E inbound to ingest schema sync messages.
+    #[allow(clippy::await_holding_lock)]
     pub async fn import_snapshot(
         &self,
         name: &str,

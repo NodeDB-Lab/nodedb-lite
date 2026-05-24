@@ -19,14 +19,12 @@
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 
+use crate::NodeDbLiteWasm;
+use crate::dispatch;
 use nodedb_array::query::slice::DimRange;
 use nodedb_array::schema::ArraySchema;
 use nodedb_array::tile::cell_payload::CellPayload;
 use nodedb_array::types::coord::value::CoordValue;
-use nodedb_client::NodeDb;
-
-use crate::NodeDbLiteWasm;
-use crate::dispatch;
 
 /// Decode msgpack bytes from a JS `Uint8Array` into `T`.
 fn decode_msgpack<T: for<'a> zerompk::FromMessagePack<'a>>(

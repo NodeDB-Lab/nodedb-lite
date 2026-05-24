@@ -199,18 +199,17 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
             // Write vector segment on native targets when segment ext is available.
             #[cfg(not(target_arch = "wasm32"))]
-            if let (Some((dim, vectors, surrogates)), Some(ext)) = (segment_data, seg_ext) {
-                if let Err(e) = ext
+            if let (Some((dim, vectors, surrogates)), Some(ext)) = (segment_data, seg_ext)
+                && let Err(e) = ext
                     .write_vector_segment(&name, dim, &vectors, &surrogates)
                     .await
-                {
-                    tracing::error!(
-                        collection = %name,
-                        error = %e,
-                        "HNSW vector segment write failed during eviction; \
-                         graph blob is persisted but vectors may be lost on cold restart"
-                    );
-                }
+            {
+                tracing::error!(
+                    collection = %name,
+                    error = %e,
+                    "HNSW vector segment write failed during eviction; \
+                     graph blob is persisted but vectors may be lost on cold restart"
+                );
             }
 
             {

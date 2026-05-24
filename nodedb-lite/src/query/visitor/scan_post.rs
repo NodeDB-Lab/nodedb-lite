@@ -241,17 +241,15 @@ fn row_to_json(columns: &[String], row: &[Value]) -> serde_json::Value {
         // document payload into a single "document" JSON-string column.  Inline
         // its fields into the filter context so that WHERE predicates on
         // user-defined fields (e.g. `tier = 'gold'`) can match them directly.
-        if col == "document" {
-            if let Value::String(json_str) = val {
-                if let Ok(serde_json::Value::Object(inner)) =
-                    serde_json::from_str::<serde_json::Value>(json_str)
-                {
-                    for (k, v) in inner {
-                        map.entry(k).or_insert(v);
-                    }
-                    continue;
-                }
+        if col == "document"
+            && let Value::String(json_str) = val
+            && let Ok(serde_json::Value::Object(inner)) =
+                serde_json::from_str::<serde_json::Value>(json_str)
+        {
+            for (k, v) in inner {
+                map.entry(k).or_insert(v);
             }
+            continue;
         }
         map.insert(col.clone(), value_to_json(val));
     }
@@ -291,17 +289,15 @@ fn row_to_typed_value(columns: &[String], row: &[Value]) -> Value {
         // For schemaless document rows the physical scan serialises the whole
         // document payload into a single "document" JSON-string column.  Inline
         // its fields so that QExpr predicates on user-defined fields work.
-        if col == "document" {
-            if let Value::String(json_str) = val {
-                if let Ok(serde_json::Value::Object(inner)) =
-                    serde_json::from_str::<serde_json::Value>(json_str)
-                {
-                    for (k, v) in inner {
-                        map.entry(k).or_insert_with(|| json_value_to_value(&v));
-                    }
-                    continue;
-                }
+        if col == "document"
+            && let Value::String(json_str) = val
+            && let Ok(serde_json::Value::Object(inner)) =
+                serde_json::from_str::<serde_json::Value>(json_str)
+        {
+            for (k, v) in inner {
+                map.entry(k).or_insert_with(|| json_value_to_value(&v));
             }
+            continue;
         }
         map.insert(col.clone(), val.clone());
     }

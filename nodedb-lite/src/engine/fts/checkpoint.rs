@@ -169,6 +169,7 @@ fn metadata_ops_for_index(
 /// mutex guard).  Returns `(kv_ops, segment_writes)` where `segment_writes`
 /// is a list of `(index_key, blob)` tuples that should be written via
 /// `FtsSegmentExt::write_fts_segment` if available.
+#[allow(clippy::type_complexity)]
 pub(crate) fn serialize_fts(
     indices: &HashMap<String, FtsIndex<MemoryBackend>>,
     id_to_surrogate: &HashMap<String, u32>,

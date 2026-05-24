@@ -167,10 +167,10 @@ pub async fn versioned_get_as_of<S: StorageEngine>(
         }
 
         // Apply valid-time filter if requested.
-        if let Some(vt) = valid_time_ms {
-            if vt < decoded.valid_from_ms || vt >= decoded.valid_until_ms {
-                return Ok(None);
-            }
+        if let Some(vt) = valid_time_ms
+            && (vt < decoded.valid_from_ms || vt >= decoded.valid_until_ms)
+        {
+            return Ok(None);
         }
 
         return Ok(Some(decoded));
