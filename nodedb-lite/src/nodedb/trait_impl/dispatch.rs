@@ -162,6 +162,28 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
         self.document_delete_impl(collection, id).await
     }
 
+    async fn document_get_as_of(
+        &self,
+        collection: &str,
+        id: &str,
+        as_of_ms: Option<i64>,
+        valid_time_ms: Option<i64>,
+    ) -> NodeDbResult<Option<Document>> {
+        self.document_get_as_of_impl(collection, id, as_of_ms, valid_time_ms)
+            .await
+    }
+
+    async fn document_put_with_valid_time(
+        &self,
+        collection: &str,
+        doc: Document,
+        valid_from_ms: Option<i64>,
+        valid_until_ms: Option<i64>,
+    ) -> NodeDbResult<()> {
+        self.document_put_with_valid_time_impl(collection, doc, valid_from_ms, valid_until_ms)
+            .await
+    }
+
     // ─── SQL and Text Search ─────────────────────────────────────────
 
     async fn execute_sql(&self, query: &str, params: &[Value]) -> NodeDbResult<QueryResult> {
