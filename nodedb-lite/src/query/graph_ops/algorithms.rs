@@ -65,11 +65,41 @@ fn pagerank(csr: &CsrIndex, params: &AlgoParams) -> Vec<Vec<Value>> {
     let max_iter = params.iterations(20);
     let tol = params.convergence_tolerance();
 
-    let mut rank = vec![1.0f64 / n as f64; n];
+    // Threshold below which a personalization vector sum is treated as zero → uniform fallback.
+    const UNIFORM_FALLBACK_THRESHOLD: f64 = 1e-12;
+
+    // Build the teleport (personalization) distribution.
+    // For standard PageRank (no personalization) this is uniform 1/n.
+    // For PPR this is normalized per the caller-supplied map; nodes absent from the
+    // map receive 0.0. If the map matches no node (or sums to ≈0) we fall back to uniform.
+    let teleport: Vec<f64> = match params.personalization_vector() {
+        None => vec![1.0f64 / n as f64; n],
+        Some(map) => {
+            let mut v: Vec<f64> = (0..n)
+                .map(|i| {
+                    let name = csr.node_name_raw(i as u32);
+                    map.get(name).copied().unwrap_or(0.0)
+                })
+                .collect();
+            let sum: f64 = v.iter().sum();
+            if sum < UNIFORM_FALLBACK_THRESHOLD {
+                v = vec![1.0f64 / n as f64; n];
+            } else {
+                for x in &mut v {
+                    *x /= sum;
+                }
+            }
+            v
+        }
+    };
+
+    // Initial rank distribution equals the teleport distribution.
+    let mut rank = teleport.clone();
     let out_degrees: Vec<usize> = (0..n).map(|i| csr.out_degree_raw(i as u32)).collect();
 
     for _ in 0..max_iter {
-        let mut new_rank = vec![(1.0 - d) / n as f64; n];
+        // Teleport term uses the personalization distribution (uniform when no PPR).
+        let mut new_rank: Vec<f64> = (0..n).map(|i| (1.0 - d) * teleport[i]).collect();
         for src in 0..n as u32 {
             let od = out_degrees[src as usize];
             if od == 0 {
@@ -710,6 +740,119 @@ mod tests {
         for row in &result.rows {
             if let Value::Integer(k) = row[1] {
                 assert!(k >= 1, "coreness should be >= 1");
+            }
+        }
+    }
+
+    #[test]
+    fn test_pagerank_personalized_concentrates_on_seed() {
+        // Triangle CSR: nodes a, b, c.
+        // Seed only node "a" with weight 1.0.
+        // After PPR, node a must have the highest rank.
+        let csr = make_triangle_csr();
+        let m = make_csr_map(csr);
+        let mut pv = std::collections::HashMap::new();
+        pv.insert("a".to_string(), 1.0f64);
+        let p = AlgoParams {
+            collection: "g".to_string(),
+            personalization_vector: Some(pv),
+            ..Default::default()
+        };
+        let result = run_algo(&m, GraphAlgorithm::PageRank, &p).unwrap();
+
+        // Extract (node_id, rank) pairs.
+        let ranks: std::collections::HashMap<String, f64> = result
+            .rows
+            .iter()
+            .filter_map(|r| match (&r[0], &r[1]) {
+                (Value::String(s), Value::Float(f)) => Some((s.clone(), *f)),
+                _ => None,
+            })
+            .collect();
+
+        let rank_a = ranks["a"];
+        let rank_b = ranks["b"];
+        let rank_c = ranks["c"];
+
+        assert!(
+            rank_a > rank_b && rank_a > rank_c,
+            "seeded node 'a' should have highest rank; got a={rank_a}, b={rank_b}, c={rank_c}"
+        );
+
+        // Ranks must still sum to ~1.0.
+        let total: f64 = ranks.values().sum();
+        assert!(
+            (total - 1.0).abs() < 0.01,
+            "PPR ranks should sum to 1.0; got {total}"
+        );
+    }
+
+    #[test]
+    fn test_pagerank_personalized_falls_back_to_uniform_when_zero() {
+        // Pass a personalization map whose keys match no nodes.
+        // Result should be identical to uniform-init (within tolerance).
+        let csr = make_triangle_csr();
+        let csr2 = make_triangle_csr();
+        let m_uniform = make_csr_map(csr);
+        let m_ppr = make_csr_map(csr2);
+
+        let p_uniform = default_params("g");
+
+        let mut pv = std::collections::HashMap::new();
+        pv.insert("nonexistent_node".to_string(), 1.0f64);
+        let p_ppr = AlgoParams {
+            collection: "g".to_string(),
+            personalization_vector: Some(pv),
+            ..Default::default()
+        };
+
+        let r_uniform = run_algo(&m_uniform, GraphAlgorithm::PageRank, &p_uniform).unwrap();
+        let r_ppr = run_algo(&m_ppr, GraphAlgorithm::PageRank, &p_ppr).unwrap();
+
+        // Both should produce equal rank vectors.
+        for (ru, rp) in r_uniform.rows.iter().zip(r_ppr.rows.iter()) {
+            if let (Value::Float(fu), Value::Float(fp)) = (&ru[1], &rp[1]) {
+                assert!(
+                    (fu - fp).abs() < 1e-10,
+                    "fallback PPR rank {fp} should equal uniform rank {fu}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_pagerank_unchanged_without_personalization() {
+        // Backwards-compat regression: running PageRank with default params (no
+        // personalization vector) must yield the same ranks as before this change.
+        let csr = make_triangle_csr();
+        let csr2 = make_triangle_csr();
+        let m1 = make_csr_map(csr);
+        let m2 = make_csr_map(csr2);
+
+        let p = default_params("g");
+        let r1 = run_algo(&m1, GraphAlgorithm::PageRank, &p).unwrap();
+        let r2 = run_algo(&m2, GraphAlgorithm::PageRank, &p).unwrap();
+
+        // Two identical CSRs with identical params must produce identical results.
+        let total: f64 = r1
+            .rows
+            .iter()
+            .filter_map(|r| {
+                if let Value::Float(f) = r[1] {
+                    Some(f)
+                } else {
+                    None
+                }
+            })
+            .sum();
+        assert!((total - 1.0).abs() < 0.01, "total={total}");
+
+        for (a, b) in r1.rows.iter().zip(r2.rows.iter()) {
+            if let (Value::Float(fa), Value::Float(fb)) = (&a[1], &b[1]) {
+                assert!(
+                    (fa - fb).abs() < 1e-15,
+                    "ranks must be deterministic: {fa} vs {fb}"
+                );
             }
         }
     }
