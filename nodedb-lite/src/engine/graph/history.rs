@@ -10,8 +10,10 @@
 //! History value layout:
 //!   `{edge_props_msgpack}{system_to_ms_8be}`
 //!
-//! `system_to_ms = i64::MAX` (written as u64::MAX big-endian) encodes
-//! "still current" — the row has not been deleted yet.
+//! `system_to_ms = SYSTEM_TO_CURRENT` (= `i64::MAX as u64`) encodes
+//! "still current" — the row has not been deleted yet.  Using `i64::MAX as
+//! u64` (rather than `u64::MAX`) keeps every timestamp representable as an
+//! `i64` while remaining distinguishable from any real deletion timestamp.
 //!
 //! The collection-level bitemporal flag is persisted in `Namespace::Meta`
 //! under key `graph_bitemporal:{collection}`.
@@ -27,6 +29,11 @@ const META_GRAPH_BITEMPORAL_PREFIX: &str = "graph_bitemporal:";
 
 /// Trailer size appended to every history value: 8-byte big-endian system_to_ms.
 const HISTORY_TRAILER_LEN: usize = 8;
+
+/// Sentinel value for `system_to_ms` that marks an edge as "still current"
+/// (not yet deleted).  Equal to `i64::MAX as u64` so it remains within the
+/// positive `i64` range while being larger than any realistic wall-clock ms.
+pub(crate) const SYSTEM_TO_CURRENT: u64 = i64::MAX as u64;
 
 /// Query whether a graph collection has bitemporal tracking enabled.
 pub async fn is_bitemporal<S: StorageEngine>(
@@ -94,11 +101,11 @@ pub async fn record_edge_delete<S: StorageEngine>(
         .scan_prefix(Namespace::GraphHistory, &prefix)
         .await?;
 
-    // Find the most recent entry with system_to == u64::MAX (still-current row).
+    // Find the most recent entry with system_to == SYSTEM_TO_CURRENT (still-current row).
     let mut ops: Vec<WriteOp> = Vec::new();
     for (key, value) in &entries {
         if let Some(current_system_to) = extract_system_to(value)
-            && current_system_to == u64::MAX
+            && current_system_to == SYSTEM_TO_CURRENT
         {
             // Replace system_to trailer with the deletion timestamp.
             let payload_end = value.len() - HISTORY_TRAILER_LEN;
@@ -134,7 +141,7 @@ pub async fn purge_edge_history_before<S: StorageEngine>(
     let mut to_delete: Vec<Vec<u8>> = Vec::new();
     for (key, value) in &entries {
         if let Some(system_to) = extract_system_to(value)
-            && system_to < u64::MAX
+            && system_to < SYSTEM_TO_CURRENT
             && (system_to as i64) < cutoff_ms
         {
             to_delete.push(key.clone());

@@ -69,10 +69,11 @@ impl<S: StorageEngine> VectorState<S> {
         storage: Arc<S>,
         search_ef: usize,
         indices: HashMap<String, HnswIndex>,
+        id_map: HashMap<String, (String, u32)>,
     ) -> Self {
         Self {
             hnsw_indices: Mutex::new(indices),
-            vector_id_map: Mutex::new(HashMap::new()),
+            vector_id_map: Mutex::new(id_map),
             search_ef,
             storage,
             codec_sidecars: Arc::new(Mutex::new(HashMap::new())),

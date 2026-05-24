@@ -66,6 +66,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         Self::open_inner(storage, peer_id, governor, true, kv_cache_capacity).await
     }
 
+    #[allow(clippy::await_holding_lock)]
     async fn open_inner(
         storage: S,
         peer_id: u64,
@@ -153,8 +154,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // ── Restore per-collection CSR indices ──
         let csr = Self::restore_csr_indices(&storage).await?;
 
-        // ── Restore HNSW indices ──
-        let hnsw_map = Self::restore_hnsw_indices(&storage).await?;
+        // ── Restore HNSW indices and id_map ──
+        let (hnsw_map, hnsw_id_map) = Self::restore_hnsw_indices(&storage).await?;
 
         // ── Restore spatial indices ──
         let spatial = Arc::new(Mutex::new(Self::restore_spatial_indices(&storage).await));
@@ -226,6 +227,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             Arc::clone(&storage),
             128,
             hnsw_map,
+            hnsw_id_map,
         ));
         let fts_state = Arc::new(FtsState::from_restored(fts_manager));
         let array_engine = crate::engine::array::ArrayEngineState::open(&storage)
@@ -354,7 +356,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             let fts = db.fts_state.manager.lock_or_recover();
             if fts.is_empty() {
                 drop(fts);
-                db.rebuild_text_indices();
+                db.rebuild_text_indices().await;
             }
         }
 
@@ -366,6 +368,18 @@ impl<S: StorageEngine> NodeDbLite<S> {
             if spatial.is_empty() {
                 drop(spatial);
                 db.rebuild_spatial_indices();
+            }
+        }
+
+        // Rebuild CSR graph indices when no checkpoint was written before the
+        // previous process exited. Pass 1 reads CRDT edge documents; Pass 2
+        // scans the durable Namespace::Graph KV edge store; Pass 3 reads
+        // Namespace::GraphHistory for bitemporal collections.
+        {
+            let csr = db.csr.lock_or_recover();
+            if csr.is_empty() {
+                drop(csr);
+                db.rebuild_graph_indices().await;
             }
         }
 
@@ -453,15 +467,23 @@ impl<S: StorageEngine> NodeDbLite<S> {
         Ok(csr_map)
     }
 
-    /// Restore HNSW indices from storage.
-    async fn restore_hnsw_indices(storage: &Arc<S>) -> NodeDbResult<HashMap<String, HnswIndex>> {
+    /// Restore HNSW indices and the vector id_map from storage.
+    ///
+    /// Returns `(indices, id_map)`. The id_map maps `"{index_key}:{internal_id}"`
+    /// to `(doc_id, internal_id)` and is loaded from the blob written by `flush`.
+    /// When no id_map blob exists (first open or pre-fix databases), the returned
+    /// map is empty and vector search will fall back to HNSW integer IDs until the
+    /// next flush.
+    async fn restore_hnsw_indices(
+        storage: &Arc<S>,
+    ) -> NodeDbResult<(HashMap<String, HnswIndex>, HashMap<String, (String, u32)>)> {
         let mut hnsw_indices = HashMap::new();
         let Some(collections_bytes) = storage.get(Namespace::Meta, META_HNSW_COLLECTIONS).await?
         else {
-            return Ok(hnsw_indices);
+            return Ok((hnsw_indices, HashMap::new()));
         };
         let Ok(names) = zerompk::from_msgpack::<Vec<String>>(&collections_bytes) else {
-            return Ok(hnsw_indices);
+            return Ok((hnsw_indices, HashMap::new()));
         };
 
         // On native targets, check if vector segment operations are available.
@@ -525,7 +547,43 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 }
             }
         }
-        Ok(hnsw_indices)
+
+        // ── Restore vector_id_map ──
+        // The blob is written by `flush` and contains the full flat map.
+        // Without this, vector_search returns HNSW integer strings after restart.
+        let id_map = match storage
+            .get(Namespace::Vector, b"hnsw_id_map")
+            .await
+            .unwrap_or(None)
+        {
+            Some(envelope) => match crate::storage::checksum::unwrap(&envelope) {
+                Some(bytes) => match zerompk::from_msgpack::<Vec<(String, String, u32)>>(&bytes) {
+                    Ok(entries) => entries
+                        .into_iter()
+                        .map(|(k, doc_id, iid)| (k, (doc_id, iid)))
+                        .collect(),
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "vector_id_map deserialization failed — \
+                             vector search will fall back to HNSW integer IDs until next flush"
+                        );
+                        HashMap::new()
+                    }
+                },
+                None => {
+                    tracing::error!(
+                        "vector_id_map CRC32C mismatch — discarding. \
+                         Vector search will fall back to HNSW integer IDs until next flush."
+                    );
+                    let _ = storage.delete(Namespace::Vector, b"hnsw_id_map").await;
+                    HashMap::new()
+                }
+            },
+            None => HashMap::new(),
+        };
+
+        Ok((hnsw_indices, id_map))
     }
 
     /// Restore spatial indices from storage.

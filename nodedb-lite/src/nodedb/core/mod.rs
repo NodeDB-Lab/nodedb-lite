@@ -2,6 +2,7 @@
 mod flush;
 mod open;
 mod ops;
+mod rebuild;
 mod types;
 
 pub use types::NodeDbLite;

@@ -124,6 +124,38 @@ impl<S: StorageEngine> NodeDbLite<S> {
             segment_data
         };
 
+        // ── Persist HNSW vector_id_map ──
+        // The id_map is a flat HashMap<composite_key, (doc_id, internal_id)>
+        // serialized as one MessagePack blob. It must be written before any restart
+        // so that vector_search can return real doc_ids (not HNSW integer strings).
+        // Vector search with an empty id_map after restart is the bug this fixes.
+        // Vectors are flush-only (no per-insert durability path); the id_map
+        // follows the same durability contract — flush required.
+        {
+            let id_map = self.vector_state.vector_id_map.lock_or_recover();
+            // Serialize as Vec<(composite_key, doc_id, internal_id)> for stable msgpack encoding.
+            let entries: Vec<(&str, &str, u32)> = id_map
+                .iter()
+                .map(|(k, (doc_id, iid))| (k.as_str(), doc_id.as_str(), *iid))
+                .collect();
+            match zerompk::to_msgpack_vec(&entries) {
+                Ok(bytes) => {
+                    ops.push(WriteOp::Put {
+                        ns: Namespace::Vector,
+                        key: b"hnsw_id_map".to_vec(),
+                        value: crate::storage::checksum::wrap(&bytes),
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "vector_id_map serialization failed; \
+                         vector search after restart will fall back to HNSW integer IDs"
+                    );
+                }
+            }
+        }
+
         // ── Persist HNSW indices ──
         // When the pagedb segment extension is available (native PagedbStorage):
         //   - graph topology blob → B+ tree (graph_checkpoint_to_bytes; empty vector slots)
@@ -132,7 +164,11 @@ impl<S: StorageEngine> NodeDbLite<S> {
         //   - full checkpoint blob → B+ tree (checkpoint_to_bytes)
         #[cfg(not(target_arch = "wasm32"))]
         let seg_ext = self.storage.as_vector_segment_ext();
-        #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+        #[cfg_attr(
+            target_arch = "wasm32",
+            allow(unused_variables, clippy::type_complexity)
+        )]
+        #[allow(clippy::type_complexity)]
         let hnsw_segment_data: Vec<(String, usize, Vec<Vec<f32>>, Vec<u64>)> = {
             let indices = self.vector_state.hnsw_indices.lock_or_recover();
             let names: Vec<String> = indices.keys().cloned().collect();
