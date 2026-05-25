@@ -84,6 +84,20 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
 
     /// Execute a SQL query and return results.
     pub async fn execute_sql(&self, sql: &str) -> Result<QueryResult, LiteError> {
+        self.execute_sql_with_params(sql, &[]).await
+    }
+
+    /// Execute a SQL query with bound `$N` parameters and return results.
+    ///
+    /// Each `Value` in `params` is bound to the corresponding `$1`, `$2`, …
+    /// placeholder in `sql` at the AST level before planning. Supported
+    /// `Value` variants: `Null`, `Bool`, `Integer`, `Float`, `String`, `Uuid`.
+    /// Other variants are treated as `Null`.
+    pub async fn execute_sql_with_params(
+        &self,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<QueryResult, LiteError> {
         if let Some(result) = self.try_handle_ddl(sql).await {
             return result;
         }
@@ -94,8 +108,14 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             Arc::clone(&self.columnar),
         );
 
-        let plans = nodedb_sql::plan_sql(sql, &catalog)
-            .map_err(|e| LiteError::Query(format!("SQL plan: {e}")))?;
+        let sql_params: Vec<nodedb_sql::ParamValue> = params.iter().map(value_to_param).collect();
+
+        let plans = if sql_params.is_empty() {
+            nodedb_sql::plan_sql(sql, &catalog)
+        } else {
+            nodedb_sql::plan_sql_with_params(sql, &sql_params, &catalog)
+        }
+        .map_err(|e| LiteError::Query(format!("SQL plan: {e}")))?;
 
         if plans.is_empty() {
             return Ok(QueryResult::empty());
@@ -413,6 +433,20 @@ pub(super) fn parse_pk_value(
             .unwrap_or_else(|_| Value::String(key_str.to_string())),
         ColumnType::Uuid => Value::Uuid(key_str.to_string()),
         _ => Value::String(key_str.to_string()),
+    }
+}
+
+/// Convert a `nodedb_types::Value` to the `nodedb_sql::ParamValue` type used
+/// for AST-level parameter binding in `plan_sql_with_params`.
+fn value_to_param(v: &Value) -> nodedb_sql::ParamValue {
+    match v {
+        Value::Null => nodedb_sql::ParamValue::Null,
+        Value::Bool(b) => nodedb_sql::ParamValue::Bool(*b),
+        Value::Integer(n) => nodedb_sql::ParamValue::Int64(*n),
+        Value::Float(f) => nodedb_sql::ParamValue::Float64(*f),
+        Value::String(s) => nodedb_sql::ParamValue::Text(s.clone()),
+        Value::Uuid(s) => nodedb_sql::ParamValue::Text(s.clone()),
+        _ => nodedb_sql::ParamValue::Null,
     }
 }
 

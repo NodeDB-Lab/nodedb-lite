@@ -14,16 +14,17 @@ use crate::storage::engine::StorageEngine;
 impl<S: StorageEngine> NodeDbLite<S> {
     /// Execute a SQL statement against the embedded query engine.
     ///
-    /// `params` is accepted for API parity with Origin's prepared-statement
-    /// path but is not yet plumbed through the Lite query engine — values must
-    /// currently be embedded literally in `query`.
+    /// `params` binds `$1`, `$2`, … placeholders in `query` at the AST level
+    /// before planning. Supported `Value` variants: `Null`, `Bool`, `Integer`,
+    /// `Float`, `String`, `Uuid`. Pass an empty slice when no parameters are
+    /// needed.
     pub(super) async fn execute_sql_impl(
         &self,
         query: &str,
-        _params: &[Value],
+        params: &[Value],
     ) -> NodeDbResult<QueryResult> {
         self.query_engine
-            .execute_sql(query)
+            .execute_sql_with_params(query, params)
             .await
             .map_err(NodeDbError::storage)
     }

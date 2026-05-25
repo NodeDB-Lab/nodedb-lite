@@ -340,3 +340,149 @@ async fn graph_match_rejected_at_parse() {
         .await;
     assert!(result.is_err(), "MATCH syntax must be rejected on Lite");
 }
+
+// ── Parametrized queries ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn params_string_equality_where() {
+    let db = open_db().await;
+    // Seed the collection so the catalog knows it exists, then insert test rows.
+    seed(&db, "params_coll", "_seed").await;
+    db.execute_sql(
+        "INSERT INTO params_coll (id, kind, name) VALUES ('p1', 'doc', 'alpha')",
+        &[],
+    )
+    .await
+    .expect("insert p1");
+    db.execute_sql(
+        "INSERT INTO params_coll (id, kind, name) VALUES ('p2', 'note', 'beta')",
+        &[],
+    )
+    .await
+    .expect("insert p2");
+
+    // Query with a $1 string parameter — should return only 'p1'.
+    let r = db
+        .execute_sql(
+            "SELECT id FROM params_coll WHERE kind = $1",
+            &[nodedb_types::value::Value::String("doc".into())],
+        )
+        .await
+        .expect("parametrized SELECT");
+
+    let ids: Vec<String> = r
+        .rows
+        .iter()
+        .filter_map(|row| row.first())
+        .filter_map(|v| match v {
+            nodedb_types::value::Value::String(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        ids.contains(&"p1".to_string()),
+        "p1 must be in results; got {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"p2".to_string()),
+        "p2 must not be in results; got {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn params_integer_equality_where() {
+    let db = open_db().await;
+    seed(&db, "int_params_coll", "_seed").await;
+    db.execute_sql(
+        "INSERT INTO int_params_coll (id, score) VALUES ('a', 10)",
+        &[],
+    )
+    .await
+    .expect("insert a");
+    db.execute_sql(
+        "INSERT INTO int_params_coll (id, score) VALUES ('b', 20)",
+        &[],
+    )
+    .await
+    .expect("insert b");
+
+    let r = db
+        .execute_sql(
+            "SELECT id FROM int_params_coll WHERE score = $1",
+            &[nodedb_types::value::Value::Integer(20)],
+        )
+        .await
+        .expect("parametrized integer SELECT");
+
+    let ids: Vec<String> = r
+        .rows
+        .iter()
+        .filter_map(|row| row.first())
+        .filter_map(|v| match v {
+            nodedb_types::value::Value::String(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        ids.contains(&"b".to_string()),
+        "b must be in results; got {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"a".to_string()),
+        "a must not be in results; got {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn params_multiple_substitution() {
+    let db = open_db().await;
+    seed(&db, "multi_params_coll", "_seed").await;
+    db.execute_sql(
+        "INSERT INTO multi_params_coll (id, kind, score) VALUES ('x', 'foo', 5)",
+        &[],
+    )
+    .await
+    .expect("insert x");
+    db.execute_sql(
+        "INSERT INTO multi_params_coll (id, kind, score) VALUES ('y', 'foo', 99)",
+        &[],
+    )
+    .await
+    .expect("insert y");
+    db.execute_sql(
+        "INSERT INTO multi_params_coll (id, kind, score) VALUES ('z', 'bar', 5)",
+        &[],
+    )
+    .await
+    .expect("insert z");
+
+    // Both kind='foo' AND score=5 — should return only 'x'.
+    let r = db
+        .execute_sql(
+            "SELECT id FROM multi_params_coll WHERE kind = $1 AND score = $2",
+            &[
+                nodedb_types::value::Value::String("foo".into()),
+                nodedb_types::value::Value::Integer(5),
+            ],
+        )
+        .await
+        .expect("multi-param SELECT");
+
+    let ids: Vec<String> = r
+        .rows
+        .iter()
+        .filter_map(|row| row.first())
+        .filter_map(|v| match v {
+            nodedb_types::value::Value::String(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        ids,
+        vec!["x".to_string()],
+        "only x matches kind=foo AND score=5; got {ids:?}"
+    );
+}
