@@ -27,6 +27,14 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             .await
             .map_err(|e| LiteError::Query(e.to_string()))?;
 
+        // Register the collection name in the CRDT engine so that the SQL
+        // catalog can resolve it immediately for SELECT queries, even before
+        // any document has been inserted (Loro's root map has no entry yet).
+        self.crdt
+            .lock()
+            .map_err(|_| LiteError::LockPoisoned)?
+            .register_collection(&name);
+
         Ok(QueryResult {
             columns: vec!["result".into()],
             rows: vec![vec![Value::String(format!(

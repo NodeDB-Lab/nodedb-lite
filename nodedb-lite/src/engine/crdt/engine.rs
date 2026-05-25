@@ -49,6 +49,11 @@ pub struct CrdtEngine {
     /// Conflict resolution policies per collection.
     /// Evaluated on sync when Origin rejects a delta.
     pub(super) policies: nodedb_crdt::PolicyRegistry,
+    /// Explicitly registered collection names for collections that exist in the
+    /// catalog (e.g. bitemporal document collections) but have no Loro root-map
+    /// entry yet (i.e. no document has been inserted).  Merged into
+    /// `collection_names()` so that SQL SELECT works before the first insert.
+    registered_collections: std::collections::HashSet<String>,
     /// Version vector captured before the first deferred mutation.
     /// Used by `flush_deltas()` to export a single delta covering all
     /// deferred operations.
@@ -90,6 +95,7 @@ impl CrdtEngine {
             pending_deltas: Vec::new(),
             acked_versions: HashMap::new(),
             policies: nodedb_crdt::PolicyRegistry::new(),
+            registered_collections: std::collections::HashSet::new(),
             deferred_version: None,
             deferred_count: 0,
         })
@@ -110,6 +116,7 @@ impl CrdtEngine {
             pending_deltas: Vec::new(),
             acked_versions: HashMap::new(),
             policies: nodedb_crdt::PolicyRegistry::new(),
+            registered_collections: std::collections::HashSet::new(),
             deferred_version: None,
             deferred_count: 0,
         })
@@ -374,9 +381,29 @@ impl CrdtEngine {
         Ok(count)
     }
 
-    /// List all collection names (top-level Loro map keys).
+    /// Register a collection name so it appears in `collection_names()` even
+    /// before any document has been inserted into it.
+    ///
+    /// This is needed for bitemporal document collections created via DDL: the
+    /// bitemporal flag is persisted to `Namespace::Meta`, but the Loro root map
+    /// has no entry for the collection until the first `upsert`.  Calling this
+    /// method ensures the SQL catalog can resolve the collection name immediately
+    /// after `CREATE COLLECTION … WITH (bitemporal=true)`.
+    pub fn register_collection(&mut self, name: &str) {
+        self.registered_collections.insert(name.to_owned());
+    }
+
+    /// List all known collection names.
+    ///
+    /// Merges names that appear as top-level keys in the Loro document (i.e.
+    /// collections that have at least one row) with names that were explicitly
+    /// registered via `register_collection` (i.e. collections created via DDL
+    /// but not yet populated).
     pub fn collection_names(&self) -> Vec<String> {
-        self.state.collection_names()
+        let mut names: std::collections::HashSet<String> =
+            self.state.collection_names().into_iter().collect();
+        names.extend(self.registered_collections.iter().cloned());
+        names.into_iter().collect()
     }
 
     /// Set conflict resolution policy for a collection.

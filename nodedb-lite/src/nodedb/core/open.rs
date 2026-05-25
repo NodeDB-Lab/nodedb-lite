@@ -103,6 +103,28 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 .map_err(|e| NodeDbError::storage(format!("CRDT init failed: {e}")))?,
         };
 
+        // Rebuild the CRDT's registered-collection set from persisted bitemporal
+        // flags so that SELECT queries on bitemporal collections work immediately
+        // after open, even for collections with no inserted documents yet.
+        {
+            const BITEMPORAL_PREFIX: &[u8] = b"document_bitemporal:";
+            let bitemporal_entries = storage
+                .scan_prefix(Namespace::Meta, BITEMPORAL_PREFIX)
+                .await
+                .unwrap_or_default();
+            for (key, value) in &bitemporal_entries {
+                // Only register collections where the flag byte is 0x01 (enabled).
+                if value.first().copied() != Some(1) {
+                    continue;
+                }
+                if let Ok(key_str) = std::str::from_utf8(key)
+                    && let Some(name) = key_str.strip_prefix("document_bitemporal:")
+                {
+                    crdt.register_collection(name);
+                }
+            }
+        }
+
         // Restore pending deltas — prefer incremental entries over legacy bulk blob.
         let incremental_entries = storage.scan_prefix(Namespace::Crdt, b"delta:").await?;
 

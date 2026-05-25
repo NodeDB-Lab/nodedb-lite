@@ -11,7 +11,9 @@ use nodedb_types::Namespace;
 use crate::error::LiteError;
 use crate::storage::engine::StorageEngine;
 
-use super::key::{doc_prefix, versioned_doc_key};
+use std::collections::HashMap;
+
+use super::key::{coll_prefix, doc_prefix, versioned_doc_key};
 use super::value::{DecodedVersion, VersionTag, decode_value, encode_value};
 
 /// Meta key prefix for the document bitemporal flag.
@@ -177,6 +179,67 @@ pub async fn versioned_get_as_of<S: StorageEngine>(
     }
 
     Ok(None)
+}
+
+/// Scan all live documents in `collection` from the history table.
+///
+/// Scans every history row under the collection prefix, groups them by
+/// `doc_id`, and retains only documents whose most-recent row (highest
+/// `system_from_ms`) is tagged `Live`.  Tombstoned and GDPR-erased documents
+/// are excluded.
+///
+/// Returns `(doc_id, body_bytes)` pairs where `body_bytes` is the raw
+/// MessagePack body of the current live version (empty `Vec` if the live
+/// entry has an empty body).
+///
+/// This is the authoritative source for bitemporal collection contents because
+/// the CRDT Loro snapshot may lag storage (it is only saved on explicit flush).
+pub async fn scan_live_documents<S: StorageEngine>(
+    storage: &S,
+    collection: &str,
+) -> Result<Vec<(String, Vec<u8>)>, LiteError> {
+    let prefix = coll_prefix(collection);
+    let entries = storage
+        .scan_prefix(Namespace::DocumentHistory, &prefix)
+        .await?;
+
+    // Group rows by doc_id, keeping only the latest (highest system_from_ms).
+    // Key layout: `{coll}:{doc_id}\x00{system_from_ms:020}` — rows for the
+    // same doc_id are adjacent and sorted ascending by key, so the last row
+    // per doc_id is the current version.
+    let mut latest: HashMap<String, (VersionTag, Vec<u8>)> = HashMap::new();
+
+    for (key, value) in &entries {
+        // Extract doc_id from the key by splitting at the NUL separator.
+        let after_prefix = match key.get(prefix.len()..) {
+            Some(s) => s,
+            None => continue,
+        };
+        let nul = match after_prefix.iter().position(|&b| b == 0) {
+            Some(p) => p,
+            None => continue,
+        };
+        let doc_id = match std::str::from_utf8(&after_prefix[..nul]) {
+            Ok(s) => s.to_owned(),
+            Err(_) => continue,
+        };
+
+        let decoded = match decode_value(value) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        // Later keys overwrite earlier ones (ascending sort = ascending
+        // system_from_ms), so the final entry per doc_id is the current
+        // version.
+        latest.insert(doc_id, (decoded.tag, decoded.body));
+    }
+
+    Ok(latest
+        .into_iter()
+        .filter(|(_, (tag, _))| *tag == VersionTag::Live)
+        .map(|(id, (_, body))| (id, body))
+        .collect())
 }
 
 #[cfg(test)]

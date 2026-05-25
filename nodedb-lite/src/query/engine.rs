@@ -152,6 +152,52 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
     ) -> Result<QueryResult, LiteError> {
         match engine {
             EngineType::DocumentSchemaless => {
+                // For bitemporal collections the Loro snapshot may lag storage
+                // (it is only saved on explicit flush).  Scan DocumentHistory
+                // as the authoritative source for the current set of live IDs.
+                let is_bt = crate::engine::document::history::ops::is_bitemporal(
+                    &*self.storage,
+                    collection,
+                )
+                .await
+                .unwrap_or(false);
+
+                if is_bt {
+                    let live_docs = crate::engine::document::history::ops::scan_live_documents(
+                        &*self.storage,
+                        collection,
+                    )
+                    .await
+                    .map_err(|e| LiteError::Query(e.to_string()))?;
+                    let mut rows = Vec::with_capacity(live_docs.len());
+                    for (id, body) in &live_docs {
+                        // Decode the msgpack body to a JSON string for the
+                        // document column so post-scan filters can match fields.
+                        let doc_str = if body.is_empty() {
+                            "{}".to_owned()
+                        } else {
+                            match nodedb_types::json_msgpack::value_from_msgpack(body) {
+                                Ok(nodedb_types::value::Value::Object(fields)) => {
+                                    let json_map: serde_json::Map<String, serde_json::Value> =
+                                        fields
+                                            .into_iter()
+                                            .map(|(k, v)| (k, value_to_serde_json(v)))
+                                            .collect();
+                                    sonic_rs::to_string(&serde_json::Value::Object(json_map))
+                                        .unwrap_or_else(|_| "{}".to_owned())
+                                }
+                                _ => "{}".to_owned(),
+                            }
+                        };
+                        rows.push(vec![Value::String(id.clone()), Value::String(doc_str)]);
+                    }
+                    return Ok(QueryResult {
+                        columns: vec!["id".into(), "document".into()],
+                        rows,
+                        rows_affected: 0,
+                    });
+                }
+
                 let crdt = self.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
                 let ids = crdt.list_ids(collection);
                 let mut rows = Vec::with_capacity(ids.len());
@@ -447,6 +493,27 @@ fn value_to_param(v: &Value) -> nodedb_sql::ParamValue {
         Value::String(s) => nodedb_sql::ParamValue::Text(s.clone()),
         Value::Uuid(s) => nodedb_sql::ParamValue::Text(s.clone()),
         _ => nodedb_sql::ParamValue::Null,
+    }
+}
+
+fn value_to_serde_json(v: nodedb_types::value::Value) -> serde_json::Value {
+    match v {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(b),
+        Value::Integer(n) => serde_json::json!(n),
+        Value::Float(f) => serde_json::json!(f),
+        Value::String(s) => serde_json::Value::String(s),
+        Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(value_to_serde_json).collect())
+        }
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, val) in map {
+                out.insert(k, value_to_serde_json(val));
+            }
+            serde_json::Value::Object(out)
+        }
+        _ => serde_json::Value::Null,
     }
 }
 
