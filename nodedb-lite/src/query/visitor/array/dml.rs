@@ -9,11 +9,11 @@ use nodedb_physical::PhysicalTaskVisitor;
 use nodedb_physical::physical_plan::ArrayOp;
 use nodedb_sql::types_array::{ArrayCoordLiteral, ArrayInsertRow};
 
-use crate::engine::array::ops::util::time::now_ms;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
 use crate::query::visitor::adapter::LiteFut;
+use crate::runtime::now_millis_i64;
 use crate::storage::engine::StorageEngine;
 
 use super::coerce::{coerce_attrs, coerce_coords};
@@ -38,7 +38,7 @@ pub(crate) fn lower_insert_array<'a, S: StorageEngine + 'a>(
     rows: &[ArrayInsertRow],
 ) -> Result<LiteFut<'a>, LiteError> {
     let schema = load_schema(engine, name)?;
-    let now = now_ms();
+    let now = now_millis_i64();
 
     // `PutCellWire` in adapter/array.rs decodes a positional tuple of
     // (coord, attrs, surrogate, system_from_ms, valid_from_ms, valid_until_ms).

@@ -18,8 +18,8 @@ use nodedb_types::value::Value;
 
 use crate::engine::array::engine::ArrayEngineState;
 use crate::engine::array::ops::util::cell::cell_value_to_value;
-use crate::engine::array::ops::util::time::now_ms;
 use crate::error::LiteError;
+use crate::runtime::now_millis_i64;
 use crate::storage::engine::StorageEngine;
 
 /// Execute `ArrayOp::Project` for the Lite engine.
@@ -33,7 +33,7 @@ pub async fn project<S: StorageEngine>(
     name: &str,
     attr_indices: &[u32],
 ) -> Result<QueryResult, LiteError> {
-    let now_ms = now_ms();
+    let now_ms = now_millis_i64();
 
     let (seg_ids, schema, schema_attr_count) = {
         let state = array_state.lock().await;

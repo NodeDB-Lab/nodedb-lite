@@ -20,9 +20,9 @@ use nodedb_physical::physical_plan::{
 };
 use nodedb_types::result::QueryResult;
 
-use crate::engine::array::ops::util::time::now_ms;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
+use crate::runtime::now_millis_i64;
 use crate::storage::engine::StorageEngine;
 
 use super::text_op::execute_text_op;
@@ -66,7 +66,7 @@ pub(crate) async fn execute_surrogate_scan<S: StorageEngine>(
         zerompk::from_msgpack(slice_bytes).map_err(|e| LiteError::Serialization {
             detail: format!("decode Slice predicate: {e}"),
         })?;
-    let system_as_of = now_ms();
+    let system_as_of = now_millis_i64();
     let mut state = array_state.lock().await;
     state
         .surrogate_bitmap_scan(storage, name, slice.dim_ranges, system_as_of)

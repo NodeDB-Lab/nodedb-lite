@@ -16,7 +16,6 @@ use nodedb_types::value::Value;
 
 use nodedb_graph::params::{AlgoParams, GraphAlgorithm};
 
-use crate::engine::array::ops::util::time::now_ms;
 use crate::engine::graph::history;
 use crate::engine::graph::index::{CsrIndex, Direction};
 use crate::engine::graph::traversal::DEFAULT_MAX_VISITED;
@@ -24,6 +23,7 @@ use crate::nodedb::LockExt;
 use crate::nodedb::NodeDbLite;
 use crate::nodedb::convert::{loro_value_to_document, value_to_loro};
 use crate::query::graph_ops::algorithms;
+use crate::runtime::now_millis_i64;
 use crate::storage::engine::StorageEngine;
 
 /// Returns the CRDT collection name for edges belonging to a graph collection.
@@ -183,7 +183,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .await
             .unwrap_or(false);
         if bitemporal {
-            let system_from_ms = now_ms();
+            let system_from_ms = now_millis_i64();
             let props_value = {
                 let mut m = std::collections::HashMap::new();
                 m.insert("src".to_string(), Value::String(from.as_str().to_string()));
@@ -240,7 +240,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .await
             .unwrap_or(false);
         if bitemporal {
-            let system_to_ms = now_ms();
+            let system_to_ms = now_millis_i64();
             let _ = history::record_edge_delete(
                 self.storage.as_ref(),
                 collection,

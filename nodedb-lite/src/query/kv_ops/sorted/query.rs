@@ -15,17 +15,13 @@ use crate::storage::engine::StorageEngine;
 use super::keys::{pk_entry_key, score_prefix, sort_bytes_to_f64};
 use super::window::purge_outside_window;
 
-fn now_ms() -> u64 {
-    crate::query::value_utils::now_ms_u64()
-}
-
 /// SortedIndexScore: return the score for a given primary key (ZSCORE).
 pub async fn kv_sorted_index_score<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     index_name: &str,
     primary_key: &[u8],
 ) -> Result<QueryResult, LiteError> {
-    purge_outside_window(engine, index_name, now_ms()).await?;
+    purge_outside_window(engine, index_name, crate::runtime::now_millis()).await?;
 
     let pk_key = pk_entry_key(index_name, primary_key);
     let stored = engine
@@ -67,7 +63,7 @@ pub async fn kv_sorted_index_rank<S: StorageEngine>(
     index_name: &str,
     primary_key: &[u8],
 ) -> Result<QueryResult, LiteError> {
-    purge_outside_window(engine, index_name, now_ms()).await?;
+    purge_outside_window(engine, index_name, crate::runtime::now_millis()).await?;
 
     let pk_key = pk_entry_key(index_name, primary_key);
     let stored = engine
@@ -141,7 +137,7 @@ pub async fn kv_sorted_index_top_k<S: StorageEngine>(
     index_name: &str,
     k: u32,
 ) -> Result<QueryResult, LiteError> {
-    purge_outside_window(engine, index_name, now_ms()).await?;
+    purge_outside_window(engine, index_name, crate::runtime::now_millis()).await?;
 
     let score_pfx = score_prefix(index_name);
     let all = engine
@@ -190,7 +186,7 @@ pub async fn kv_sorted_index_range<S: StorageEngine>(
     score_min: Option<&[u8]>,
     score_max: Option<&[u8]>,
 ) -> Result<QueryResult, LiteError> {
-    purge_outside_window(engine, index_name, now_ms()).await?;
+    purge_outside_window(engine, index_name, crate::runtime::now_millis()).await?;
 
     let score_pfx = score_prefix(index_name);
     let prefix_bytes = score_pfx.as_bytes();
@@ -273,7 +269,7 @@ pub async fn kv_sorted_index_count<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     index_name: &str,
 ) -> Result<QueryResult, LiteError> {
-    purge_outside_window(engine, index_name, now_ms()).await?;
+    purge_outside_window(engine, index_name, crate::runtime::now_millis()).await?;
 
     let score_pfx = score_prefix(index_name);
     let all = engine

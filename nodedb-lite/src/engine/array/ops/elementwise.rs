@@ -21,8 +21,8 @@ use nodedb_types::value::Value;
 
 use crate::engine::array::engine::ArrayEngineState;
 use crate::engine::array::ops::util::cell::cell_value_to_value;
-use crate::engine::array::ops::util::time::now_ms;
 use crate::error::LiteError;
+use crate::runtime::now_millis_i64;
 use crate::storage::engine::StorageEngine;
 
 fn map_binary_op(op: ArrayBinaryOp) -> BinaryOp {
@@ -112,7 +112,7 @@ pub async fn elementwise_op<S: StorageEngine>(
     right_name: &str,
     op: ArrayBinaryOp,
 ) -> Result<QueryResult, LiteError> {
-    let system_as_of = now_ms();
+    let system_as_of = now_millis_i64();
     let binary_op = map_binary_op(op);
 
     let schema = {

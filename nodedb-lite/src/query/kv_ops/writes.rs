@@ -9,7 +9,7 @@ use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::storage::engine::{StorageEngine, WriteOp};
 
-use super::reads::{decode_value, encode_value, is_expired, kv_key, now_ms, split_kv_key};
+use super::reads::{decode_value, encode_value, is_expired, kv_key, split_kv_key};
 
 // ─── Point writes ────────────────────────────────────────────────────────────
 
@@ -22,7 +22,7 @@ pub async fn kv_put<S: StorageEngine>(
     ttl_ms: u64,
 ) -> Result<QueryResult, LiteError> {
     let deadline = if ttl_ms > 0 {
-        now_ms().saturating_add(ttl_ms)
+        crate::runtime::now_millis().saturating_add(ttl_ms)
     } else {
         0
     };
@@ -167,7 +167,7 @@ pub async fn kv_insert_on_conflict_update<S: StorageEngine>(
     })?;
 
     let keep_deadline = if ttl_ms > 0 {
-        now_ms().saturating_add(ttl_ms)
+        crate::runtime::now_millis().saturating_add(ttl_ms)
     } else {
         old_deadline
     };
@@ -226,7 +226,7 @@ pub async fn kv_batch_put<S: StorageEngine>(
     ttl_ms: u64,
 ) -> Result<QueryResult, LiteError> {
     let deadline = if ttl_ms > 0 {
-        now_ms().saturating_add(ttl_ms)
+        crate::runtime::now_millis().saturating_add(ttl_ms)
     } else {
         0
     };
@@ -279,7 +279,7 @@ pub async fn kv_expire<S: StorageEngine>(
             let (_, user_bytes) = decode_value(&raw).ok_or_else(|| LiteError::Storage {
                 detail: "corrupt KV entry".into(),
             })?;
-            let deadline = now_ms().saturating_add(ttl_ms);
+            let deadline = crate::runtime::now_millis().saturating_add(ttl_ms);
             let encoded = encode_value(deadline, user_bytes);
             engine
                 .storage
@@ -438,7 +438,7 @@ pub async fn kv_incr<S: StorageEngine>(
         })?;
 
     let deadline = if ttl_ms > 0 {
-        now_ms().saturating_add(ttl_ms)
+        crate::runtime::now_millis().saturating_add(ttl_ms)
     } else {
         old_deadline
     };

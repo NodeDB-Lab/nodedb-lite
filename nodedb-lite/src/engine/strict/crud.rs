@@ -7,8 +7,8 @@ use nodedb_types::Namespace;
 use nodedb_types::columnar::SchemaOps;
 use nodedb_types::value::Value;
 
-use crate::engine::array::ops::util::time::now_ms;
 use crate::error::LiteError;
+use crate::runtime::now_millis_i64;
 use crate::storage::engine::{StorageEngine, WriteOp};
 
 use super::engine::{StrictEngine, strict_err_to_lite};
@@ -137,7 +137,7 @@ impl<S: StorageEngine> StrictEngine<S> {
         // For bitemporal collections, record the old version's supersession before
         // overwriting. The system_to of the old version is now().
         if state.schema.bitemporal {
-            let system_to_ms = now_ms();
+            let system_to_ms = now_millis_i64();
             self.record_history_supersession(
                 collection,
                 &key[collection.len() + 1..],
@@ -171,7 +171,7 @@ impl<S: StorageEngine> StrictEngine<S> {
 
         // For bitemporal collections, write the new version's birth history entry.
         if state.schema.bitemporal {
-            let new_system_from_ms = now_ms();
+            let new_system_from_ms = now_millis_i64();
             let final_key = state.storage_key(collection, &values);
             let hist_key = history_key(
                 collection,
@@ -225,7 +225,7 @@ impl<S: StorageEngine> StrictEngine<S> {
             None => return Ok(false),
             Some(old_tuple) => {
                 if state.schema.bitemporal {
-                    let system_to_ms = now_ms();
+                    let system_to_ms = now_millis_i64();
                     self.record_history_supersession(
                         collection,
                         &key[collection.len() + 1..],

@@ -12,8 +12,8 @@ use std::sync::Arc;
 use nodedb_types::result::QueryResult;
 
 use crate::engine::array::engine::ArrayEngineState;
-use crate::engine::array::ops::util::time::now_ms;
 use crate::error::LiteError;
+use crate::runtime::now_millis_i64;
 use crate::storage::engine::StorageEngine;
 
 /// Execute `ArrayOp::Compact` for the Lite engine.
@@ -41,7 +41,7 @@ pub async fn compact<S: StorageEngine>(
         }
     };
 
-    let now_ms = now_ms();
+    let now_ms = now_millis_i64();
 
     let rewritten = {
         let mut state = array_state.lock().await;

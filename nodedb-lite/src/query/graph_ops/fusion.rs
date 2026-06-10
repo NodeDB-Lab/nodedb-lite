@@ -112,6 +112,7 @@ pub async fn rag_fusion<S: StorageEngine>(
                 q,
                 vector_top_k,
                 &TextSearchParams::default(),
+                None,
             )
             .map_err(|e| LiteError::Query(e.to_string()))?;
             let ranked: Vec<RankedResult> = text_results

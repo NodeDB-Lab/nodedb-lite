@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Ientifier: Apache-2.0
 //! Ingest handler for the timeseries physical visitor.
 
 use std::collections::HashSet;
@@ -165,7 +165,7 @@ fn parse_ilp(payload: &[u8]) -> Result<Vec<ParsedSample>, LiteError> {
         let timestamp_ms = timestamp_str
             .and_then(|s| s.parse::<i64>().ok())
             .map(|ns| ns / 1_000_000)
-            .unwrap_or_else(current_time_ms);
+            .unwrap_or_else(crate::runtime::now_millis_i64);
 
         out.push((
             measurement,
@@ -244,7 +244,7 @@ fn decode_msgpack_sample(v: Value) -> Result<ParsedSample, LiteError> {
     let timestamp_ms = match map.get("timestamp_ms").or_else(|| map.get("ts")) {
         Some(Value::Integer(i)) => *i,
         Some(Value::Float(f)) => *f as i64,
-        _ => current_time_ms(),
+        _ => crate::runtime::now_millis_i64(),
     };
 
     let tags = match map.get("tags") {
@@ -292,15 +292,6 @@ fn parse_structured(payload: &[u8]) -> Result<Vec<ParsedSample>, LiteError> {
 
     // Fall back to object/array decode.
     parse_msgpack(payload)
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-fn current_time_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

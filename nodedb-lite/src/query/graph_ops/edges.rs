@@ -10,10 +10,10 @@ use nodedb_types::Namespace;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
-use crate::engine::array::ops::util::time::now_ms;
 use crate::engine::graph::history;
 use crate::engine::graph::index::CsrIndex;
 use crate::error::LiteError;
+use crate::runtime::now_millis_i64;
 use crate::storage::engine::{StorageEngine, WriteOp};
 
 /// Upsert edge properties into the Namespace::Graph storage table.
@@ -93,7 +93,7 @@ pub async fn edge_put<S: StorageEngine>(
             collection,
             &edge_key,
             &props_val,
-            now_ms(),
+            now_millis_i64(),
         )
         .await;
     }
@@ -115,7 +115,7 @@ pub async fn edge_put_batch<S: StorageEngine>(
         return Ok(QueryResult::empty());
     }
 
-    let ts = now_ms();
+    let ts = now_millis_i64();
     let mut write_ops: Vec<WriteOp> = Vec::with_capacity(edges.len());
     let mut bitemporal_edges: Vec<(String, String)> = Vec::new();
 
@@ -190,7 +190,8 @@ pub async fn edge_delete<S: StorageEngine>(
     {
         let edge_key = format!("{src_id}->{dst_id}:{label}");
         let _ =
-            history::record_edge_delete(storage.as_ref(), collection, &edge_key, now_ms()).await;
+            history::record_edge_delete(storage.as_ref(), collection, &edge_key, now_millis_i64())
+                .await;
     }
 
     Ok(QueryResult {
@@ -210,7 +211,7 @@ pub async fn edge_delete_batch<S: StorageEngine>(
         return Ok(QueryResult::empty());
     }
 
-    let ts = now_ms();
+    let ts = now_millis_i64();
     let mut write_ops: Vec<WriteOp> = Vec::with_capacity(edges.len());
 
     {

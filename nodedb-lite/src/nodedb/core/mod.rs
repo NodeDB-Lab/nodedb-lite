@@ -5,4 +5,4 @@ mod ops;
 mod rebuild;
 mod types;
 
-pub use types::NodeDbLite;
+pub use types::{NodeDbLite, SyncGate};

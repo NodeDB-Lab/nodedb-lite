@@ -1,4 +1,4 @@
-//! Collection DDL: create, drop, list collections with metadata.
+//! Collection DDL: create, rop, list collections with metadata.
 
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 
@@ -31,7 +31,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let meta = CollectionMeta {
             name: name.to_string(),
             collection_type: "document".to_string(),
-            created_at_ms: now_ms(),
+            created_at_ms: crate::runtime::now_millis(),
             fields: fields.to_vec(),
             config_json: None,
         };
@@ -65,7 +65,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let meta = CollectionMeta {
             name: name.to_string(),
             collection_type: "kv".to_string(),
-            created_at_ms: now_ms(),
+            created_at_ms: crate::runtime::now_millis(),
             fields,
             config_json: Some(config_json),
         };
@@ -132,11 +132,4 @@ impl<S: StorageEngine> NodeDbLite<S> {
         }
         Ok(result)
     }
-}
-
-pub(crate) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }

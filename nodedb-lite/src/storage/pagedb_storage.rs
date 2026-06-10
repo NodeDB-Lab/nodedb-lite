@@ -226,10 +226,7 @@ impl PagedbStorage<DefaultVfs> {
         match Db::open(vfs, kek, 4096, realm, lite_open_options()).await {
             Ok(db) => Ok(Self { db: Arc::new(db) }),
             Err(e) if is_corruption(&e) && path.exists() => {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
+                let timestamp = crate::runtime::now_secs();
                 let corrupt_path = path.with_extension(format!("corrupt.{timestamp}"));
 
                 tracing::error!(

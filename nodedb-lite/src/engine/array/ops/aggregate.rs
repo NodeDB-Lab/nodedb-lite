@@ -21,8 +21,8 @@ use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
 use crate::engine::array::engine::ArrayEngineState;
-use crate::engine::array::ops::util::time::now_ms;
 use crate::error::LiteError;
+use crate::runtime::now_millis_i64;
 use crate::storage::engine::StorageEngine;
 
 fn map_reducer(r: ArrayReducer) -> Reducer {
@@ -114,7 +114,7 @@ pub async fn aggregate<S: StorageEngine>(
     reducer: ArrayReducer,
     group_by_dim_idx: i32,
 ) -> Result<QueryResult, LiteError> {
-    let system_as_of = now_ms();
+    let system_as_of = now_millis_i64();
     let reducer_inner = map_reducer(reducer);
     let group_dim: Option<usize> = if group_by_dim_idx >= 0 {
         Some(group_by_dim_idx as usize)

@@ -8,7 +8,6 @@ use nodedb_types::value::Value;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::msgpack_helpers::{write_array_header, write_bin};
-use crate::query::value_utils::now_ms_u64;
 use crate::storage::engine::StorageEngine;
 
 // ─── Encoding helpers ────────────────────────────────────────────────────────
@@ -38,12 +37,8 @@ pub(super) fn decode_value(stored: &[u8]) -> Option<(u64, &[u8])> {
     Some((deadline, &stored[DEADLINE_PREFIX_LEN..]))
 }
 
-pub(super) fn now_ms() -> u64 {
-    now_ms_u64()
-}
-
 pub(super) fn is_expired(deadline_ms: u64) -> bool {
-    deadline_ms != 0 && now_ms() >= deadline_ms
+    deadline_ms != 0 && crate::runtime::now_millis() >= deadline_ms
 }
 
 pub(super) fn split_kv_key(composite: &[u8]) -> Option<(&str, &[u8])> {
@@ -122,7 +117,7 @@ pub async fn kv_get_ttl<S: StorageEngine>(
             None => -2,
             Some((0, _)) => -1,
             Some((deadline, _)) => {
-                let now = now_ms();
+                let now = crate::runtime::now_millis();
                 if now >= deadline {
                     -2 // expired
                 } else {

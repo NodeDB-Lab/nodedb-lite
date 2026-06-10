@@ -23,8 +23,8 @@ use nodedb_types::Namespace;
 use nodedb_types::columnar::{ColumnarProfile, ColumnarSchema};
 use nodedb_types::value::Value;
 
-use crate::engine::array::ops::util::time::now_ms;
 use crate::error::LiteError;
+use crate::runtime::now_millis_i64;
 use crate::storage::engine::{StorageEngine, WriteOp};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::sync::ColumnarOutbound;
@@ -629,7 +629,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
                 .write_segment(&schema, &columns, row_count, None)
                 .map_err(columnar_err_to_lite)?;
 
-            let system_time_from_ms = if s.bitemporal { now_ms() } else { 0 };
+            let system_time_from_ms = if s.bitemporal { now_millis_i64() } else { 0 };
             s.segments.push(SegmentMeta {
                 segment_id,
                 row_count: row_count as u64,
@@ -817,7 +817,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
                         if let Some(meta) = s.segments.iter_mut().find(|m| m.segment_id == *seg_id)
                         {
                             meta.row_count = 0;
-                            meta.fully_deleted_at_ms = Some(now_ms());
+                            meta.fully_deleted_at_ms = Some(now_millis_i64());
                         }
                     } else {
                         s.segments.retain(|m| m.segment_id != *seg_id);

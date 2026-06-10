@@ -11,9 +11,9 @@ use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
 use crate::engine::array::ops::util::cell::cell_value_to_value;
-use crate::engine::array::ops::util::time::now_ms;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
+use crate::runtime::now_millis_i64;
 use crate::storage::engine::StorageEngine;
 
 use super::{LitePhysicalFut, execute_surrogate_scan};
@@ -112,7 +112,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                     zerompk::from_msgpack(&coords_bytes).map_err(|e| LiteError::Serialization {
                         detail: format!("decode Delete coords: {e}"),
                     })?;
-                let now = now_ms();
+                let now = now_millis_i64();
                 let mut state = array_state.lock().await;
                 let mut rows_affected: u64 = 0;
                 for coord in coords {

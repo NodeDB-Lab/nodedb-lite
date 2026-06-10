@@ -62,7 +62,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         let meta = crate::nodedb::collection::ddl::CollectionMeta {
             name: name.clone(),
             collection_type: "kv".to_string(),
-            created_at_ms: crate::nodedb::collection::ddl::now_ms(),
+            created_at_ms: crate::runtime::now_millis(),
             fields: config
                 .schema
                 .columns

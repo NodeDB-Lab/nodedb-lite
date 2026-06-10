@@ -120,7 +120,7 @@ pub async fn handle_temporal_purge_array<S: StorageEngine>(
     array_id: &str,
     cutoff_system_ms: i64,
 ) -> Result<QueryResult, LiteError> {
-    let retain_ms = (crate::engine::array::ops::util::time::now_ms() - cutoff_system_ms).max(0);
+    let retain_ms = (crate::runtime::now_millis_i64() - cutoff_system_ms).max(0);
     let result = crate::engine::array::ops::compact::compact(
         &engine.array_state,
         &engine.storage,
@@ -137,10 +137,7 @@ pub async fn handle_enforce_timeseries_retention<S: StorageEngine>(
     _collection: &str,
     max_age_ms: i64,
 ) -> Result<QueryResult, LiteError> {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
+    let now_ms = crate::runtime::now_millis_i64();
     let mut ts = engine
         .timeseries
         .lock()
@@ -227,7 +224,7 @@ mod tests {
             .unwrap();
 
         // Insert a row. For bitemporal schemas, slot 0 = __system_from_ms.
-        let now = crate::engine::array::ops::util::time::now_ms();
+        let now = crate::runtime::now_millis_i64();
         let row = vec![
             Value::Integer(now),           // __system_from_ms
             Value::Integer(0),             // __valid_from_ms
@@ -405,7 +402,7 @@ mod tests {
             .await
             .unwrap();
 
-        let now = crate::engine::array::ops::util::time::now_ms();
+        let now = crate::runtime::now_millis_i64();
         let row = vec![
             Value::Integer(now),
             Value::Integer(0),

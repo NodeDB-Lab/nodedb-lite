@@ -2,6 +2,8 @@
 
 //! SQL execution and text-search helpers for `NodeDbLite`.
 
+use std::collections::HashSet;
+
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 use nodedb_types::result::{QueryResult, SearchResult};
 use nodedb_types::text_search::TextSearchParams;
@@ -42,6 +44,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         query: &str,
         top_k: usize,
         params: TextSearchParams,
+        allowed_ids: Option<&HashSet<String>>,
     ) -> NodeDbResult<Vec<SearchResult>> {
         run_text_search(
             &self.fts_state,
@@ -50,6 +53,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             query,
             top_k,
             &params,
+            allowed_ids,
         )
     }
 }

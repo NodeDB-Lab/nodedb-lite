@@ -58,7 +58,7 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                     mode: QueryMode::Or,
                 };
                 let mut results =
-                    run_text_search(&fts_state, &crdt, &collection, &query, top_k, &params)
+                    run_text_search(&fts_state, &crdt, &collection, &query, top_k, &params, None)
                         .map_err(|e| LiteError::Query(e.to_string()))?;
                 if let Some(filter) = metadata_filter {
                     results.retain(|r| {
@@ -191,6 +191,7 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                     &query_text,
                     top_k * 3,
                     &text_params,
+                    None,
                 )
                 .map_err(|e| LiteError::Query(e.to_string()))?;
                 let vector_results = run_vector_search(
@@ -306,6 +307,7 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                     &query_text,
                     top_k * 3,
                     &text_params,
+                    None,
                 )
                 .map_err(|e| LiteError::Query(e.to_string()))?;
 

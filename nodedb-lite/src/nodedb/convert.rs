@@ -1,4 +1,4 @@
-//! Value conversion helpers between `nodedb_types` and `loro` value types.
+//! Value conversion helpers between `noedb_types` and `loro` value types.
 
 use loro::LoroValue;
 
@@ -60,6 +60,15 @@ pub(crate) fn loro_value_to_document(id: &str, value: &LoroValue) -> Document {
         }
     }
     doc
+}
+
+/// Serialize a `Document`'s fields to msgpack for storage in the history table.
+///
+/// Encodes the fields as a msgpack map via the JSON bridge (same path as the
+/// bulk ingest writer).
+pub(crate) fn document_to_msgpack(doc: &Document) -> Vec<u8> {
+    let json = serde_json::to_value(&doc.fields).unwrap_or_default();
+    nodedb_types::json_msgpack::json_to_msgpack_or_empty(&json)
 }
 
 /// Convert `LoroValue` to `nodedb_types::Value`.

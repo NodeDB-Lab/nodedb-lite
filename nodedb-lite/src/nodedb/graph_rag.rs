@@ -67,6 +67,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 params.query,
                 params.vector_k,
                 params.filter,
+                None,
             )
             .await?;
 
@@ -211,6 +212,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 params.query_embedding,
                 params.vector_k,
                 params.filter,
+                None,
             )
             .await?;
 
@@ -221,6 +223,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 params.query_text,
                 params.text_k,
                 nodedb_types::TextSearchParams::default(),
+                None,
             )
             .await?;
 

@@ -72,10 +72,7 @@ pub async fn handle_list_continuous_aggregates<S: StorageEngine>(
 pub async fn handle_apply_continuous_agg_retention<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
 ) -> Result<QueryResult, LiteError> {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
+    let now_ms = crate::runtime::now_millis_i64();
     let mut ts = lock_ts(engine)?;
     let dropped = ts.continuous_agg_mgr.apply_retention(now_ms);
     Ok(QueryResult {
