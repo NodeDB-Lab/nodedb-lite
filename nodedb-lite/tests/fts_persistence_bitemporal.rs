@@ -40,7 +40,14 @@ async fn fts_returns_bitemporal_documents_after_reopen_without_explicit_flush() 
     let storage = PagedbStorageDefault::open(&path).await.unwrap();
     let db = NodeDbLite::open(storage, 1).await.unwrap();
     let results = db
-        .text_search("entries", "", "hello", 10, TextSearchParams::default())
+        .text_search(
+            "entries",
+            "",
+            "hello",
+            10,
+            TextSearchParams::default(),
+            None,
+        )
         .await
         .unwrap();
 
@@ -85,11 +92,25 @@ async fn fts_returns_only_live_versions_after_reopen() {
     let db = NodeDbLite::open(storage, 1).await.unwrap();
 
     let r_live = db
-        .text_search("entries", "", "present", 10, TextSearchParams::default())
+        .text_search(
+            "entries",
+            "",
+            "present",
+            10,
+            TextSearchParams::default(),
+            None,
+        )
         .await
         .unwrap();
     let r_ghost = db
-        .text_search("entries", "", "tombstoned", 10, TextSearchParams::default())
+        .text_search(
+            "entries",
+            "",
+            "tombstoned",
+            10,
+            TextSearchParams::default(),
+            None,
+        )
         .await
         .unwrap();
 
@@ -130,7 +151,7 @@ async fn fts_still_works_for_non_bitemporal_collections_after_reopen() {
     let storage = PagedbStorageDefault::open(&path).await.unwrap();
     let db = NodeDbLite::open(storage, 1).await.unwrap();
     let results = db
-        .text_search("plain", "", "plain", 10, TextSearchParams::default())
+        .text_search("plain", "", "plain", 10, TextSearchParams::default(), None)
         .await
         .unwrap();
 

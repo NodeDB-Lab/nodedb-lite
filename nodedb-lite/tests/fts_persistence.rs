@@ -60,6 +60,7 @@ async fn fts_index_persists_across_restart() {
                 "rustsearch",
                 DOC_COUNT,
                 TextSearchParams::default(),
+                None,
             )
             .await
             .expect("text_search before flush");
@@ -104,6 +105,7 @@ async fn fts_index_persists_across_restart() {
                 "rustsearch",
                 DOC_COUNT,
                 TextSearchParams::default(),
+                None,
             )
             .await
             .expect("text_search after restart");

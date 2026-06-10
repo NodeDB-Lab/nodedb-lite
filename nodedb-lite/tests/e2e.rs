@@ -164,7 +164,7 @@ async fn e2e_native_full_suite_passes() {
         .await
         .unwrap();
     let r = db
-        .vector_search("test", &[1.0, 0.0], 1, None)
+        .vector_search("test", &[1.0, 0.0], 1, None, None)
         .await
         .unwrap();
     assert_eq!(r.len(), 1);

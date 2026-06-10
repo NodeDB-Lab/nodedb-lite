@@ -41,7 +41,10 @@ async fn vector_batch_insert_and_search_correctness() {
     db.batch_vector_insert("vecs", &refs).unwrap();
 
     let query: Vec<f32> = (0..dim).map(|d| ((25 * dim + d) as f32) * 0.001).collect();
-    let results = db.vector_search("vecs", &query, 10, None).await.unwrap();
+    let results = db
+        .vector_search("vecs", &query, 10, None, None)
+        .await
+        .unwrap();
 
     assert_eq!(results.len(), 10);
     for w in results.windows(2) {
@@ -151,7 +154,7 @@ async fn multi_modal_vector_graph_document() {
 
     // Vector search → graph traverse → document read.
     let results = db
-        .vector_search("kb", &[1.0, 0.0, 0.0], 2, None)
+        .vector_search("kb", &[1.0, 0.0, 0.0], 2, None, None)
         .await
         .unwrap();
     assert!(!results.is_empty());
@@ -194,7 +197,7 @@ async fn flush_and_reopen_persists_all() {
         assert!(doc.is_some(), "document should persist across restart");
 
         let results = db
-            .vector_search("vecs", &[1.0, 2.0, 3.0], 1, None)
+            .vector_search("vecs", &[1.0, 2.0, 3.0], 1, None, None)
             .await
             .unwrap();
         assert!(!results.is_empty(), "vector should persist across restart");
@@ -245,7 +248,7 @@ async fn arc_dyn_nodedb_pattern() {
         .await
         .unwrap();
     let results = db
-        .vector_search("coll", &[1.0, 0.0], 1, None)
+        .vector_search("coll", &[1.0, 0.0], 1, None, None)
         .await
         .unwrap();
     assert_eq!(results.len(), 1);

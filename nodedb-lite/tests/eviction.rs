@@ -80,7 +80,7 @@ async fn evicted_collection_lazily_reloads_on_search() {
     // Search — should lazily reload from storage.
     let query: Vec<f32> = (0..8).map(|d| (d as f32) * 0.01).collect();
     let results = db
-        .vector_search("lazy_coll", &query, 5, None)
+        .vector_search("lazy_coll", &query, 5, None, None)
         .await
         .unwrap();
     assert!(!results.is_empty(), "search should work after lazy reload");

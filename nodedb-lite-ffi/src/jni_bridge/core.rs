@@ -132,7 +132,7 @@ pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_nativeVectorSearch(
     use nodedb_client::NodeDb;
     let results = match h
         .rt
-        .block_on(h.db.vector_search(&collection, &buf, k as usize, None))
+        .block_on(h.db.vector_search(&collection, &buf, k as usize, None, None))
     {
         Ok(r) => r,
         Err(_) => return std::ptr::null_mut(),

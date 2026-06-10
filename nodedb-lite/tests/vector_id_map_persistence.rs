@@ -41,7 +41,10 @@ async fn vector_search_returns_real_doc_id_after_flush_and_reopen() {
     let db = NodeDbLite::open(storage, 1).await.unwrap();
 
     let query = make_embedding(0.1, 384);
-    let results = db.vector_search("embeds", &query, 5, None).await.unwrap();
+    let results = db
+        .vector_search("embeds", &query, 5, None, None)
+        .await
+        .unwrap();
 
     assert!(
         !results.is_empty(),
@@ -86,7 +89,10 @@ async fn vector_search_multiple_collections_preserve_ids_after_reopen() {
 
     // Query close to doc-a0's embedding.
     let query_a = make_embedding(1.0, 64);
-    let results_a = db.vector_search("alpha", &query_a, 2, None).await.unwrap();
+    let results_a = db
+        .vector_search("alpha", &query_a, 2, None, None)
+        .await
+        .unwrap();
     assert!(
         !results_a.is_empty(),
         "alpha search must return results after reopen"
@@ -101,7 +107,10 @@ async fn vector_search_multiple_collections_preserve_ids_after_reopen() {
 
     // Query close to doc-b0's embedding.
     let query_b = make_embedding(100.0, 64);
-    let results_b = db.vector_search("beta", &query_b, 2, None).await.unwrap();
+    let results_b = db
+        .vector_search("beta", &query_b, 2, None, None)
+        .await
+        .unwrap();
     assert!(
         !results_b.is_empty(),
         "beta search must return results after reopen"

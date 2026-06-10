@@ -67,7 +67,10 @@ pub unsafe extern "C" fn nodedb_vector_search(
     }
     let q = unsafe { std::slice::from_raw_parts(query, dim) };
 
-    match h.rt.block_on(h.db.vector_search(collection, q, k, None)) {
+    match h
+        .rt
+        .block_on(h.db.vector_search(collection, q, k, None, None))
+    {
         Ok(results) => {
             let json_items: Vec<serde_json::Value> = results
                 .iter()

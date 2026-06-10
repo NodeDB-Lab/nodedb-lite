@@ -156,6 +156,7 @@ pub unsafe extern "C" fn nodedb_text_search(
         query_str,
         top_k,
         nodedb_types::TextSearchParams::default(),
+        None,
     )) {
         Ok(results) => {
             let json_items: Vec<serde_json::Value> = results

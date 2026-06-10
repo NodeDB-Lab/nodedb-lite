@@ -268,7 +268,7 @@ impl NodeDbLiteWasm {
         k: usize,
     ) -> Result<JsValue, JsError> {
         let results = dispatch!(self, db, {
-            db.vector_search(collection, query, k, None)
+            db.vector_search(collection, query, k, None, None)
                 .await
                 .map_err(|e| JsError::new(&e.to_string()))
         })?;
@@ -482,6 +482,7 @@ impl NodeDbLiteWasm {
                 query,
                 top_k,
                 nodedb_types::TextSearchParams::default(),
+                None,
             )
             .await
             .map_err(|e| JsError::new(&e.to_string()))

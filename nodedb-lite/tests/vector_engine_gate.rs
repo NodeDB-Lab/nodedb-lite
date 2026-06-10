@@ -32,7 +32,7 @@ async fn vector_insert_and_search_top_k_sorted() {
     // Query near vector 42: same construction as the inserted vector.
     let query: Vec<f32> = (0..8).map(|d| ((42u32 * 8 + d) as f32) * 0.01).collect();
     let results = db
-        .vector_search("gate_vecs", &query, 5, None)
+        .vector_search("gate_vecs", &query, 5, None, None)
         .await
         .expect("vector_search");
 
@@ -75,7 +75,7 @@ async fn vector_delete_removes_from_search() {
 
     // Confirm it appears before deletion.
     let before = db
-        .vector_search("del_vecs", &target, 5, None)
+        .vector_search("del_vecs", &target, 5, None, None)
         .await
         .expect("vector_search before delete");
     assert!(
@@ -89,11 +89,45 @@ async fn vector_delete_removes_from_search() {
         .expect("vector_delete");
 
     let after = db
-        .vector_search("del_vecs", &target, 5, None)
+        .vector_search("del_vecs", &target, 5, None, None)
         .await
         .expect("vector_search after delete");
     assert!(
         !after.iter().any(|r| r.id == "target"),
         "target must not appear in search results after deletion"
+    );
+}
+
+/// When `allowed_ids` is `Some`, vector_search must return only documents
+/// whose IDs are in the set regardless of pure vector similarity ranking.
+#[tokio::test]
+async fn vector_search_allowed_ids_filters_to_set() {
+    use std::collections::HashSet;
+
+    let db = open_db().await;
+
+    // Insert two vectors with nearly identical embeddings.
+    let emb: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0];
+    db.vector_insert("filter_vecs", "in-set", &emb, None)
+        .await
+        .expect("insert in-set");
+    db.vector_insert("filter_vecs", "out-of-set", &emb, None)
+        .await
+        .expect("insert out-of-set");
+
+    let allowed: HashSet<String> = std::iter::once("in-set".to_string()).collect();
+    let results = db
+        .vector_search("filter_vecs", &emb, 10, None, Some(&allowed))
+        .await
+        .expect("vector_search with allowed_ids");
+
+    let ids: Vec<&str> = results.iter().map(|r| r.id.as_str()).collect();
+    assert!(
+        ids.contains(&"in-set"),
+        "in-set must appear in results, got: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"out-of-set"),
+        "out-of-set must be excluded by allowed_ids filter, got: {ids:?}"
     );
 }

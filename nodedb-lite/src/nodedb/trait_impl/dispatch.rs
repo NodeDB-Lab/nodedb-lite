@@ -7,6 +7,8 @@
 //! This keeps the trait surface in one place while the implementations
 //! stay split by concern.
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 
 use nodedb_client::NodeDb;
@@ -36,6 +38,7 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
         query: &[f32],
         k: usize,
         filter: Option<&MetadataFilter>,
+        allowed_ids: Option<&HashSet<String>>,
     ) -> NodeDbResult<Vec<SearchResult>> {
         self.vector_search_internal(
             collection,
@@ -44,6 +47,7 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
             k,
             filter,
             INTERNAL_FIELDS_BASE,
+            allowed_ids,
         )
         .await
     }
@@ -95,6 +99,7 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
             k,
             filter,
             INTERNAL_FIELDS_NAMED,
+            None,
         )
         .await
     }
@@ -173,6 +178,18 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
         self.document_delete_impl(collection, id).await
     }
 
+    async fn document_put_with_vector(
+        &self,
+        doc_collection: &str,
+        doc: Document,
+        vector_collection: &str,
+        id: &str,
+        embedding: &[f32],
+    ) -> NodeDbResult<()> {
+        self.document_put_with_vector_impl(doc_collection, doc, vector_collection, id, embedding)
+            .await
+    }
+
     async fn document_get_as_of(
         &self,
         collection: &str,
@@ -208,8 +225,9 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
         query: &str,
         top_k: usize,
         params: TextSearchParams,
+        allowed_ids: Option<&HashSet<String>>,
     ) -> NodeDbResult<Vec<SearchResult>> {
-        self.text_search_impl(collection, query, top_k, params)
+        self.text_search_impl(collection, query, top_k, params, allowed_ids)
             .await
     }
 

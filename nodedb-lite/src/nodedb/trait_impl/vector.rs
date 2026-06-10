@@ -2,6 +2,8 @@
 
 //! Vector engine helpers for `NodeDbLite`.
 
+use std::collections::HashSet;
+
 use loro::LoroValue;
 
 use nodedb_types::document::Document;
@@ -24,6 +26,10 @@ pub(super) const INTERNAL_FIELDS_NAMED: &[&str] = &["embedding_dim", "__field"];
 
 impl<S: StorageEngine> NodeDbLite<S> {
     /// Shared vector search implementation.
+    ///
+    /// When `allowed_ids` is `Some`, translates the set of string doc-IDs to a
+    /// `RoaringBitmap` of u32 HNSW surrogates and passes it as the
+    /// `prefilter_bitmap` so only documents from the allowed set are returned.
     pub(super) async fn vector_search_internal(
         &self,
         index_key: &str,
@@ -32,7 +38,18 @@ impl<S: StorageEngine> NodeDbLite<S> {
         k: usize,
         filter: Option<&MetadataFilter>,
         exclude_fields: &[&str],
+        allowed_ids: Option<&HashSet<String>>,
     ) -> NodeDbResult<Vec<SearchResult>> {
+        let prefilter = allowed_ids.map(|ids| {
+            let id_map = self.vector_state.vector_id_map.lock_or_recover();
+            let mut bm = roaring::RoaringBitmap::new();
+            for (composite_key, (doc_id, internal_id)) in id_map.iter() {
+                if composite_key.starts_with(index_key) && ids.contains(doc_id) {
+                    bm.insert(*internal_id);
+                }
+            }
+            bm
+        });
         crate::engine::vector::search::run_vector_search(
             &self.vector_state,
             &self.crdt,
@@ -42,7 +59,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             k,
             filter,
             exclude_fields,
-            None,
+            prefilter.as_ref(),
             None,
             false,
             None,
