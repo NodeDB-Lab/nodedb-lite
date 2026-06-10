@@ -128,7 +128,7 @@ impl LiteChangeStream {
             collection: collection.to_string(),
             document_id: document_id.to_string(),
             op,
-            timestamp_ms: now_ms(),
+            timestamp_ms: crate::runtime::now_millis(),
             from_sync: false,
         };
         self.publish(&event);
@@ -140,7 +140,7 @@ impl LiteChangeStream {
             collection: collection.to_string(),
             document_id: document_id.to_string(),
             op,
-            timestamp_ms: now_ms(),
+            timestamp_ms: crate::runtime::now_millis(),
             from_sync: true,
         };
         self.publish(&event);
@@ -167,13 +167,6 @@ impl Default for LiteChangeStream {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 #[cfg(test)]

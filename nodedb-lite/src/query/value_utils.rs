@@ -30,15 +30,3 @@ pub fn loro_value_to_string(v: &loro::LoroValue) -> String {
         _ => String::new(),
     }
 }
-
-/// Wall-clock milliseconds since the Unix epoch (`u64`).
-///
-/// Mirrors `engine::array::ops::util::time::now_ms` but returns `u64` so
-/// it can be added to TTL deadlines without sign-conversion clutter.
-pub fn now_ms_u64() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}

@@ -111,6 +111,15 @@ pub fn now_millis() -> u64 {
     }
 }
 
+/// Get the current timestamp in milliseconds since Unix epoch, as `i64`.
+///
+/// Same clock as [`now_millis`] but signed, for the system/valid-time fields
+/// used by the bitemporal engines. Platform-independent — works on native and
+/// WASM.
+pub fn now_millis_i64() -> i64 {
+    now_millis() as i64
+}
+
 /// Get the current timestamp in seconds since Unix epoch.
 pub fn now_secs() -> u64 {
     now_millis() / 1000

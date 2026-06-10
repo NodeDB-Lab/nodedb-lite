@@ -442,7 +442,7 @@ impl ArrayEngineState {
 
         // Retention compaction (only if configured).
         if let Some(retain_ms) = state.audit_retain_ms {
-            let now_ms = now_millis();
+            let now_ms = crate::runtime::now_millis_i64();
             crate::engine::array::retention::run_retention(
                 storage,
                 name,
@@ -460,13 +460,6 @@ impl ArrayEngineState {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-fn now_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
 
 async fn cell_versions_from_segments<S: StorageEngine>(
     storage: &Arc<S>,

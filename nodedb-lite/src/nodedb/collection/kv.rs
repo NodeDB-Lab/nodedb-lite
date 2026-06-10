@@ -21,8 +21,6 @@
 //! A value of `0` means no expiry. This prefix is transparent to callers —
 //! all public methods encode/decode it automatically.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use nodedb_types::Namespace;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 
@@ -76,19 +74,11 @@ fn decode_value(stored: &[u8]) -> Option<(u64, &[u8])> {
     Some((deadline, &stored[DEADLINE_PREFIX_LEN..]))
 }
 
-/// Return the current time in milliseconds since the Unix epoch.
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 /// Return `true` if the deadline has passed (key is expired).
 ///
 /// A deadline of `0` means no expiry and is never considered expired.
 fn is_expired(deadline_ms: u64) -> bool {
-    deadline_ms != 0 && now_ms() >= deadline_ms
+    deadline_ms != 0 && crate::runtime::now_millis() >= deadline_ms
 }
 
 impl<S: StorageEngine> NodeDbLite<S> {
@@ -111,13 +101,12 @@ impl<S: StorageEngine> NodeDbLite<S> {
         value: &[u8],
         ttl_ms: u64,
     ) -> NodeDbResult<()> {
-        let deadline = now_ms().saturating_add(ttl_ms);
+        let deadline = crate::runtime::now_millis().saturating_add(ttl_ms);
         self.kv_put_with_deadline(collection, key, value, deadline)
             .await
     }
 
     /// Internal: write a key with an explicit deadline (0 = no expiry).
-    #[allow(clippy::await_holding_lock)]
     async fn kv_put_with_deadline(
         &self,
         collection: &str,
@@ -128,20 +117,25 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let rkey = kv_key(collection, key.as_bytes());
         let encoded = encode_value(deadline_ms, value);
 
-        let mut buf = self.kv_write_buf.lock_or_recover();
-        buf.overlay.insert(rkey.clone(), Some(encoded.clone()));
-        buf.ops.push(WriteOp::Put {
-            ns: Namespace::Kv,
-            key: rkey.clone(),
-            value: encoded,
-        });
-        let should_flush = buf.ops.len() >= KV_FLUSH_THRESHOLD;
-        self.kv_overlay_len
-            .store(buf.overlay.len(), std::sync::atomic::Ordering::Release);
-        drop(buf);
+        // Scope all mutex work so no guard is live at the await point.
+        let should_flush = {
+            let mut buf = self.kv_write_buf.lock_or_recover();
+            buf.overlay.insert(rkey.clone(), Some(encoded.clone()));
+            buf.ops.push(WriteOp::Put {
+                ns: Namespace::Kv,
+                key: rkey.clone(),
+                value: encoded,
+            });
+            let n = buf.ops.len();
+            self.kv_overlay_len
+                .store(buf.overlay.len(), std::sync::atomic::Ordering::Release);
+            n >= KV_FLUSH_THRESHOLD
+        };
 
         // Invalidate any cached value for this key so subsequent reads go to storage.
-        self.kv_cache.lock_or_recover().pop(&rkey);
+        {
+            self.kv_cache.lock_or_recover().pop(&rkey);
+        }
 
         if should_flush {
             self.kv_flush_inner().await?;
@@ -150,11 +144,13 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // Sync path: also update Loro for delta generation.
         if self.sync_enabled {
             let crdt_collection = format!("{KV_CRDT_PREFIX}{collection}");
-            let mut crdt = self.crdt.lock_or_recover();
-            let fields: Vec<(&str, loro::LoroValue)> =
-                vec![("value", loro::LoroValue::Binary(value.to_vec().into()))];
-            crdt.upsert_deferred(&crdt_collection, key, &fields)
-                .map_err(NodeDbError::storage)?;
+            let crdt_err = {
+                let mut crdt = self.crdt.lock_or_recover();
+                let fields: Vec<(&str, loro::LoroValue)> =
+                    vec![("value", loro::LoroValue::Binary(value.to_vec().into()))];
+                crdt.upsert_deferred(&crdt_collection, key, &fields)
+            };
+            crdt_err.map_err(NodeDbError::storage)?;
         }
 
         Ok(())
@@ -181,40 +177,45 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .load(std::sync::atomic::Ordering::Acquire)
             > 0
         {
-            let buf = self.kv_write_buf.lock_or_recover();
-            if let Some(entry) = buf.overlay.get(&rkey) {
-                let result = match entry {
-                    Some(stored) => decode_value(stored)
-                        .and_then(|(deadline, user_bytes)| {
-                            if is_expired(deadline) {
-                                None
-                            } else {
-                                Some(user_bytes.to_vec())
-                            }
-                        })
-                        .map(Some)
-                        .unwrap_or(None),
+            // Scope the guard so it is not live at any await point.
+            let overlay_result: Option<Option<Vec<u8>>> = {
+                let buf = self.kv_write_buf.lock_or_recover();
+                buf.overlay.get(&rkey).map(|entry| match entry {
+                    Some(stored) => decode_value(stored).and_then(|(deadline, user_bytes)| {
+                        if is_expired(deadline) {
+                            None
+                        } else {
+                            Some(user_bytes.to_vec())
+                        }
+                    }),
                     None => None,
-                };
+                })
+            };
+            if let Some(result) = overlay_result {
                 return Ok(result);
             }
-            drop(buf);
         }
 
         // Cache check: look up the composite key before hitting storage.
-        {
+        // Guard scoped to the block; no await inside.
+        let cache_result: Option<Option<Vec<u8>>> = {
             let mut cache = self.kv_cache.lock_or_recover();
             if let Some(encoded) = cache.get(&rkey) {
                 match decode_value(encoded) {
                     Some((deadline, user_bytes)) if !is_expired(deadline) => {
-                        return Ok(Some(user_bytes.to_vec()));
+                        Some(Some(user_bytes.to_vec()))
                     }
                     _ => {
-                        // Expired or corrupt — evict and fall through to storage.
                         cache.pop(&rkey);
+                        None
                     }
                 }
+            } else {
+                None
             }
+        };
+        if let Some(result) = cache_result {
+            return Ok(result);
         }
 
         // Fall through to storage.
@@ -238,7 +239,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
                         } else {
                             let result = user_bytes.to_vec();
                             // Populate cache with the raw encoded bytes before returning.
-                            self.kv_cache.lock_or_recover().put(rkey, raw);
+                            // Guard scoped to block; no await follows inside this branch.
+                            {
+                                self.kv_cache.lock_or_recover().put(rkey, raw);
+                            }
                             Ok(Some(result))
                         }
                     }
@@ -248,20 +252,23 @@ impl<S: StorageEngine> NodeDbLite<S> {
     }
 
     /// Internal: queue a lazy delete for an expired key.
-    #[allow(clippy::await_holding_lock)]
     async fn kv_lazy_delete(&self, rkey: Vec<u8>) -> NodeDbResult<()> {
-        let mut buf = self.kv_write_buf.lock_or_recover();
-        buf.overlay.insert(rkey.clone(), None);
-        buf.ops.push(WriteOp::Delete {
-            ns: Namespace::Kv,
-            key: rkey.clone(),
-        });
-        let should_flush = buf.ops.len() >= KV_FLUSH_THRESHOLD;
-        self.kv_overlay_len
-            .store(buf.overlay.len(), std::sync::atomic::Ordering::Release);
-        drop(buf);
+        let should_flush = {
+            let mut buf = self.kv_write_buf.lock_or_recover();
+            buf.overlay.insert(rkey.clone(), None);
+            buf.ops.push(WriteOp::Delete {
+                ns: Namespace::Kv,
+                key: rkey.clone(),
+            });
+            let n = buf.ops.len();
+            self.kv_overlay_len
+                .store(buf.overlay.len(), std::sync::atomic::Ordering::Release);
+            n >= KV_FLUSH_THRESHOLD
+        };
         // Evict the expired entry so future reads don't serve stale data.
-        self.kv_cache.lock_or_recover().pop(&rkey);
+        {
+            self.kv_cache.lock_or_recover().pop(&rkey);
+        }
         if should_flush {
             self.kv_flush_inner().await?;
         }
@@ -269,23 +276,26 @@ impl<S: StorageEngine> NodeDbLite<S> {
     }
 
     /// KV DELETE: remove a key.
-    #[allow(clippy::await_holding_lock)]
     pub async fn kv_delete(&self, collection: &str, key: &str) -> NodeDbResult<bool> {
         let rkey = kv_key(collection, key.as_bytes());
 
-        let mut buf = self.kv_write_buf.lock_or_recover();
-        buf.overlay.insert(rkey.clone(), None);
-        buf.ops.push(WriteOp::Delete {
-            ns: Namespace::Kv,
-            key: rkey.clone(),
-        });
-        let should_flush = buf.ops.len() >= KV_FLUSH_THRESHOLD;
-        self.kv_overlay_len
-            .store(buf.overlay.len(), std::sync::atomic::Ordering::Release);
-        drop(buf);
+        let should_flush = {
+            let mut buf = self.kv_write_buf.lock_or_recover();
+            buf.overlay.insert(rkey.clone(), None);
+            buf.ops.push(WriteOp::Delete {
+                ns: Namespace::Kv,
+                key: rkey.clone(),
+            });
+            let n = buf.ops.len();
+            self.kv_overlay_len
+                .store(buf.overlay.len(), std::sync::atomic::Ordering::Release);
+            n >= KV_FLUSH_THRESHOLD
+        };
 
         // Invalidate the cache so subsequent reads don't return stale data.
-        self.kv_cache.lock_or_recover().pop(&rkey);
+        {
+            self.kv_cache.lock_or_recover().pop(&rkey);
+        }
 
         if should_flush {
             self.kv_flush_inner().await?;
@@ -293,9 +303,11 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         if self.sync_enabled {
             let crdt_collection = format!("{KV_CRDT_PREFIX}{collection}");
-            let mut crdt = self.crdt.lock_or_recover();
-            crdt.delete_deferred(&crdt_collection, key)
-                .map_err(NodeDbError::storage)?;
+            let crdt_err = {
+                let mut crdt = self.crdt.lock_or_recover();
+                crdt.delete_deferred(&crdt_collection, key)
+            };
+            crdt_err.map_err(NodeDbError::storage)?;
         }
 
         Ok(true)
@@ -313,7 +325,6 @@ impl<S: StorageEngine> NodeDbLite<S> {
     ///
     /// Flushes the write buffer before scanning so the KV store reflects all pending
     /// writes.
-    #[allow(clippy::await_holding_lock)]
     pub async fn kv_range_scan(
         &self,
         collection: &str,
@@ -385,24 +396,27 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         // Lazy-delete expired keys discovered during scan.
         if !expired_keys.is_empty() {
-            let mut buf = self.kv_write_buf.lock_or_recover();
-            for rkey in &expired_keys {
-                buf.overlay.insert(rkey.clone(), None);
-                buf.ops.push(WriteOp::Delete {
-                    ns: Namespace::Kv,
-                    key: rkey.clone(),
-                });
-            }
-            let should_flush = buf.ops.len() >= KV_FLUSH_THRESHOLD;
-            self.kv_overlay_len
-                .store(buf.overlay.len(), std::sync::atomic::Ordering::Release);
-            drop(buf);
+            let should_flush = {
+                let mut buf = self.kv_write_buf.lock_or_recover();
+                for rkey in &expired_keys {
+                    buf.overlay.insert(rkey.clone(), None);
+                    buf.ops.push(WriteOp::Delete {
+                        ns: Namespace::Kv,
+                        key: rkey.clone(),
+                    });
+                }
+                let n = buf.ops.len();
+                self.kv_overlay_len
+                    .store(buf.overlay.len(), std::sync::atomic::Ordering::Release);
+                n >= KV_FLUSH_THRESHOLD
+            };
             // Evict expired keys from the cache.
-            let mut cache = self.kv_cache.lock_or_recover();
-            for rkey in &expired_keys {
-                cache.pop(rkey);
+            {
+                let mut cache = self.kv_cache.lock_or_recover();
+                for rkey in &expired_keys {
+                    cache.pop(rkey);
+                }
             }
-            drop(cache);
             if should_flush {
                 self.kv_flush_inner().await?;
             }
@@ -431,7 +445,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .await
             .map_err(NodeDbError::storage)?;
 
-        let now = now_ms();
+        let now = crate::runtime::now_millis();
         let mut delete_ops: Vec<WriteOp> = Vec::new();
 
         for (composite_key, raw_value) in entries {
@@ -518,26 +532,29 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let count = self.kv_flush_inner().await?;
 
         if self.sync_enabled {
-            let mut crdt = self.crdt.lock_or_recover();
-            crdt.flush_deltas().map_err(NodeDbError::storage)?;
+            let crdt_err = {
+                let mut crdt = self.crdt.lock_or_recover();
+                crdt.flush_deltas()
+            };
+            crdt_err.map_err(NodeDbError::storage)?;
         }
 
         Ok(count)
     }
 
     /// Internal: flush write buffer to storage without touching CRDT.
-    #[allow(clippy::await_holding_lock)]
     async fn kv_flush_inner(&self) -> NodeDbResult<usize> {
-        let mut buf = self.kv_write_buf.lock_or_recover();
-        if buf.ops.is_empty() {
-            return Ok(0);
-        }
-
-        let ops = std::mem::take(&mut buf.ops);
-        buf.overlay.clear();
-        self.kv_overlay_len
-            .store(0, std::sync::atomic::Ordering::Release);
-        drop(buf);
+        let ops: Vec<WriteOp> = {
+            let mut buf = self.kv_write_buf.lock_or_recover();
+            if buf.ops.is_empty() {
+                return Ok(0);
+            }
+            let ops = std::mem::take(&mut buf.ops);
+            buf.overlay.clear();
+            self.kv_overlay_len
+                .store(0, std::sync::atomic::Ordering::Release);
+            ops
+        };
 
         let count = ops.len();
         self.storage

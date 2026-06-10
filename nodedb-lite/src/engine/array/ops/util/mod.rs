@@ -3,4 +3,3 @@
 //! Shared helpers for Array op handlers.
 
 pub mod cell;
-pub mod time;
