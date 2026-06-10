@@ -106,21 +106,35 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // Rebuild the CRDT's registered-collection set from persisted bitemporal
         // flags so that SELECT queries on bitemporal collections work immediately
         // after open, even for collections with no inserted documents yet.
-        {
-            const BITEMPORAL_PREFIX: &[u8] = b"document_bitemporal:";
-            let bitemporal_entries = storage
-                .scan_prefix(Namespace::Meta, BITEMPORAL_PREFIX)
+        // Also backfill the LatestVersion index for collections written before
+        // the index was introduced — safe on fresh DBs and idempotent otherwise.
+        const BITEMPORAL_PREFIX: &[u8] = b"document_bitemporal:";
+        let bitemporal_entries = storage
+            .scan_prefix(Namespace::Meta, BITEMPORAL_PREFIX)
+            .await
+            .unwrap_or_default();
+        for (key, value) in &bitemporal_entries {
+            // Only process collections where the flag byte is 0x01 (enabled).
+            if value.first().copied() != Some(1) {
+                continue;
+            }
+            if let Ok(key_str) = std::str::from_utf8(key)
+                && let Some(name) = key_str.strip_prefix("document_bitemporal:")
+            {
+                crdt.register_collection(name);
+
+                if let Err(e) = crate::engine::document::history::ops::backfill_latest_version(
+                    storage.as_ref(),
+                    name,
+                )
                 .await
-                .unwrap_or_default();
-            for (key, value) in &bitemporal_entries {
-                // Only register collections where the flag byte is 0x01 (enabled).
-                if value.first().copied() != Some(1) {
-                    continue;
-                }
-                if let Ok(key_str) = std::str::from_utf8(key)
-                    && let Some(name) = key_str.strip_prefix("document_bitemporal:")
                 {
-                    crdt.register_collection(name);
+                    tracing::warn!(
+                        collection = name,
+                        error = %e,
+                        "LatestVersion backfill failed — bitemporal reads will \
+                         fall back to prefix scan for this collection"
+                    );
                 }
             }
         }
@@ -369,6 +383,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 overlay: HashMap::new(),
             }),
             kv_overlay_len: std::sync::atomic::AtomicUsize::new(0),
+            sync_gate: std::sync::RwLock::new(None),
         };
 
         // Rebuild text indices from CRDT state only when no checkpoint exists.

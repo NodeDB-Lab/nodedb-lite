@@ -73,6 +73,15 @@ pub fn coll_prefix_end(collection: &str) -> Vec<u8> {
     format!("{collection};").into_bytes()
 }
 
+/// Build the key for the `LatestVersion` pointer for `(collection, doc_id)`.
+///
+/// Layout: `{collection}:{doc_id}` — no NUL separator, no timestamp suffix.
+/// The value stored under this key is the `system_from_ms` decimal string of
+/// the currently-live `DocumentHistory` row.
+pub fn latest_version_key(collection: &str, doc_id: &str) -> Vec<u8> {
+    format!("{collection}:{doc_id}").into_bytes()
+}
+
 /// Extract `system_from_ms` from a versioned key byte slice.
 ///
 /// Returns `None` if the key has no NUL separator or if the timestamp
