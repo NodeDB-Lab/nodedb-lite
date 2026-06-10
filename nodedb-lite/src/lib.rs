@@ -14,7 +14,7 @@ pub mod sync;
 pub use config::LiteConfig;
 pub use error::LiteError;
 pub use memory::MemoryGovernor;
-pub use nodedb::NodeDbLite;
+pub use nodedb::{BatchItem, NodeDbLite, SyncGate};
 pub use nodedb_query;
 pub use nodedb_types::id_gen;
 pub use storage::engine::{StorageEngine, WriteOp};

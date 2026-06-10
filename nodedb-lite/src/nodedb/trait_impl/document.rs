@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Ientifier: Apache-2.0
 
 //! Document engine helpers for `NodeDbLite`.
 //!
@@ -22,7 +22,8 @@ use crate::engine::document::history::ops::{
 use crate::engine::document::history::value::DecodedVersion;
 use crate::nodedb::LockExt;
 use crate::nodedb::NodeDbLite;
-use crate::nodedb::convert::{loro_value_to_document, value_to_loro};
+use crate::nodedb::convert::{document_to_msgpack, loro_value_to_document, value_to_loro};
+use crate::runtime::now_millis_i64;
 use crate::storage::engine::StorageEngine;
 
 impl<S: StorageEngine> NodeDbLite<S> {
@@ -79,8 +80,13 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 .iter()
                 .map(|(k, v)| (k.as_str(), value_to_loro(v)))
                 .collect();
-            crdt.upsert(collection, &doc_id, &fields)
+            let mutation_id = crdt
+                .upsert(collection, &doc_id, &fields)
                 .map_err(NodeDbError::storage)?;
+            // Keep local-only documents out of the outbound CRDT delta stream.
+            if !self.should_sync_doc(collection, &doc.fields) {
+                crdt.drop_pending(mutation_id);
+            }
         }
 
         // For bitemporal collections, also record the versioned history entry.
@@ -88,7 +94,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .await
             .map_err(NodeDbError::storage)?
         {
-            let now_ms = system_now_ms();
+            let now_ms = now_millis_i64();
             let body = document_to_msgpack(&doc);
             versioned_put(
                 &*self.storage,
@@ -104,6 +110,154 @@ impl<S: StorageEngine> NodeDbLite<S> {
         }
 
         self.index_document_text(collection, &doc_id, &doc.fields);
+
+        Ok(())
+    }
+
+    /// Upsert a document and insert its embedding vector under one CRDT lock.
+    ///
+    /// Performs two logical writes (document upsert + vector metadata upsert) via
+    /// a single `batch_upsert` call so Loro exports one oplog delta instead of two.
+    /// The HNSW insert and sidecar encoding run after the CRDT lock is released.
+    ///
+    /// `embedding` being empty is a no-op for the vector path; the document write
+    /// proceeds normally.
+    pub(super) async fn document_put_with_vector_impl(
+        &self,
+        doc_collection: &str,
+        doc: Document,
+        vector_collection: &str,
+        id: &str,
+        embedding: &[f32],
+    ) -> NodeDbResult<()> {
+        use crate::engine::crdt::engine::CrdtBatchOp;
+        use crate::engine::vector::sidecar;
+        use crate::engine::vector::state::ensure_hnsw;
+        use nodedb_types::vector_dtype::VectorStorageDtype;
+
+        let doc_id = if doc.id.is_empty() {
+            nodedb_types::id_gen::uuid_v7()
+        } else {
+            doc.id.clone()
+        };
+
+        // Build field slices for both ops before acquiring the lock.
+        let doc_fields: Vec<(&str, loro::LoroValue)> = doc
+            .fields
+            .iter()
+            .map(|(k, v)| (k.as_str(), value_to_loro(v)))
+            .collect();
+
+        let vec_meta_field = loro::LoroValue::I64(embedding.len() as i64);
+        let vec_fields: Vec<(&str, loro::LoroValue)> = if !embedding.is_empty() {
+            vec![("embedding_dim", vec_meta_field)]
+        } else {
+            vec![]
+        };
+
+        let sync_doc = self.should_sync_doc(doc_collection, &doc.fields);
+
+        // One CRDT lock — one batch_upsert — one Loro oplog export.
+        {
+            let mut crdt = self.crdt.lock_or_recover();
+            let mutation_id = if !embedding.is_empty() {
+                let ops: &[CrdtBatchOp<'_>] = &[
+                    (doc_collection, &doc_id, doc_fields.as_slice()),
+                    (vector_collection, id, vec_fields.as_slice()),
+                ];
+                crdt.batch_upsert(ops).map_err(NodeDbError::storage)?
+            } else {
+                crdt.upsert(doc_collection, &doc_id, &doc_fields)
+                    .map_err(NodeDbError::storage)?
+            };
+            // Keep local-only documents out of the outbound CRDT delta stream.
+            if !sync_doc {
+                crdt.drop_pending(mutation_id);
+            }
+        }
+
+        // For bitemporal collections, record versioned history (outside the CRDT lock).
+        if is_bitemporal(&*self.storage, doc_collection)
+            .await
+            .map_err(NodeDbError::storage)?
+        {
+            let now_ms = now_millis_i64();
+            let body = document_to_msgpack(&doc);
+            versioned_put(
+                &*self.storage,
+                doc_collection,
+                &doc_id,
+                &body,
+                now_ms,
+                None,
+                None,
+            )
+            .await
+            .map_err(NodeDbError::storage)?;
+        }
+
+        self.index_document_text(doc_collection, &doc_id, &doc.fields);
+
+        // HNSW insert (no CRDT lock needed — vector_state uses its own locks).
+        if !embedding.is_empty() {
+            let internal_id = {
+                let dtype = {
+                    let configs = self.vector_state.per_index_config.lock_or_recover();
+                    configs
+                        .get(vector_collection)
+                        .map(|cfg| cfg.storage_dtype)
+                        .unwrap_or(VectorStorageDtype::F32)
+                };
+                let mut indices = self.vector_state.hnsw_indices.lock_or_recover();
+                let index = ensure_hnsw(&mut indices, vector_collection, embedding.len(), dtype);
+                let id_before = index.len() as u32;
+                index
+                    .insert(embedding.to_vec())
+                    .map_err(NodeDbError::bad_request)?;
+                id_before
+            };
+
+            {
+                let mut id_map = self.vector_state.vector_id_map.lock_or_recover();
+                id_map.insert(
+                    format!("{vector_collection}:{internal_id}"),
+                    (id.to_string(), internal_id),
+                );
+            }
+
+            match sidecar::ensure_sidecar(&self.vector_state, vector_collection) {
+                Ok(true) => {
+                    let mut sidecars = self.vector_state.codec_sidecars.lock_or_recover();
+                    if let Some(s) = sidecars.get_mut(vector_collection)
+                        && let Err(e) = s.encode_and_insert(internal_id, embedding)
+                    {
+                        tracing::warn!(
+                            index_key = vector_collection,
+                            id = internal_id,
+                            error = %e,
+                            "sidecar encode_and_insert failed; row falls back to FP32 rerank"
+                        );
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => return Err(NodeDbError::bad_request(e.to_string())),
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            if sync_doc {
+                if let Some(q) = &self.vector_outbound {
+                    q.enqueue_insert(
+                        vector_collection,
+                        id,
+                        embedding.to_vec(),
+                        embedding.len(),
+                        "",
+                    );
+                }
+            }
+
+            self.update_memory_stats();
+        }
 
         Ok(())
     }
@@ -125,7 +279,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .await
             .map_err(NodeDbError::storage)?
         {
-            let now_ms = system_now_ms();
+            let now_ms = now_millis_i64();
             versioned_tombstone(&*self.storage, collection, id, now_ms)
                 .await
                 .map_err(NodeDbError::storage)?;
@@ -217,7 +371,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 .map_err(NodeDbError::storage)?;
         }
 
-        let now_ms = system_now_ms();
+        let now_ms = now_millis_i64();
         let body = document_to_msgpack(&doc);
         versioned_put(
             &*self.storage,
@@ -261,19 +415,4 @@ fn decoded_version_to_document(id: &str, version: &DecodedVersion) -> Document {
     }
 
     doc
-}
-
-/// Serialize a `Document`'s fields to msgpack for storage in the history table.
-fn document_to_msgpack(doc: &Document) -> Vec<u8> {
-    // Encode fields as a msgpack map via the JSON bridge (same path as bulk.rs).
-    let json = serde_json::to_value(&doc.fields).unwrap_or_default();
-    nodedb_types::json_msgpack::json_to_msgpack_or_empty(&json)
-}
-
-/// Current wall-clock time in milliseconds since Unix epoch (i64).
-fn system_now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }

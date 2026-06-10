@@ -13,10 +13,11 @@ mod sync_delegate;
 mod trait_impl;
 
 pub use collection::{CollectionMeta, TransactionOp};
-pub use core::NodeDbLite;
+pub use core::{NodeDbLite, SyncGate};
 pub use diagnostic::DiagnosticDump;
 pub use health::{HealthStatus, OverallStatus};
 pub(crate) use lock_ext::LockExt;
+pub use trait_impl::BatchItem;
 
 #[cfg(test)]
 mod tests {
@@ -55,7 +56,7 @@ mod tests {
             .unwrap();
 
         let results = db
-            .vector_search("embeddings", &[1.0, 0.0, 0.0], 2, None)
+            .vector_search("embeddings", &[1.0, 0.0, 0.0], 2, None, None)
             .await
             .unwrap();
 
@@ -72,7 +73,7 @@ mod tests {
         db.vector_delete("coll", "v1").await.unwrap();
 
         let results = db
-            .vector_search("coll", &[1.0, 0.0], 5, None)
+            .vector_search("coll", &[1.0, 0.0], 5, None, None)
             .await
             .unwrap();
         assert!(results.is_empty());
@@ -259,7 +260,7 @@ mod tests {
     async fn search_nonexistent_collection() {
         let db = make_db().await;
         let results = db
-            .vector_search("no_such_collection", &[1.0], 5, None)
+            .vector_search("no_such_collection", &[1.0], 5, None, None)
             .await
             .unwrap();
         assert!(results.is_empty());

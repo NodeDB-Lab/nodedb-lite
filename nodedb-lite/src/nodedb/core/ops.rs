@@ -11,7 +11,7 @@ use crate::memory::{EngineId, MemoryGovernor};
 use crate::nodedb::lock_ext::LockExt;
 use crate::storage::engine::StorageEngine;
 
-use super::types::NodeDbLite;
+use super::types::{NodeDbLite, SyncGate};
 
 impl<S: StorageEngine> NodeDbLite<S> {
     /// Update the inverted text index after a document write.
@@ -33,15 +33,19 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .collect::<Vec<_>>()
             .join(" ");
 
+        // Always index locally so local search works.
         self.fts_state
             .manager
             .lock_or_recover()
             .index_document(collection, doc_id, &text);
 
-        // Propagate to Origin via sync outbound queue.
+        // Propagate to Origin via sync outbound queue — unless the sync gate
+        // keeps this document local-only.
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(q) = &self.fts_outbound {
-            q.enqueue_index(collection, doc_id, text);
+        if self.should_sync_doc(collection, fields) {
+            if let Some(q) = &self.fts_outbound {
+                q.enqueue_index(collection, doc_id, text);
+            }
         }
         #[cfg(target_arch = "wasm32")]
         let _ = text;
@@ -358,6 +362,32 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .map_err(NodeDbError::storage)?;
 
         Ok(())
+    }
+
+    /// Install a per-document [`SyncGate`]. Documents the gate rejects are kept
+    /// local-only (excluded from CRDT delta, FTS, and vector sync channels).
+    pub fn set_sync_gate(&self, gate: Arc<dyn SyncGate>) {
+        let mut slot = self
+            .sync_gate
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(gate);
+    }
+
+    /// Whether a document write may be synced. Defaults to `true` when no gate is
+    /// installed (sync-everything, the prior behavior).
+    pub(crate) fn should_sync_doc(
+        &self,
+        collection: &str,
+        fields: &std::collections::HashMap<String, nodedb_types::Value>,
+    ) -> bool {
+        match self.sync_gate.read() {
+            Ok(slot) => slot
+                .as_ref()
+                .map(|g| g.should_sync(collection, fields))
+                .unwrap_or(true),
+            Err(_) => true,
+        }
     }
 
     /// Access pending CRDT deltas (for sync client).

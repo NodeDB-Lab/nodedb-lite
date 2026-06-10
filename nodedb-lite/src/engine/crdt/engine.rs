@@ -434,6 +434,16 @@ impl CrdtEngine {
         self.pending_deltas.clear();
     }
 
+    /// Drop a single pending delta by `mutation_id` without touching CRDT state.
+    ///
+    /// Unlike [`reject_delta`](Self::reject_delta), this does **not** delete the
+    /// document — the row stays in local CRDT state (so local reads/search work);
+    /// it is simply never pushed to Origin. Used to keep a document local-only
+    /// when the host's `SyncGate` rejects it for sync.
+    pub fn drop_pending(&mut self, mutation_id: u64) {
+        self.pending_deltas.retain(|d| d.mutation_id != mutation_id);
+    }
+
     /// Mark deltas as acknowledged by Origin (after DeltaAck received).
     ///
     /// Removes all pending deltas with `mutation_id <= acked_id`.

@@ -166,6 +166,25 @@ impl FtsCollectionManager {
             .collect()
     }
 
+    /// Like [`Self::search`] but restricts results to documents whose string
+    /// doc_id is in `allowed`. Fetches `top_k * 8` candidates from BM25 to
+    /// account for haystack documents that rank below non-haystack documents.
+    pub(crate) fn search_with_allowed(
+        &self,
+        collection: &str,
+        query: &str,
+        top_k: usize,
+        params: &TextSearchParams,
+        allowed: &std::collections::HashSet<String>,
+    ) -> Vec<FtsResult> {
+        let fetch_k = top_k.saturating_mul(8).max(top_k);
+        self.search(collection, query, fetch_k, params)
+            .into_iter()
+            .filter(|r| allowed.contains(&r.doc_id))
+            .take(top_k)
+            .collect()
+    }
+
     // ── BM25ScoreScan: all docs with injected score (0.0 for non-matches) ────
 
     /// Return every known document in `collection` together with its BM25 score
@@ -552,6 +571,38 @@ mod tests {
         assert!(
             !ids.contains(&"doc2"),
             "doc2 must be removed from the index"
+        );
+    }
+
+    #[test]
+    fn search_with_allowed_ids_excludes_non_members() {
+        use nodedb_types::text_search::{QueryMode, TextSearchParams};
+        use std::collections::HashSet;
+
+        let mut mgr = FtsCollectionManager::new();
+        mgr.index_document("col", "doc-a", "rust programming language memory safe");
+        mgr.index_document("col", "doc-b", "rust is fast and compiled");
+        mgr.index_document("col", "doc-c", "python is also a language");
+
+        let allowed: HashSet<String> = ["doc-a".to_string()].into_iter().collect();
+        let params = TextSearchParams {
+            fuzzy: false,
+            mode: QueryMode::Or,
+        };
+
+        let results = mgr.search_with_allowed("col", "rust", 10, &params, &allowed);
+        let ids: Vec<&str> = results.iter().map(|r| r.doc_id.as_str()).collect();
+        assert!(
+            ids.contains(&"doc-a"),
+            "doc-a must appear (in allowed set and matches query), got: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"doc-b"),
+            "doc-b must be excluded (not in allowed set), got: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"doc-c"),
+            "doc-c must be excluded (not in allowed set and does not match rust), got: {ids:?}"
         );
     }
 

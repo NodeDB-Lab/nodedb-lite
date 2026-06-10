@@ -119,6 +119,24 @@ pub struct NodeDbLite<S: StorageEngine> {
     /// design means `Release` stores happen-before the lock release; readers
     /// that see 0 observe a consistent snapshot.
     pub(crate) kv_overlay_len: AtomicUsize,
+    /// Optional per-document sync gate. When set, each document write consults
+    /// it; documents the gate rejects are kept local-only — excluded from the
+    /// CRDT delta push, the FTS index sync, and the vector insert sync. Used by
+    /// hosts (e.g. ma8e) to keep confidential entries from leaving the machine.
+    /// Set-once-at-startup; read on every write, so `RwLock` keeps reads cheap.
+    pub(crate) sync_gate: std::sync::RwLock<Option<std::sync::Arc<dyn SyncGate>>>,
+}
+
+/// Per-document policy deciding whether a write may leave this node via sync.
+///
+/// Returning `false` keeps the document local-only: it is still written to local
+/// CRDT state, the local FTS index, and the local vector index (so local reads
+/// and search work), but it is excluded from every outbound sync channel.
+pub trait SyncGate: Send + Sync {
+    /// Decide whether a document write should be synced. Called with the
+    /// collection name and the document's fields (so the policy can inspect,
+    /// e.g., a `share` field).
+    fn should_sync(&self, collection: &str, fields: &HashMap<String, nodedb_types::Value>) -> bool;
 }
 
 /// Buffered KV writes for batch commit.
