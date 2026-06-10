@@ -8,6 +8,9 @@
 
 mod dispatch;
 mod document;
+mod document_batch;
 mod graph;
 mod sql_lifecycle;
 mod vector;
+
+pub use document_batch::BatchItem;
