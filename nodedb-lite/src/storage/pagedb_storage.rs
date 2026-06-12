@@ -12,6 +12,9 @@
 //! Type aliases `PagedbStorageDefault` and `PagedbStorageMem` are provided for
 //! ergonomics; callers rarely need to spell the generic.
 
+// `Path` and the corruption-recovery helpers are only used by the native
+// `open()` rename-and-recreate path, which is compiled out on wasm32 (OPFS).
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::sync::Arc;
 
@@ -53,10 +56,8 @@ pub type PagedbStorageOpfs = PagedbStorage<pagedb::vfs::opfs::OpfsVfs>;
 /// site rather than going through the error path.
 ///
 /// `PagedbError::Quota` is mapped to `LiteError::Storage` for now. A dedicated
-/// `LiteError::Quota` variant should be added in a follow-up (see
-/// `resource/PAGEDB_GAPS.md` item #9) so that quota pressure is distinguishable
-/// at the application layer without string-matching. This is documented deferral
-/// — not a silent lump — so that the gap doc captures the intent.
+/// `LiteError::Quota` variant should be added so that quota pressure is
+/// distinguishable at the application layer without string-matching.
 impl From<PagedbError> for LiteError {
     fn from(e: PagedbError) -> Self {
         match e {
@@ -84,6 +85,10 @@ impl From<PagedbError> for LiteError {
 
 /// Returns `true` when the error is a corruption-class error that should
 /// trigger the rename-and-recreate recovery path in `PagedbStorage::open`.
+///
+/// Only the native `open()` uses this; OPFS has no rename, so it is compiled
+/// out on wasm32.
+#[cfg(not(target_arch = "wasm32"))]
 fn is_corruption(e: &PagedbError) -> bool {
     matches!(e, PagedbError::Corruption(_) | PagedbError::ChecksumFailure)
 }
@@ -168,9 +173,9 @@ fn ns_end(ns: Namespace) -> Vec<u8> {
 
 /// Build the `OpenOptions` used for all `PagedbStorage` instances.
 ///
-/// `RetainPolicy::Disabled` is selected per `resource/PAGEDB_GAPS.md` item
-/// #11: Lite does not need point-in-time reads; skipping commit-history
-/// tracking shaves latency from every `WriteTxn::commit`.
+/// `RetainPolicy::Disabled` is selected because Lite does not need
+/// point-in-time reads; skipping commit-history tracking shaves latency
+/// from every `WriteTxn::commit`.
 fn lite_open_options() -> OpenOptions {
     OpenOptions::default().with_commit_history_retain(RetainPolicy::Disabled)
 }
@@ -181,8 +186,7 @@ fn lite_open_options() -> OpenOptions {
 ///
 /// The inner `Db<V>` lives behind `Arc` for cheap cloning across async methods.
 /// No outer `Mutex` is needed: `Db::begin_write` already acquires an internal
-/// async mutex (single-writer serialization is enforced by pagedb itself — see
-/// `resource/PAGEDB_GAPS.md` item #8).
+/// async mutex (single-writer serialization is enforced by pagedb itself).
 pub struct PagedbStorage<V: Vfs + Clone> {
     pub(crate) db: Arc<Db<V>>,
 }
@@ -203,22 +207,28 @@ impl<V: Vfs + Clone> Clone for PagedbStorage<V> {
 impl PagedbStorage<DefaultVfs> {
     /// Open or create a database at `path` using the platform-native async VFS.
     ///
+    /// `encryption` controls how the 32-byte pagedb page-encryption key is
+    /// obtained:
+    ///
+    /// - [`Encryption::Plaintext`] — no encryption; the all-zero key is used.
+    ///   Must be chosen consciously.
+    /// - [`Encryption::Passphrase`] — derives the key via Argon2id using a
+    ///   random 16-byte salt. The salt is persisted in a plaintext sidecar file
+    ///   at `<path>.salt` (created on first open, mode 0o600 on Unix) so that
+    ///   the same passphrase reproduces the same key on every reopen.
+    /// - [`Encryption::RawKey`] — uses the supplied 32-byte key directly; the
+    ///   caller is responsible for key management and no sidecar is written.
+    ///
     /// On corruption (`PagedbError::Corruption` / `ChecksumFailure`), the
     /// directory is renamed to `{path}.corrupt.{unix_secs}` and a fresh
-    /// database is created (same recovery contract as the previous backend).
-    /// Data recovery happens via re-sync from Origin.
-    ///
-    /// # KEK placeholder
-    ///
-    /// The key-encryption key (`kek`) is currently hardcoded to `[0u8; 32]`.
-    /// This is a **known gap** — see `resource/PAGEDB_GAPS.md` item #13.
-    /// Do NOT use in production without replacing this with a proper KEK derived
-    /// from user credentials or a hardware-backed key store.
-    pub async fn open(path: impl AsRef<Path>) -> Result<Self, LiteError> {
+    /// database is created using the same `encryption`. Data recovery happens
+    /// via re-sync from Origin.
+    pub async fn open(
+        path: impl AsRef<Path>,
+        encryption: crate::storage::encryption::Encryption,
+    ) -> Result<Self, LiteError> {
         let path = path.as_ref();
-
-        // TODO(PAGEDB_GAPS #13): replace with proper KEK before any production use.
-        let kek = [0u8; 32];
+        let kek = crate::storage::encryption::resolve_kek_native(&encryption, path)?;
         let realm = RealmId::new([0u8; 16]);
 
         let vfs = pagedb::vfs::open_default(path).map_err(LiteError::from)?;
@@ -265,11 +275,9 @@ impl PagedbStorage<DefaultVfs> {
 impl PagedbStorage<MemVfs> {
     /// Create an in-memory database (for testing and WASM without persistence).
     ///
-    /// # KEK placeholder
-    ///
-    /// Same placeholder KEK as `open` — see `resource/PAGEDB_GAPS.md` item #13.
+    /// In-memory storage is volatile (data lives only for the process lifetime),
+    /// so no at-rest encryption is applied; the pagedb KEK is all-zero.
     pub async fn open_in_memory() -> Result<Self, LiteError> {
-        // TODO(PAGEDB_GAPS #13): replace with proper KEK before any production use.
         let kek = [0u8; 32];
         let realm = RealmId::new([0u8; 16]);
         let vfs = MemVfs::new();
@@ -391,7 +399,6 @@ where
 
     async fn count(&self, ns: Namespace) -> Result<u64, LiteError> {
         // No count primitive in pagedb B+ tree — scan the prefix and count.
-        // See resource/PAGEDB_GAPS.md item #3.
         let ns_prefix = vec![ns as u8];
         let txn = self.db.begin_read().await.map_err(LiteError::from)?;
         let raw = txn.scan_prefix(&ns_prefix).await.map_err(LiteError::from)?;
@@ -483,15 +490,60 @@ where
 
 // ─── WASM-only OPFS constructor ───────────────────────────────────────────────
 
+/// Validate an OPFS database name before it is used as the VFS root directory.
+///
+/// The name becomes a single OPFS directory segment, so it must be non-empty,
+/// free of path separators and NUL, and must not be a relative-traversal
+/// segment. Rejecting here yields a clear error instead of an opaque worker
+/// failure (OPFS `getDirectoryHandle` rejects `.`/`..` with a `TypeError`).
+#[cfg(target_arch = "wasm32")]
+fn validate_opfs_db_name(name: &str) -> Result<(), LiteError> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+    {
+        return Err(LiteError::BadRequest {
+            detail: format!(
+                "invalid OPFS database name {name:?}: must be a non-empty single path \
+                 segment without '/', '\\', or NUL and not '.' or '..'"
+            ),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(target_arch = "wasm32")]
 impl PagedbStorage<pagedb::vfs::opfs::OpfsVfs> {
     /// Open or create a persistent database backed by the browser's Origin
     /// Private File System (OPFS).
     ///
+    /// `db_name` selects an OPFS sub-directory that scopes every file this
+    /// database touches (`main.db`, segments, locks, the salt sidecar). Distinct
+    /// names are fully isolated databases in the shared OPFS origin; reopening
+    /// with the same name reattaches the same database. It must be a single path
+    /// segment — non-empty, no `/`, `\`, or NUL, and not `.`/`..`.
+    ///
     /// `worker_url` is the URL of the JS bootstrap script that calls
-    /// `OpfsWorker::registrar().register()` inside a dedicated Web Worker.
-    /// The embedder (nodedb-lite-wasm) must export a `run_opfs_worker`
-    /// function that the worker script invokes on startup.
+    /// `run_opfs_worker()` inside a dedicated Web Worker. The embedder
+    /// (nodedb-lite-wasm) must export that function and serve the bootstrap
+    /// script at a URL the browser can load.
+    ///
+    /// `encryption` controls how the 32-byte pagedb page-encryption key is
+    /// obtained:
+    ///
+    /// - [`Encryption::Plaintext`] — no encryption; the all-zero key is used.
+    ///   Must be chosen consciously; OPFS storage is not encrypted by the
+    ///   browser itself, so a passphrase is strongly recommended.
+    /// - [`Encryption::Passphrase`] — derives the key via Argon2id. A random
+    ///   16-byte salt is persisted in an OPFS sidecar file at
+    ///   `__nodedb_salt` (in the same OPFS origin sandbox as the database)
+    ///   so the same passphrase reproduces the same key on every reopen.
+    /// - [`Encryption::RawKey`] — uses the supplied 32-byte key directly;
+    ///   the caller is responsible for key management and no sidecar is
+    ///   written.
     ///
     /// # Corruption recovery
     ///
@@ -500,20 +552,24 @@ impl PagedbStorage<pagedb::vfs::opfs::OpfsVfs> {
     /// available here. On a corruption error the call fails immediately with
     /// `LiteError::WorkerFailed`. Recovery is the caller's responsibility
     /// (e.g. delete the OPFS directory and re-sync from Origin).
-    ///
-    /// # KEK placeholder
-    ///
-    /// The key-encryption key is currently hardcoded to `[0u8; 32]`.
-    /// Replace before any production use.
-    pub async fn open_opfs(worker_url: &str) -> Result<Self, LiteError> {
-        // TODO(PAGEDB_GAPS #13): replace with proper KEK before any production use.
-        let kek = [0u8; 32];
+    pub async fn open_opfs(
+        db_name: &str,
+        worker_url: &str,
+        encryption: crate::storage::encryption::Encryption,
+    ) -> Result<Self, LiteError> {
+        validate_opfs_db_name(db_name)?;
+
         let realm = RealmId::new([0u8; 16]);
 
-        let vfs =
-            pagedb::vfs::opfs::OpfsVfs::new(worker_url).map_err(|e| LiteError::WorkerFailed {
+        let vfs = pagedb::vfs::opfs::OpfsVfs::with_root(worker_url, db_name).map_err(|e| {
+            LiteError::WorkerFailed {
                 detail: format!("failed to spawn OPFS worker at '{worker_url}': {e}"),
-            })?;
+            }
+        })?;
+
+        // Resolve the KEK using a clone of the VFS so the original can be
+        // forwarded into Db::open below. OpfsVfs::clone is cheap (Arc clone).
+        let kek = crate::storage::encryption::resolve_kek_opfs(&encryption, &vfs.clone()).await?;
 
         let db = Db::open(vfs, kek, 4096, realm, lite_open_options())
             .await
