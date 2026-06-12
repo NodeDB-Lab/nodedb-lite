@@ -338,6 +338,8 @@ where
         let idx = FtsIndex::new(backend);
 
         // ── Posting data: try pagedb segment path first, fall back to KV ─────
+        // Flipped only by the native segment path, compiled out on wasm32.
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut restored_from_segment = false;
 
         #[cfg(not(target_arch = "wasm32"))]

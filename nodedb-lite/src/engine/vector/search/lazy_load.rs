@@ -49,6 +49,8 @@ pub(super) async fn ensure_index_loaded<S: StorageEngine>(
         return Ok(());
     };
 
+    // `index` is mutated only by the native segment-backing path (wasm32: none).
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     let Ok(Some(mut index)) = HnswIndex::from_checkpoint(&checkpoint) else {
         return Ok(());
     };

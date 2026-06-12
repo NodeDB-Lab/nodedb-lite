@@ -362,17 +362,17 @@ impl FtsCollectionManager {
         &mut self,
         collection: &str,
         origin_surrogate: Surrogate,
-    ) -> bool {
+    ) -> Option<String> {
         let Some(doc_id) = self.origin_surrogate_to_doc_id.remove(&origin_surrogate.0) else {
             tracing::debug!(
                 collection,
                 sur = origin_surrogate.0,
                 "FtsDeleteDoc: no Lite mapping for Origin surrogate — document was never indexed here"
             );
-            return false;
+            return None;
         };
         self.remove_document(collection, &doc_id);
-        true
+        Some(doc_id)
     }
 
     // ── Per-field indexing (used by strict collections via index_integration) ─
@@ -562,7 +562,7 @@ mod tests {
 
         // Delete via origin surrogate.
         let removed = mgr.remove_by_origin_surrogate("col", Surrogate(42));
-        assert!(removed, "doc2 must be found and removed");
+        assert!(removed.is_some(), "doc2 must be found and removed");
 
         // doc1 and doc3 still searchable, doc2 not.
         let results = mgr.search("col", "rust", 10, &default_params());
@@ -612,7 +612,7 @@ mod tests {
         mgr.index_document("col", "doc1", "hello world");
 
         let removed = mgr.remove_by_origin_surrogate("col", Surrogate(99));
-        assert!(!removed, "unknown surrogate must return false");
+        assert!(removed.is_none(), "unknown surrogate must return None");
 
         // doc1 unaffected.
         let results = mgr.search("col", "hello", 10, &default_params());

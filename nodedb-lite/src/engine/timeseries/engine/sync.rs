@@ -128,6 +128,9 @@ impl TimeseriesEngine {
             min_ts,
             max_ts,
             watermarks,
+            producer_id: 0,
+            epoch: 0,
+            seq: 0,
         })
     }
 

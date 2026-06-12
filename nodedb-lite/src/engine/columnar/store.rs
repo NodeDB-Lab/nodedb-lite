@@ -27,7 +27,7 @@ use crate::error::LiteError;
 use crate::runtime::now_millis_i64;
 use crate::storage::engine::{StorageEngine, WriteOp};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::sync::ColumnarOutbound;
+use crate::sync::outbound::columnar::ColumnarOutbound;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::sync::outbound::timeseries::TimeseriesOutbound;
 
@@ -138,7 +138,7 @@ pub struct ColumnarEngine<S: StorageEngine> {
     /// Optional outbound queue for plain columnar insert sync.
     /// `None` when sync is disabled or not yet configured.
     #[cfg(not(target_arch = "wasm32"))]
-    outbound: Option<Arc<ColumnarOutbound>>,
+    outbound: Option<Arc<ColumnarOutbound<S>>>,
     /// Optional outbound queue for timeseries-profile insert sync.
     ///
     /// Timeseries collections must use `TimeseriesPush` frames on Origin
@@ -147,7 +147,7 @@ pub struct ColumnarEngine<S: StorageEngine> {
     /// collections with `ColumnarProfile::Timeseries` are enqueued here
     /// instead of `outbound`.
     #[cfg(not(target_arch = "wasm32"))]
-    timeseries_outbound: Option<Arc<TimeseriesOutbound>>,
+    timeseries_outbound: Option<Arc<TimeseriesOutbound<S>>>,
 }
 
 impl<S: StorageEngine> ColumnarEngine<S> {
@@ -167,7 +167,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
     ///
     /// Must be called before any inserts if columnar sync is desired.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn set_outbound(&mut self, outbound: Arc<ColumnarOutbound>) {
+    pub fn set_outbound(&mut self, outbound: Arc<ColumnarOutbound<S>>) {
         self.outbound = Some(outbound);
     }
 
@@ -177,7 +177,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
     /// are routed here instead of `outbound`, so the transport can send them
     /// as `TimeseriesPush` frames to Origin's timeseries engine.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn set_timeseries_outbound(&mut self, outbound: Arc<TimeseriesOutbound>) {
+    pub fn set_timeseries_outbound(&mut self, outbound: Arc<TimeseriesOutbound<S>>) {
         self.timeseries_outbound = Some(outbound);
     }
 
@@ -518,32 +518,103 @@ impl<S: StorageEngine> ColumnarEngine<S> {
 
     /// Insert a row into a columnar collection's memtable.
     ///
-    /// When a sync outbound queue is attached the row is also enqueued for
-    /// replication to Origin.  Timeseries-profile collections use the
-    /// `timeseries_outbound` queue (→ `TimeseriesPush` frames); all other
-    /// columnar collections use `outbound` (→ `ColumnarInsert` frames).
+    /// This is a pure in-memory operation. Call [`enqueue_outbound`] from
+    /// an async context after inserting to durably enqueue the row for
+    /// replication to Origin.
     pub fn insert(&self, collection: &str, values: &[Value]) -> Result<(), LiteError> {
         let state_arc = self.lookup(collection)?;
         let mut s = Self::lock_state(&state_arc)?;
         s.mutation.insert(values).map_err(columnar_err_to_lite)?;
+        Ok(())
+    }
 
-        #[cfg(not(target_arch = "wasm32"))]
-        if matches!(s.profile, ColumnarProfile::Timeseries { .. }) {
-            // Timeseries rows must replicate via TimeseriesPush so that Origin
-            // stores them in its timeseries engine, not the columnar MutationEngine.
-            if let Some(ts_out) = &self.timeseries_outbound {
-                let column_names: Vec<String> = s
-                    .mutation
-                    .schema()
-                    .columns
-                    .iter()
-                    .map(|c| c.name.clone())
-                    .collect();
-                ts_out.enqueue_row(collection, column_names, values.to_vec());
+    /// Durably enqueue a batch of inserted rows for replication to Origin.
+    ///
+    /// Must be called from an async context after one or more successful
+    /// [`insert`] calls. Timeseries-profile collections are routed to the
+    /// `timeseries_outbound` queue; all other columnar collections use the
+    /// plain `outbound` queue.
+    ///
+    /// Returns [`LiteError::Backpressure`] when the queue is at cap so the
+    /// caller can propagate back-pressure. Other enqueue errors are logged as
+    /// warnings (the local insert already succeeded) and `Ok(())` is returned.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn enqueue_outbound(
+        &self,
+        collection: &str,
+        rows: &[Vec<Value>],
+    ) -> Result<(), LiteError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        // Read the profile and schema metadata under the lock, then drop it
+        // before any await point to satisfy the no-lock-across-await rule.
+        enum OutboundRoute {
+            Timeseries { column_names: Vec<String> },
+            Columnar { schema_bytes: Vec<u8> },
+            None,
+        }
+
+        let route: OutboundRoute = {
+            let state_arc = self.lookup(collection)?;
+            let s = Self::lock_state(&state_arc)?;
+            if matches!(s.profile, ColumnarProfile::Timeseries { .. }) {
+                if self.timeseries_outbound.is_some() {
+                    let column_names: Vec<String> = s
+                        .mutation
+                        .schema()
+                        .columns
+                        .iter()
+                        .map(|c| c.name.clone())
+                        .collect();
+                    OutboundRoute::Timeseries { column_names }
+                } else {
+                    OutboundRoute::None
+                }
+            } else if self.outbound.is_some() {
+                let schema_bytes = zerompk::to_msgpack_vec(s.mutation.schema()).unwrap_or_default();
+                OutboundRoute::Columnar { schema_bytes }
+            } else {
+                OutboundRoute::None
             }
-        } else if let Some(outbound) = &self.outbound {
-            let schema_bytes = zerompk::to_msgpack_vec(s.mutation.schema()).unwrap_or_default();
-            outbound.enqueue_row(collection, values.to_vec(), schema_bytes);
+            // lock `s` is dropped here at end of block
+        };
+
+        match route {
+            OutboundRoute::Timeseries { column_names } => {
+                let queue = match &self.timeseries_outbound {
+                    Some(q) => Arc::clone(q),
+                    None => return Ok(()),
+                };
+                for row in rows {
+                    crate::sync::reconcile_outbound_enqueue(
+                        queue
+                            .enqueue_row(collection, column_names.clone(), row.clone())
+                            .await,
+                        "timeseries insert",
+                        collection,
+                        "",
+                    )?;
+                }
+            }
+            OutboundRoute::Columnar { schema_bytes } => {
+                let queue = match &self.outbound {
+                    Some(q) => Arc::clone(q),
+                    None => return Ok(()),
+                };
+                for row in rows {
+                    crate::sync::reconcile_outbound_enqueue(
+                        queue
+                            .enqueue_row(collection, row.clone(), schema_bytes.clone())
+                            .await,
+                        "columnar insert",
+                        collection,
+                        "",
+                    )?;
+                }
+            }
+            OutboundRoute::None => {}
         }
 
         Ok(())

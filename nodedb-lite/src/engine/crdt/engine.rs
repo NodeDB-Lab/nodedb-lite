@@ -80,6 +80,11 @@ pub struct PendingDelta {
     pub document_id: String,
     /// Loro delta bytes (compact binary).
     pub delta_bytes: Vec<u8>,
+    /// Stable idempotent-producer seq for this delta. 0 = unassigned;
+    /// assigned at first send and reused on reconnect re-send so Origin
+    /// dedups instead of double-applying.
+    #[serde(default)]
+    pub seq: u64,
 }
 
 impl CrdtEngine {
@@ -162,6 +167,7 @@ impl CrdtEngine {
             collection: collection.to_string(),
             document_id: doc_id.to_string(),
             delta_bytes,
+            seq: 0,
         });
 
         Ok(mutation_id)
@@ -191,6 +197,7 @@ impl CrdtEngine {
             collection: collection.to_string(),
             document_id: doc_id.to_string(),
             delta_bytes,
+            seq: 0,
         });
 
         Ok(mutation_id)
@@ -240,6 +247,7 @@ impl CrdtEngine {
             collection: collection_name,
             document_id: format!("{}_ops", ops.len()),
             delta_bytes,
+            seq: 0,
         });
 
         Ok(mutation_id)
@@ -317,6 +325,7 @@ impl CrdtEngine {
             collection: "deferred".to_string(),
             document_id: format!("{count}_ops"),
             delta_bytes,
+            seq: 0,
         });
 
         self.deferred_count = 0;
@@ -375,6 +384,7 @@ impl CrdtEngine {
                 collection: collection.to_string(),
                 document_id: "*".to_string(),
                 delta_bytes,
+                seq: 0,
             });
         }
 
@@ -442,6 +452,22 @@ impl CrdtEngine {
     /// when the host's `SyncGate` rejects it for sync.
     pub fn drop_pending(&mut self, mutation_id: u64) {
         self.pending_deltas.retain(|d| d.mutation_id != mutation_id);
+    }
+
+    /// Assign a stable stream seq to a pending delta the first time it is sent.
+    ///
+    /// If the delta already has a non-zero seq (assigned on a previous send)
+    /// the call is a no-op — the existing seq is reused on reconnect re-sends
+    /// so Origin can deduplicate rather than double-apply.
+    pub fn set_pending_delta_seq(&mut self, mutation_id: u64, seq: u64) {
+        if let Some(d) = self
+            .pending_deltas
+            .iter_mut()
+            .find(|d| d.mutation_id == mutation_id)
+            && d.seq == 0
+        {
+            d.seq = seq;
+        }
     }
 
     /// Mark deltas as acknowledged by Origin (after DeltaAck received).
@@ -685,6 +711,7 @@ impl CrdtEngine {
             collection: collection.to_string(),
             document_id: document_id.to_string(),
             delta_bytes,
+            seq: 0,
         });
         Ok(())
     }
