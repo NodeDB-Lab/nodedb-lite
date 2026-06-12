@@ -105,6 +105,7 @@ where
             dim,
             field_name,
             surrogate,
+            provenance: _,
         } => {
             if vector.len() != *dim {
                 return Err(LiteError::BadRequest {
@@ -133,6 +134,7 @@ where
             collection,
             surrogate,
             field_name,
+            provenance: _,
         } => Ok(vector_delete_by_surrogate(
             engine,
             collection.clone(),
@@ -392,6 +394,7 @@ mod tests {
             dim: 4,
             field_name: String::new(),
             surrogate: Surrogate::new(1u32),
+            provenance: None,
         };
         let fut = super::execute_vector_op(&engine, &op)
             .unwrap_or_else(|e| panic!("execute_vector_op should not fail synchronously: {e}"));
@@ -412,6 +415,7 @@ mod tests {
             dim: 4,
             field_name: String::new(),
             surrogate: Surrogate::new(42u32),
+            provenance: None,
         };
         super::execute_vector_op(&engine, &insert_op)
             .unwrap()

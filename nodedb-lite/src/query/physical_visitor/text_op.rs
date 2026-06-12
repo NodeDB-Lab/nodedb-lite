@@ -409,11 +409,14 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
             collection,
             surrogate,
             text,
+            provenance: _,
         } => {
             let collection = collection.clone();
             let text = text.clone();
             let surrogate = *surrogate;
             let fts_state = Arc::clone(&engine.fts_state);
+            #[cfg(not(target_arch = "wasm32"))]
+            let fts_outbound = engine.fts_outbound.as_ref().map(Arc::clone);
             Ok(Box::pin(async move {
                 // On Lite the surrogate space is internal to FtsCollectionManager.
                 // We use `text` as the string doc_id (stable across frames for the
@@ -425,6 +428,12 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                     .map_err(|_| LiteError::LockPoisoned)?;
                 mgr.index_document(&collection, &text, &text);
                 mgr.register_origin_surrogate(surrogate, &text);
+                drop(mgr);
+                // Stage for durable sync outbound (SQL path — no await needed).
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(q) = fts_outbound {
+                    q.stage_index(&collection, &text, text.clone());
+                }
                 Ok(QueryResult {
                     columns: vec![],
                     rows: vec![],
@@ -436,20 +445,29 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
         TextOp::FtsDeleteDoc {
             collection,
             surrogate,
+            provenance: _,
         } => {
             let collection = collection.clone();
             let surrogate = *surrogate;
             let fts_state = Arc::clone(&engine.fts_state);
+            #[cfg(not(target_arch = "wasm32"))]
+            let fts_outbound = engine.fts_outbound.as_ref().map(Arc::clone);
             Ok(Box::pin(async move {
                 let mut mgr = fts_state
                     .manager
                     .lock()
                     .map_err(|_| LiteError::LockPoisoned)?;
-                let found = mgr.remove_by_origin_surrogate(&collection, surrogate);
+                let removed_doc_id = mgr.remove_by_origin_surrogate(&collection, surrogate);
+                drop(mgr);
+                // Stage delete for durable sync outbound (SQL path — no await needed).
+                #[cfg(not(target_arch = "wasm32"))]
+                if let (Some(q), Some(doc_id)) = (fts_outbound, removed_doc_id.as_deref()) {
+                    q.stage_delete(&collection, doc_id);
+                }
                 Ok(QueryResult {
                     columns: vec![],
                     rows: vec![],
-                    rows_affected: if found { 1 } else { 0 },
+                    rows_affected: if removed_doc_id.is_some() { 1 } else { 0 },
                 })
             }))
         }

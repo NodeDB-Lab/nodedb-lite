@@ -27,9 +27,25 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             gap_fill,
             computed_columns,
             rls_filters,
-            system_as_of_ms,
+            system_time,
             valid_at_ms,
         } => {
+            use nodedb_types::SystemTimeScope;
+            // Timeseries does not implement all-versions audit in Lite.
+            if system_time.is_all_versions() {
+                return Err(LiteError::Unsupported {
+                    detail: "AS OF SYSTEM TIME NULL (all-versions) is not supported on \
+                             the timeseries engine in Lite"
+                        .into(),
+                });
+            }
+            // Only an explicit `AS OF SYSTEM TIME <ts>` narrows the read; every
+            // other scope (`Current`, and the all-versions case already rejected
+            // above) means "no system-time filter" → read the latest version.
+            let system_as_of_ms: Option<i64> = match system_time {
+                SystemTimeScope::AsOf(ms) => Some(*ms),
+                _ => None,
+            };
             let col = collection.clone();
             let tr = *time_range;
             let proj = projection.clone();
@@ -41,7 +57,6 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let gf = gap_fill.clone();
             let cc = computed_columns.clone();
             let rls = rls_filters.clone();
-            let sys_as_of = *system_as_of_ms;
             let valid_at = *valid_at_ms;
             Ok(Box::pin(async move {
                 timeseries_ops::reads::scan(
@@ -58,7 +73,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                         gap_fill: gf,
                         computed_columns: cc,
                         rls_filters: rls,
-                        system_as_of_ms: sys_as_of,
+                        system_as_of_ms,
                         valid_at_ms: valid_at,
                     },
                 )
@@ -71,6 +86,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             format,
             wal_lsn,
             surrogates,
+            provenance: _,
         } => {
             let col = collection.clone();
             let pay = payload.clone();
@@ -78,7 +94,29 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let lsn = *wal_lsn;
             let surr = surrogates.clone();
             Ok(Box::pin(async move {
-                timeseries_ops::writes::ingest(engine, &col, &pay, &fmt, lsn, &surr)
+                // `samples` feeds outbound sync, which is compiled out on wasm32.
+                #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+                let (result, samples) =
+                    timeseries_ops::writes::ingest(engine, &col, &pay, &fmt, lsn, &surr)?;
+                #[cfg(not(target_arch = "wasm32"))]
+                if !samples.is_empty() {
+                    let col_names: Option<Vec<String>> = engine
+                        .columnar
+                        .schema(&col)
+                        .map(|s| s.columns.into_iter().map(|c| c.name).collect());
+                    if let Some(col_names) = col_names {
+                        let rows = timeseries_ops::writes::samples_to_rows(&samples, &col_names);
+                        if !rows.is_empty() {
+                            crate::sync::reconcile_outbound_enqueue(
+                                engine.columnar.enqueue_outbound(&col, &rows).await,
+                                "timeseries insert",
+                                &col,
+                                "",
+                            )?;
+                        }
+                    }
+                }
+                Ok(result)
             }))
         }
     }

@@ -20,6 +20,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             field,
             surrogate,
             geometry,
+            provenance: _,
         } => {
             let col = collection.clone();
             let fld = field.clone();
@@ -34,6 +35,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             collection,
             field,
             surrogate,
+            provenance: _,
         } => {
             let col = collection.clone();
             let fld = field.clone();

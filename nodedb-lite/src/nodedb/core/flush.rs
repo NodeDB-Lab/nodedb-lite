@@ -17,6 +17,11 @@ use super::types::{
 impl<S: StorageEngine> NodeDbLite<S> {
     /// Persist all in-memory state to storage (call before shutdown).
     pub async fn flush(&self) -> NodeDbResult<()> {
+        // Drain the buffered KV writes first — they have their own batch-commit
+        // path. Without this, `flush()` (and the auto-flush timer) would not
+        // persist KV `put`s, contradicting "persist all in-memory state".
+        self.kv_flush_inner().await?;
+
         let mut ops = Vec::new();
 
         // ── Persist CRDT snapshot (CRC32C wrapped) ──
@@ -83,6 +88,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 value: names_bytes,
             });
 
+            // Mutated only via the native segment-ext path, compiled out on wasm32.
+            #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
             let mut segment_data = Vec::new();
             for (name, index) in csr_map.iter() {
                 match index.checkpoint_to_bytes() {
@@ -180,6 +187,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 value: names_bytes,
             });
 
+            // Mutated only via the native segment-ext path, compiled out on wasm32.
+            #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
             let mut segment_data = Vec::new();
             for (name, index) in indices.iter() {
                 let key = format!("hnsw:{name}");
@@ -288,6 +297,27 @@ impl<S: StorageEngine> NodeDbLite<S> {
         )
         .await
         .map_err(|e| NodeDbError::storage(format!("fts flush: {e}")))?;
+
+        // ── Spill FTS + spatial staging buffers to durable queues ────────────
+        // These queues accumulate sync entries written synchronously by
+        // `index_document_text`, `remove_document_text`, `spatial_insert`, and
+        // `spatial_delete`. Spilling here (async, ~every second) keeps the
+        // staging buffers bounded and ensures entries are durable before the
+        // next sync transport drain.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(q) = &self.fts_outbound
+            && let Err(e) = q.flush_staging().await
+        {
+            tracing::warn!(error = %e, "fts outbound flush_staging failed; \
+                    staged entries remain and will be retried on next flush");
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(q) = &self.spatial_outbound
+            && let Err(e) = q.flush_staging().await
+        {
+            tracing::warn!(error = %e, "spatial outbound flush_staging failed; \
+                    staged entries remain and will be retried on next flush");
+        }
 
         Ok(())
     }

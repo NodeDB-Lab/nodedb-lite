@@ -145,6 +145,15 @@ impl<S: StorageEngine> NodeDbLite<S> {
         edge_type: &str,
         properties: Option<Document>,
     ) -> NodeDbResult<EdgeId> {
+        if self.governor.pressure() == crate::memory::PressureLevel::Critical {
+            return Err(NodeDbError::storage(
+                crate::error::LiteError::Backpressure {
+                    detail: "graph edge insert rejected: memory governor is at Critical pressure"
+                        .into(),
+                },
+            ));
+        }
+
         {
             let mut csr_map = self.csr.lock_or_recover();
             let csr = csr_map

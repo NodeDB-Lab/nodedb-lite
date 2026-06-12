@@ -46,9 +46,18 @@ impl<S: StorageEngine> NodeDbLite<S> {
     ) -> NodeDbResult<Self> {
         let governor = crate::memory::MemoryGovernor::from_config(&config);
         let sync_enabled = config.sync_enabled;
+        let outbound_queue_cap = config.outbound_queue_cap;
         let kv_cache_capacity = NonZeroUsize::new(config.kv_cache_capacity)
             .ok_or_else(|| NodeDbError::config("kv_cache_capacity must be greater than 0"))?;
-        Self::open_inner(storage, peer_id, governor, sync_enabled, kv_cache_capacity).await
+        Self::open_inner(
+            storage,
+            peer_id,
+            governor,
+            sync_enabled,
+            outbound_queue_cap,
+            kv_cache_capacity,
+        )
+        .await
     }
 
     /// Open with a custom memory budget (convenience wrapper using default percentages).
@@ -60,10 +69,18 @@ impl<S: StorageEngine> NodeDbLite<S> {
         memory_budget: usize,
     ) -> NodeDbResult<Self> {
         let governor = crate::memory::MemoryGovernor::new(memory_budget);
-        let kv_cache_capacity =
-            NonZeroUsize::new(crate::config::LiteConfig::default().kv_cache_capacity)
-                .expect("default kv_cache_capacity is non-zero");
-        Self::open_inner(storage, peer_id, governor, true, kv_cache_capacity).await
+        let defaults = crate::config::LiteConfig::default();
+        let kv_cache_capacity = NonZeroUsize::new(defaults.kv_cache_capacity)
+            .expect("default kv_cache_capacity is non-zero");
+        Self::open_inner(
+            storage,
+            peer_id,
+            governor,
+            true,
+            defaults.outbound_queue_cap,
+            kv_cache_capacity,
+        )
+        .await
     }
 
     #[allow(clippy::await_holding_lock)]
@@ -72,9 +89,25 @@ impl<S: StorageEngine> NodeDbLite<S> {
         peer_id: u64,
         governor: crate::memory::MemoryGovernor,
         sync_enabled: bool,
+        outbound_queue_cap: usize,
         kv_cache_capacity: NonZeroUsize,
     ) -> NodeDbResult<Self> {
+        // Only the outbound sync queues (compiled out on wasm32) consume the cap.
+        #[cfg(target_arch = "wasm32")]
+        let _ = outbound_queue_cap;
+
         let storage = Arc::new(storage);
+
+        // ── Load or create Lite identity (lite_id + epoch) ──
+        //
+        // This must happen before any outbound sync so the handshake carries a
+        // non-empty lite_id and epoch ≥ 1, enabling Origin's idempotent-producer
+        // gate. The epoch is incremented on every open, so a new process
+        // incarnation fences out writes from the previous one.
+        let lite_identity =
+            crate::engine::timeseries::identity::LiteIdentity::load_or_create(&*storage)
+                .await
+                .map_err(|e| NodeDbError::storage(format!("lite identity load failed: {e}")))?;
 
         // ── Restore CRDT state (with CRC32C validation) ──
         let mut crdt = match storage
@@ -213,8 +246,15 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         // Wire per-engine sync outbound queues when sync is enabled (native only).
         #[cfg(not(target_arch = "wasm32"))]
-        let columnar_outbound: Option<Arc<crate::sync::ColumnarOutbound>> = if sync_enabled {
-            let q = Arc::new(crate::sync::ColumnarOutbound::new());
+        let columnar_outbound: Option<Arc<crate::sync::ColumnarOutbound<S>>> = if sync_enabled {
+            let q = Arc::new(
+                crate::sync::ColumnarOutbound::open_with_cap(
+                    Arc::clone(&storage),
+                    outbound_queue_cap,
+                )
+                .await
+                .map_err(|e| NodeDbError::storage(format!("columnar outbound open: {e}")))?,
+            );
             columnar.set_outbound(Arc::clone(&q));
             Some(q)
         } else {
@@ -222,35 +262,63 @@ impl<S: StorageEngine> NodeDbLite<S> {
         };
 
         #[cfg(not(target_arch = "wasm32"))]
-        let vector_outbound: Option<Arc<crate::sync::VectorOutbound>> = if sync_enabled {
-            Some(Arc::new(crate::sync::VectorOutbound::new()))
-        } else {
-            None
-        };
-
-        #[cfg(not(target_arch = "wasm32"))]
-        let fts_outbound_init: Option<Arc<crate::sync::FtsOutbound>> = if sync_enabled {
-            Some(Arc::new(crate::sync::FtsOutbound::new()))
-        } else {
-            None
-        };
-
-        #[cfg(not(target_arch = "wasm32"))]
-        let spatial_outbound_init: Option<Arc<crate::sync::SpatialOutbound>> = if sync_enabled {
-            Some(Arc::new(crate::sync::SpatialOutbound::new()))
-        } else {
-            None
-        };
-
-        #[cfg(not(target_arch = "wasm32"))]
-        let timeseries_outbound_init: Option<Arc<crate::sync::TimeseriesOutbound>> = if sync_enabled
-        {
-            let q = Arc::new(crate::sync::TimeseriesOutbound::new());
-            columnar.set_timeseries_outbound(Arc::clone(&q));
+        let vector_outbound: Option<Arc<crate::sync::VectorOutbound<S>>> = if sync_enabled {
+            let q = Arc::new(
+                crate::sync::VectorOutbound::open_with_cap(
+                    Arc::clone(&storage),
+                    outbound_queue_cap,
+                )
+                .await
+                .map_err(|e| NodeDbError::storage(format!("vector outbound open: {e}")))?,
+            );
             Some(q)
         } else {
             None
         };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let fts_outbound_init: Option<Arc<crate::sync::FtsOutbound<S>>> = if sync_enabled {
+            let q = Arc::new(
+                crate::sync::FtsOutbound::open_with_cap(Arc::clone(&storage), outbound_queue_cap)
+                    .await
+                    .map_err(|e| NodeDbError::storage(format!("fts outbound open: {e}")))?,
+            );
+            Some(q)
+        } else {
+            None
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let spatial_outbound_init: Option<Arc<crate::sync::SpatialOutbound<S>>> = if sync_enabled {
+            let q = Arc::new(
+                crate::sync::SpatialOutbound::open_with_cap(
+                    Arc::clone(&storage),
+                    outbound_queue_cap,
+                )
+                .await
+                .map_err(|e| NodeDbError::storage(format!("spatial outbound open: {e}")))?,
+            );
+            Some(q)
+        } else {
+            None
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let timeseries_outbound_init: Option<Arc<crate::sync::TimeseriesOutbound<S>>> =
+            if sync_enabled {
+                let q = Arc::new(
+                    crate::sync::TimeseriesOutbound::open_with_cap(
+                        Arc::clone(&storage),
+                        outbound_queue_cap,
+                    )
+                    .await
+                    .map_err(|e| NodeDbError::storage(format!("timeseries outbound open: {e}")))?,
+                );
+                columnar.set_timeseries_outbound(Arc::clone(&q));
+                Some(q)
+            } else {
+                None
+            };
 
         let crdt = Arc::new(Mutex::new(crdt));
         let strict = Arc::new(strict);
@@ -272,7 +340,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let array_state = Arc::new(tokio::sync::Mutex::new(array_engine));
 
         let csr_arc = Arc::new(Mutex::new(csr));
-        let query_engine = crate::query::LiteQueryEngine::new(
+        #[allow(unused_mut)]
+        let mut query_engine = crate::query::LiteQueryEngine::new(
             Arc::clone(&crdt),
             Arc::clone(&strict),
             Arc::clone(&columnar),
@@ -285,6 +354,17 @@ impl<S: StorageEngine> NodeDbLite<S> {
             Arc::clone(&spatial),
             Arc::clone(&csr_arc),
         );
+
+        // Wire FTS and spatial outbound queues into the query engine so that
+        // SQL-path writes (SpatialOp::Insert, FtsIndexOp) also enqueue for sync.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(ref q) = fts_outbound_init {
+            query_engine.set_fts_outbound(Arc::clone(q));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(ref q) = spatial_outbound_init {
+            query_engine.set_spatial_outbound(Arc::clone(q));
+        }
 
         // ── Array CRDT sync state (non-wasm only) ─────────────────────────────
         #[cfg(not(target_arch = "wasm32"))]
@@ -318,6 +398,14 @@ impl<S: StorageEngine> NodeDbLite<S> {
         #[cfg(not(target_arch = "wasm32"))]
         let array_catchup = Arc::new(
             crate::sync::array::CatchupTracker::load(Arc::clone(&storage))
+                .await
+                .map_err(NodeDbError::storage)?,
+        );
+
+        // ── Outbound stream sequence frontier ────────────────────────────────
+        #[cfg(not(target_arch = "wasm32"))]
+        let stream_seq = Arc::new(
+            crate::sync::StreamSeqTracker::load(Arc::clone(&storage))
                 .await
                 .map_err(NodeDbError::storage)?,
         );
@@ -367,6 +455,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
             #[cfg(not(target_arch = "wasm32"))]
             array_catchup,
             #[cfg(not(target_arch = "wasm32"))]
+            stream_seq,
+            #[cfg(not(target_arch = "wasm32"))]
             columnar_outbound,
             #[cfg(not(target_arch = "wasm32"))]
             vector_outbound,
@@ -376,13 +466,14 @@ impl<S: StorageEngine> NodeDbLite<S> {
             spatial_outbound: spatial_outbound_init,
             #[cfg(not(target_arch = "wasm32"))]
             timeseries_outbound: timeseries_outbound_init,
+            sync_lite_id: lite_identity.lite_id,
+            sync_epoch: lite_identity.epoch,
             sync_enabled,
             kv_cache: Mutex::new(lru::LruCache::new(kv_cache_capacity)),
             kv_write_buf: Mutex::new(KvWriteBuffer {
                 ops: Vec::with_capacity(1024),
                 overlay: HashMap::new(),
             }),
-            kv_overlay_len: std::sync::atomic::AtomicUsize::new(0),
             sync_gate: std::sync::RwLock::new(None),
         };
 
@@ -534,6 +625,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
             if let Some(envelope) = storage.get(Namespace::Vector, key.as_bytes()).await? {
                 match crate::storage::checksum::unwrap(&envelope) {
                     Some(checkpoint) => match HnswIndex::from_checkpoint(&checkpoint) {
+                        // `index` is mutated only by the native segment-backing
+                        // attach below, which is compiled out on wasm32.
+                        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
                         Ok(Some(mut index)) => {
                             // Attach vector segment backing when available (native pagedb path).
                             #[cfg(not(target_arch = "wasm32"))]

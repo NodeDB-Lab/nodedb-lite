@@ -97,14 +97,34 @@ pub(super) fn build_schema(
     })
 }
 
-pub(super) fn extract_temporal(scope: &TemporalScope) -> (Option<i64>, Option<i64>) {
+/// Extract temporal parameters from a `TemporalScope` for array operations.
+///
+/// Array is a point-in-time engine; `AS OF SYSTEM TIME NULL` (all-versions)
+/// is not supported. Returns `Err(LiteError::Unsupported)` when the scope
+/// carries `SystemTimeScope::AllVersions` so that it never silently degrades
+/// into a current-state read.
+pub(super) fn extract_temporal(
+    scope: &TemporalScope,
+) -> Result<(Option<i64>, Option<i64>), LiteError> {
     use nodedb_sql::temporal::ValidTime;
-    let sys = scope.system_as_of_ms;
+    use nodedb_types::SystemTimeScope;
+    if scope.system_time.is_all_versions() {
+        return Err(LiteError::Unsupported {
+            detail: "AS OF SYSTEM TIME NULL (all-versions) is not supported on the array engine"
+                .into(),
+        });
+    }
+    let sys = match &scope.system_time {
+        SystemTimeScope::Current => None,
+        SystemTimeScope::AsOf(ms) => Some(*ms),
+        // AllVersions is rejected above; this arm is unreachable.
+        SystemTimeScope::AllVersions => None,
+    };
     let valid = match &scope.valid_time {
         ValidTime::At(ms) => Some(*ms),
         _ => None,
     };
-    (sys, valid)
+    Ok((sys, valid))
 }
 
 /// Read the schema for `name` from the locked array state.

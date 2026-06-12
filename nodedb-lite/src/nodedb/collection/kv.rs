@@ -114,6 +114,14 @@ impl<S: StorageEngine> NodeDbLite<S> {
         value: &[u8],
         deadline_ms: u64,
     ) -> NodeDbResult<()> {
+        if self.governor.pressure() == crate::memory::PressureLevel::Critical {
+            return Err(nodedb_types::error::NodeDbError::storage(
+                crate::error::LiteError::Backpressure {
+                    detail: "KV write rejected: memory governor is at Critical pressure".into(),
+                },
+            ));
+        }
+
         let rkey = kv_key(collection, key.as_bytes());
         let encoded = encode_value(deadline_ms, value);
 
@@ -126,10 +134,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 key: rkey.clone(),
                 value: encoded,
             });
-            let n = buf.ops.len();
-            self.kv_overlay_len
-                .store(buf.overlay.len(), std::sync::atomic::Ordering::Release);
-            n >= KV_FLUSH_THRESHOLD
+            buf.ops.len() >= KV_FLUSH_THRESHOLD
         };
 
         // Invalidate any cached value for this key so subsequent reads go to storage.
@@ -166,34 +171,25 @@ impl<S: StorageEngine> NodeDbLite<S> {
     pub async fn kv_get(&self, collection: &str, key: &str) -> NodeDbResult<Option<Vec<u8>>> {
         let rkey = kv_key(collection, key.as_bytes());
 
-        // Fast path: when the overlay is empty (common case in read-heavy
-        // workloads between flushes), skip the mutex acquire entirely and
-        // go straight to storage. The single-writer design + Release stores
-        // on overlay mutation make this safe: observing `len == 0` means
-        // the writer either hasn't started or has completed; either way the
-        // overlay holds no relevant entry.
-        if self
-            .kv_overlay_len
-            .load(std::sync::atomic::Ordering::Acquire)
-            > 0
-        {
-            // Scope the guard so it is not live at any await point.
-            let overlay_result: Option<Option<Vec<u8>>> = {
-                let buf = self.kv_write_buf.lock_or_recover();
-                buf.overlay.get(&rkey).map(|entry| match entry {
-                    Some(stored) => decode_value(stored).and_then(|(deadline, user_bytes)| {
-                        if is_expired(deadline) {
-                            None
-                        } else {
-                            Some(user_bytes.to_vec())
-                        }
-                    }),
-                    None => None,
-                })
-            };
-            if let Some(result) = overlay_result {
-                return Ok(result);
-            }
+        // Always acquire the write-buffer lock to check the overlay first.
+        // This prevents torn reads that could occur if an unconditional
+        // Acquire load of a length counter raced with a concurrent writer.
+        // Scope the guard so it is not live at any await point.
+        let overlay_result: Option<Option<Vec<u8>>> = {
+            let buf = self.kv_write_buf.lock_or_recover();
+            buf.overlay.get(&rkey).map(|entry| match entry {
+                Some(stored) => decode_value(stored).and_then(|(deadline, user_bytes)| {
+                    if is_expired(deadline) {
+                        None
+                    } else {
+                        Some(user_bytes.to_vec())
+                    }
+                }),
+                None => None,
+            })
+        };
+        if let Some(result) = overlay_result {
+            return Ok(result);
         }
 
         // Cache check: look up the composite key before hitting storage.
@@ -260,10 +256,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 ns: Namespace::Kv,
                 key: rkey.clone(),
             });
-            let n = buf.ops.len();
-            self.kv_overlay_len
-                .store(buf.overlay.len(), std::sync::atomic::Ordering::Release);
-            n >= KV_FLUSH_THRESHOLD
+            buf.ops.len() >= KV_FLUSH_THRESHOLD
         };
         // Evict the expired entry so future reads don't serve stale data.
         {
@@ -286,10 +279,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 ns: Namespace::Kv,
                 key: rkey.clone(),
             });
-            let n = buf.ops.len();
-            self.kv_overlay_len
-                .store(buf.overlay.len(), std::sync::atomic::Ordering::Release);
-            n >= KV_FLUSH_THRESHOLD
+            buf.ops.len() >= KV_FLUSH_THRESHOLD
         };
 
         // Invalidate the cache so subsequent reads don't return stale data.
@@ -405,10 +395,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                         key: rkey.clone(),
                     });
                 }
-                let n = buf.ops.len();
-                self.kv_overlay_len
-                    .store(buf.overlay.len(), std::sync::atomic::Ordering::Release);
-                n >= KV_FLUSH_THRESHOLD
+                buf.ops.len() >= KV_FLUSH_THRESHOLD
             };
             // Evict expired keys from the cache.
             {
@@ -543,7 +530,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
     }
 
     /// Internal: flush write buffer to storage without touching CRDT.
-    async fn kv_flush_inner(&self) -> NodeDbResult<usize> {
+    /// `pub(in crate::nodedb)` so the global `flush()` can drain the KV buffer.
+    pub(in crate::nodedb) async fn kv_flush_inner(&self) -> NodeDbResult<usize> {
         let ops: Vec<WriteOp> = {
             let mut buf = self.kv_write_buf.lock_or_recover();
             if buf.ops.is_empty() {
@@ -551,8 +539,6 @@ impl<S: StorageEngine> NodeDbLite<S> {
             }
             let ops = std::mem::take(&mut buf.ops);
             buf.overlay.clear();
-            self.kv_overlay_len
-                .store(0, std::sync::atomic::Ordering::Release);
             ops
         };
 

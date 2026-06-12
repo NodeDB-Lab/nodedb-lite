@@ -44,6 +44,10 @@ pub enum LiteError {
     /// failure that cannot be recovered automatically (OPFS has no rename).
     #[error("OPFS worker bridge failed: {detail}")]
     WorkerFailed { detail: String },
+
+    /// An error during key derivation, salt I/O, or encryption setup.
+    #[error("encryption error: {detail}")]
+    Encryption { detail: String },
 }
 
 impl From<nodedb_types::columnar::SchemaError> for LiteError {
@@ -79,5 +83,27 @@ mod tests {
         };
         let ndb: nodedb_types::error::NodeDbError = e.into();
         assert!(ndb.to_string().contains("test"));
+    }
+
+    #[test]
+    fn lite_error_encryption_display_and_convert() {
+        let e = LiteError::Encryption {
+            detail: "argon2 key derivation failed".into(),
+        };
+        let rendered = e.to_string();
+        assert!(rendered.contains("encryption error"));
+        assert!(rendered.contains("argon2 key derivation failed"));
+
+        let ndb: nodedb_types::error::NodeDbError = e.into();
+        assert!(ndb.to_string().contains("argon2 key derivation failed"));
+    }
+
+    #[test]
+    fn lite_error_backpressure_display() {
+        let e = LiteError::Backpressure {
+            detail: "outbound queue full".into(),
+        };
+        assert!(e.to_string().contains("backpressure"));
+        assert!(e.to_string().contains("outbound queue full"));
     }
 }

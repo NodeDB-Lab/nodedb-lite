@@ -130,12 +130,24 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
         ArrayOp::Slice {
             array_id,
             slice_msgpack,
-            system_as_of,
+            system_time,
             ..
         } => {
+            use nodedb_types::SystemTimeScope;
+            // Array is point-in-time; all-versions audit is not supported.
+            if system_time.is_all_versions() {
+                return Err(LiteError::Unsupported {
+                    detail: "AS OF SYSTEM TIME NULL (all-versions) is not supported on \
+                             the array engine in Lite"
+                        .into(),
+                });
+            }
             let name = array_id.name.clone();
             let slice_bytes = slice_msgpack.clone();
-            let system_as_of = system_as_of.unwrap_or(i64::MAX);
+            let system_as_of = match system_time {
+                SystemTimeScope::AsOf(ms) => *ms,
+                _ => i64::MAX,
+            };
             let array_state = Arc::clone(&engine.array_state);
             let storage = Arc::clone(&engine.storage);
             Ok(Box::pin(async move {

@@ -1,4 +1,4 @@
-// SPDX-License-Ientifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 
 //! Batch document + vector ingest for `NodeDbLite`.
 //!
@@ -34,6 +34,13 @@ pub struct BatchItem<'a> {
     pub embedding: Option<&'a [f32]>,
 }
 
+/// A list of CRDT fields for one upsert: borrowed field name → Loro value.
+type LoroFields<'a> = Vec<(&'a str, loro::LoroValue)>;
+
+/// A batch item resolved before the CRDT lock is taken:
+/// `(document id, document fields, vector-metadata fields)`.
+type ResolvedBatchItem<'a> = (String, LoroFields<'a>, LoroFields<'a>);
+
 impl<S: StorageEngine> NodeDbLite<S> {
     /// Batch upsert of documents with optional embeddings.
     ///
@@ -51,12 +58,20 @@ impl<S: StorageEngine> NodeDbLite<S> {
             return Ok(Vec::new());
         }
 
+        // Reject the whole batch up front under critical memory pressure, matching
+        // the single-item `document_put_impl` / `vector_insert_impl` guard. A batch
+        // can ingest many documents plus embeddings at once, so the early gate is
+        // even more important here than on the single-item path.
+        if self.governor.pressure() == crate::memory::PressureLevel::Critical {
+            return Err(NodeDbError::storage(
+                crate::error::LiteError::Backpressure {
+                    detail: "batch ingest rejected: memory governor is at Critical pressure".into(),
+                },
+            ));
+        }
+
         // Pre-compute doc IDs and field vecs before taking the lock.
-        let mut resolved: Vec<(
-            String,
-            Vec<(&str, loro::LoroValue)>,
-            Vec<(&str, loro::LoroValue)>,
-        )> = Vec::with_capacity(items.len());
+        let mut resolved: Vec<ResolvedBatchItem<'_>> = Vec::with_capacity(items.len());
 
         for item in items {
             let doc_id = if item.doc.id.is_empty() {
@@ -124,73 +139,76 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
             self.index_document_text(item.doc_collection, doc_id, &item.doc.fields);
 
-            if let Some(embedding) = item.embedding {
-                if !embedding.is_empty() {
-                    let internal_id = {
-                        let dtype = {
-                            let configs = self.vector_state.per_index_config.lock_or_recover();
-                            configs
-                                .get(item.vector_collection)
-                                .map(|cfg| cfg.storage_dtype)
-                                .unwrap_or(VectorStorageDtype::F32)
-                        };
-                        let mut indices = self.vector_state.hnsw_indices.lock_or_recover();
-                        let index = ensure_hnsw(
-                            &mut indices,
-                            item.vector_collection,
-                            embedding.len(),
-                            dtype,
-                        );
-                        let id_before = index.len() as u32;
-                        index
-                            .insert(embedding.to_vec())
-                            .map_err(NodeDbError::bad_request)?;
-                        id_before
+            if let Some(embedding) = item.embedding
+                && !embedding.is_empty()
+            {
+                let internal_id = {
+                    let dtype = {
+                        let configs = self.vector_state.per_index_config.lock_or_recover();
+                        configs
+                            .get(item.vector_collection)
+                            .map(|cfg| cfg.storage_dtype)
+                            .unwrap_or(VectorStorageDtype::F32)
                     };
+                    let mut indices = self.vector_state.hnsw_indices.lock_or_recover();
+                    let index =
+                        ensure_hnsw(&mut indices, item.vector_collection, embedding.len(), dtype);
+                    let id_before = index.len() as u32;
+                    index
+                        .insert(embedding.to_vec())
+                        .map_err(NodeDbError::bad_request)?;
+                    id_before
+                };
 
-                    {
-                        let mut id_map = self.vector_state.vector_id_map.lock_or_recover();
-                        id_map.insert(
-                            format!("{}:{internal_id}", item.vector_collection),
-                            (item.id.to_string(), internal_id),
-                        );
-                    }
+                {
+                    let mut id_map = self.vector_state.vector_id_map.lock_or_recover();
+                    id_map.insert(
+                        format!("{}:{internal_id}", item.vector_collection),
+                        (item.id.to_string(), internal_id),
+                    );
+                }
 
-                    match sidecar::ensure_sidecar(&self.vector_state, item.vector_collection) {
-                        Ok(true) => {
-                            let mut sidecars = self.vector_state.codec_sidecars.lock_or_recover();
-                            if let Some(s) = sidecars.get_mut(item.vector_collection)
-                                && let Err(e) = s.encode_and_insert(internal_id, embedding)
-                            {
-                                tracing::warn!(
-                                    index_key = item.vector_collection,
-                                    id = internal_id,
-                                    error = %e,
-                                    "sidecar encode_and_insert failed; row falls back to FP32 rerank"
-                                );
-                            }
+                match sidecar::ensure_sidecar(&self.vector_state, item.vector_collection) {
+                    Ok(true) => {
+                        let mut sidecars = self.vector_state.codec_sidecars.lock_or_recover();
+                        if let Some(s) = sidecars.get_mut(item.vector_collection)
+                            && let Err(e) = s.encode_and_insert(internal_id, embedding)
+                        {
+                            tracing::warn!(
+                                index_key = item.vector_collection,
+                                id = internal_id,
+                                error = %e,
+                                "sidecar encode_and_insert failed; row falls back to FP32 rerank"
+                            );
                         }
-                        Ok(false) => {}
-                        Err(e) => return Err(NodeDbError::bad_request(e.to_string())),
                     }
+                    Ok(false) => {}
+                    Err(e) => return Err(NodeDbError::bad_request(e.to_string())),
+                }
 
-                    #[cfg(not(target_arch = "wasm32"))]
-                    if let Some(q) = &self.vector_outbound {
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(q) = &self.vector_outbound {
+                    crate::sync::reconcile_outbound_enqueue(
                         q.enqueue_insert(
                             item.vector_collection,
                             item.id,
                             embedding.to_vec(),
                             embedding.len(),
                             "",
-                        );
-                    }
+                        )
+                        .await,
+                        "vector insert (batch)",
+                        item.vector_collection,
+                        item.id,
+                    )
+                    .map_err(nodedb_types::error::NodeDbError::storage)?;
                 }
             }
         }
 
         if items
             .iter()
-            .any(|it| it.embedding.map_or(false, |e| !e.is_empty()))
+            .any(|it| it.embedding.is_some_and(|e| !e.is_empty()))
         {
             self.update_memory_stats();
         }

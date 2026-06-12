@@ -40,6 +40,12 @@ pub struct LiteQueryEngine<S: StorageEngine> {
     pub(crate) cancellation: CancellationRegistry,
     /// Per-collection CSR graph indices shared with the owning NodeDbLite.
     pub(crate) csr: Arc<Mutex<HashMap<String, CsrIndex>>>,
+    /// Durable outbound queue for FTS sync — `None` when sync is disabled.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fts_outbound: Option<Arc<crate::sync::FtsOutbound<S>>>,
+    /// Durable outbound queue for spatial sync — `None` when sync is disabled.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) spatial_outbound: Option<Arc<crate::sync::SpatialOutbound<S>>>,
 }
 
 impl<S: StorageEngine> LiteQueryEngine<S> {
@@ -70,7 +76,23 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             spatial,
             cancellation: CancellationRegistry::new(),
             csr,
+            #[cfg(not(target_arch = "wasm32"))]
+            fts_outbound: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            spatial_outbound: None,
         }
+    }
+
+    /// Wire the durable FTS outbound queue so SQL-path spatial writes are sync-tracked.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_fts_outbound(&mut self, q: Arc<crate::sync::FtsOutbound<S>>) {
+        self.fts_outbound = Some(q);
+    }
+
+    /// Wire the durable spatial outbound queue so SQL-path spatial writes are sync-tracked.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_spatial_outbound(&mut self, q: Arc<crate::sync::SpatialOutbound<S>>) {
+        self.spatial_outbound = Some(q);
     }
 
     /// No-op — collections are auto-discovered via catalog.
@@ -319,7 +341,20 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 .await;
         }
         if *engine == EngineType::Columnar {
-            return super::columnar_dml::insert_columnar(&self.columnar, collection, rows);
+            // `written` feeds outbound sync, which is compiled out on wasm32.
+            #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+            let (result, written) =
+                super::columnar_dml::insert_columnar(&self.columnar, collection, rows)?;
+            // Durable outbound enqueue must run here (async) — the sync insert
+            // path cannot await. Covers the SQL-INSERT route to Origin sync.
+            #[cfg(not(target_arch = "wasm32"))]
+            crate::sync::reconcile_outbound_enqueue(
+                self.columnar.enqueue_outbound(collection, &written).await,
+                "columnar insert (sql)",
+                collection,
+                "",
+            )?;
+            return Ok(result);
         }
         // CRDT / schemaless path.
         let mut crdt = self.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;

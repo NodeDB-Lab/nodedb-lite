@@ -30,6 +30,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// When `allowed_ids` is `Some`, translates the set of string doc-IDs to a
     /// `RoaringBitmap` of u32 HNSW surrogates and passes it as the
     /// `prefilter_bitmap` so only documents from the allowed set are returned.
+    // Cohesive set of search parameters mirroring `run_vector_search`, which
+    // carries the same allow for the same reason.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn vector_search_internal(
         &self,
         index_key: &str,
@@ -78,6 +81,15 @@ impl<S: StorageEngine> NodeDbLite<S> {
         embedding: &[f32],
         metadata: Option<Document>,
     ) -> NodeDbResult<()> {
+        if self.governor.pressure() == crate::memory::PressureLevel::Critical {
+            return Err(nodedb_types::error::NodeDbError::storage(
+                crate::error::LiteError::Backpressure {
+                    detail: "vector insert rejected: memory governor is at Critical pressure"
+                        .into(),
+                },
+            ));
+        }
+
         let internal_id = {
             let dtype = {
                 let configs = self.vector_state.per_index_config.lock_or_recover();
@@ -141,7 +153,14 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // Enqueue for sync to Origin (no-op when sync is disabled).
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(q) = &self.vector_outbound {
-            q.enqueue_insert(collection, id, embedding.to_vec(), embedding.len(), "");
+            crate::sync::reconcile_outbound_enqueue(
+                q.enqueue_insert(collection, id, embedding.to_vec(), embedding.len(), "")
+                    .await,
+                "vector insert",
+                collection,
+                id,
+            )
+            .map_err(nodedb_types::error::NodeDbError::storage)?;
         }
 
         self.update_memory_stats();
@@ -202,7 +221,13 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // Enqueue for sync to Origin (no-op when sync is disabled).
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(q) = &self.vector_outbound {
-            q.enqueue_delete(collection, id, "");
+            crate::sync::reconcile_outbound_enqueue(
+                q.enqueue_delete(collection, id, "").await,
+                "vector delete",
+                collection,
+                id,
+            )
+            .map_err(nodedb_types::error::NodeDbError::storage)?;
         }
 
         Ok(())
@@ -295,13 +320,20 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // Enqueue for sync to Origin (no-op when sync is disabled).
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(q) = &self.vector_outbound {
-            q.enqueue_insert(
+            crate::sync::reconcile_outbound_enqueue(
+                q.enqueue_insert(
+                    collection,
+                    id,
+                    embedding.to_vec(),
+                    embedding.len(),
+                    field_name,
+                )
+                .await,
+                "vector field insert",
                 collection,
                 id,
-                embedding.to_vec(),
-                embedding.len(),
-                field_name,
-            );
+            )
+            .map_err(nodedb_types::error::NodeDbError::storage)?;
         }
 
         self.update_memory_stats();

@@ -21,18 +21,33 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             limit,
             filters,
             sort_keys,
-            system_as_of_ms,
+            system_time,
             valid_at_ms,
             prefilter,
             computed_columns,
             ..
         } => {
+            use nodedb_types::SystemTimeScope;
+            // Columnar does not implement all-versions audit in Lite.
+            if system_time.is_all_versions() {
+                return Err(LiteError::Unsupported {
+                    detail: "AS OF SYSTEM TIME NULL (all-versions) is not supported on \
+                             the columnar engine in Lite"
+                        .into(),
+                });
+            }
             let col = collection.clone();
             let proj = projection.clone();
             let lim = *limit;
             let filt = filters.clone();
             let sort = sort_keys.clone();
-            let sys_as_of = *system_as_of_ms;
+            // Only an explicit `AS OF SYSTEM TIME <ts>` narrows the read; every
+            // other scope (`Current`, and the all-versions case already rejected
+            // above) means "no system-time filter" → read the latest version.
+            let system_as_of_ms: Option<i64> = match system_time {
+                SystemTimeScope::AsOf(ms) => Some(*ms),
+                _ => None,
+            };
             let valid_at = *valid_at_ms;
             let pf = prefilter.clone();
             let cc = computed_columns.clone();
@@ -45,7 +60,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                         limit: lim,
                         filters_bytes: filt,
                         sort_keys: sort,
-                        system_as_of_ms: sys_as_of,
+                        system_as_of_ms,
                         valid_at_ms: valid_at,
                         prefilter: pf,
                         computed_columns: cc,
@@ -63,6 +78,8 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             on_conflict_updates,
             surrogates,
             schema_bytes,
+            wal_lsn: _,
+            provenance: _,
         } => {
             let col = collection.clone();
             let pay = payload.clone();
@@ -72,7 +89,9 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let surr = surrogates.clone();
             let sb = schema_bytes.clone();
             Ok(Box::pin(async move {
-                columnar_ops::writes::insert(
+                // `inserted_rows` feeds outbound sync, which is compiled out on wasm32.
+                #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+                let (result, inserted_rows) = columnar_ops::writes::insert(
                     engine,
                     &col,
                     columnar_ops::writes::InsertParams {
@@ -83,7 +102,17 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                         surrogates: &surr,
                         schema_bytes: &sb,
                     },
-                )
+                )?;
+                #[cfg(not(target_arch = "wasm32"))]
+                if !inserted_rows.is_empty() {
+                    crate::sync::reconcile_outbound_enqueue(
+                        engine.columnar.enqueue_outbound(&col, &inserted_rows).await,
+                        "columnar insert",
+                        &col,
+                        "",
+                    )?;
+                }
+                Ok(result)
             }))
         }
 

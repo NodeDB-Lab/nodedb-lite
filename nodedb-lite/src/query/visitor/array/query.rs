@@ -69,7 +69,13 @@ pub(crate) fn lower_array_slice<'a, S: StorageEngine + 'a>(
     let slice_msgpack = zerompk::to_msgpack_vec(&slice).map_err(|e| LiteError::Serialization {
         detail: format!("encode slice predicate: {e}"),
     })?;
-    let (system_as_of, valid_at_ms) = extract_temporal(temporal);
+    let (system_as_of_ms, valid_at_ms) = extract_temporal(temporal)?;
+    // Reconstruct a SystemTimeScope from the scalar for the Slice op wire type.
+    // AllVersions is already rejected by extract_temporal above.
+    let system_time = match system_as_of_ms {
+        Some(ms) => nodedb_types::SystemTimeScope::AsOf(ms),
+        None => nodedb_types::SystemTimeScope::Current,
+    };
     let aid = ArrayId::new(LITE_TENANT, name);
     let op = ArrayOp::Slice {
         array_id: aid,
@@ -78,7 +84,7 @@ pub(crate) fn lower_array_slice<'a, S: StorageEngine + 'a>(
         limit,
         cell_filter: None,
         hilbert_range: None,
-        system_as_of,
+        system_time,
         valid_at_ms,
     };
     let mut phys = LiteDataPlaneVisitor { engine };
@@ -154,7 +160,7 @@ pub(crate) fn lower_array_agg<'a, S: StorageEngine + 'a>(
             })? as i32,
     };
 
-    let (system_as_of, valid_at_ms) = extract_temporal(temporal);
+    let (system_as_of, valid_at_ms) = extract_temporal(temporal)?;
     let aid = ArrayId::new(LITE_TENANT, name);
     let op = ArrayOp::Aggregate {
         array_id: aid,

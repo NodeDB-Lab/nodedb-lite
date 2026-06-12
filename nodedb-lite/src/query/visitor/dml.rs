@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use nodedb_physical::physical_plan::document::merge_types::{
     MergeActionOp, MergeClauseKind, MergeClauseOp,
@@ -63,15 +64,20 @@ fn row_to_msgpack(row: &HashMap<String, Value>) -> Result<Vec<u8>, LiteError> {
     })
 }
 
+/// Process-wide counter used to guarantee uniqueness within the same millisecond.
+static GEN_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Extract the "id" column value from a row map, or generate a synthetic key.
+///
+/// The fallback id combines the current millisecond timestamp with a
+/// process-wide monotonic counter so two inserts in the same millisecond
+/// produce distinct keys. `crate::runtime::now_millis()` is used instead of
+/// `SystemTime::now()` because the latter panics on wasm32.
 fn extract_id(row: &HashMap<String, Value>) -> String {
     row.get("id").map(value_to_string).unwrap_or_else(|| {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let ns = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos();
-        format!("gen-{ns:x}")
+        let ms = crate::runtime::now_millis();
+        let seq = GEN_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("gen-{ms:x}-{seq:x}")
     })
 }
 

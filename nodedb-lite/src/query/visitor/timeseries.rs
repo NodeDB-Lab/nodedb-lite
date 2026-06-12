@@ -85,7 +85,7 @@ pub(super) fn lower_timeseries_scan<'a, S: StorageEngine + 'a>(
     let proj_cols = extract_projection_cols(projection);
     let agg_pairs = convert_aggregates(aggregates);
 
-    let (system_as_of_ms, valid_at_ms) = extract_temporal(temporal);
+    let (system_time, valid_at_ms) = extract_temporal(temporal);
 
     let op = TimeseriesOp::Scan {
         collection: collection.to_string(),
@@ -99,7 +99,7 @@ pub(super) fn lower_timeseries_scan<'a, S: StorageEngine + 'a>(
         gap_fill: gap_fill.to_string(),
         computed_columns: Vec::new(),
         rls_filters: Vec::new(),
-        system_as_of_ms,
+        system_time,
         valid_at_ms,
     };
 
@@ -108,13 +108,15 @@ pub(super) fn lower_timeseries_scan<'a, S: StorageEngine + 'a>(
     Ok(Box::pin(fut))
 }
 
-/// Extract bitemporal cutoffs from a `TemporalScope`.
+/// Extract the system-time scope and valid-time point from a `TemporalScope`.
 ///
-/// `system_as_of_ms` maps directly from `TemporalScope::system_as_of_ms`;
-/// `valid_at_ms` maps from `ValidTime::At`.
-fn extract_temporal(scope: &TemporalScope) -> (Option<i64>, Option<i64>) {
+/// Returns `(SystemTimeScope, Option<i64>)`. The caller passes the full
+/// `SystemTimeScope` to `TimeseriesOp::Scan` so that `AllVersions` is
+/// preserved faithfully; the physical adapter then uses `.is_all_versions()`
+/// and `.as_of_ms()` to drive the engine, matching Origin's behaviour.
+fn extract_temporal(scope: &TemporalScope) -> (nodedb_types::SystemTimeScope, Option<i64>) {
     use nodedb_sql::temporal::ValidTime;
-    let sys = scope.system_as_of_ms;
+    let sys = scope.system_time;
     let valid = match &scope.valid_time {
         ValidTime::At(ms) => Some(*ms),
         _ => None,
@@ -160,6 +162,7 @@ pub(super) fn lower_timeseries_ingest<'a, S: StorageEngine + 'a>(
         format: "samples".to_string(),
         wal_lsn: None,
         surrogates: Vec::new(),
+        provenance: None,
     };
 
     let mut phys = LiteDataPlaneVisitor { engine };

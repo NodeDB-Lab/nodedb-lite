@@ -3,7 +3,6 @@
 //! `NodeDbLite` struct definition and storage key constants.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 use crate::engine::columnar::ColumnarEngine;
@@ -84,21 +83,48 @@ pub struct NodeDbLite<S: StorageEngine> {
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)]
     pub(crate) array_catchup: Arc<crate::sync::array::CatchupTracker<S>>,
-    /// Outbound queue for columnar insert sync. `None` when sync is disabled.
+    /// Per-stream monotonic sequence frontier for outbound frame stamping.
+    ///
+    /// Loaded once from `Namespace::Meta` at `open()` and never reset on
+    /// reconnect. The 7b outbound push path calls `stream_seq.next_seq(stream_id)`
+    /// to obtain a durable, monotonically-increasing seq for each frame. The 7b
+    /// inbound ack path calls `stream_seq.record_ack(stream_id, seq)` to advance
+    /// the acknowledged frontier.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) columnar_outbound: Option<Arc<crate::sync::ColumnarOutbound>>,
-    /// Outbound queue for vector insert/delete sync. `None` when sync is disabled.
+    pub(crate) stream_seq: Arc<crate::sync::StreamSeqTracker<S>>,
+    /// Durable outbound queue for columnar insert sync. `None` when sync is disabled.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) vector_outbound: Option<Arc<crate::sync::VectorOutbound>>,
-    /// Outbound queue for FTS index/delete sync. `None` when sync is disabled.
+    pub(crate) columnar_outbound: Option<Arc<crate::sync::ColumnarOutbound<S>>>,
+    /// Durable outbound queue for vector insert/delete sync. `None` when sync is disabled.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fts_outbound: Option<Arc<crate::sync::FtsOutbound>>,
-    /// Outbound queue for spatial geometry insert/delete sync. `None` when sync is disabled.
+    pub(crate) vector_outbound: Option<Arc<crate::sync::VectorOutbound<S>>>,
+    /// Durable outbound queue for FTS index/delete sync. `None` when sync is disabled.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) spatial_outbound: Option<Arc<crate::sync::SpatialOutbound>>,
-    /// Outbound queue for timeseries-profile columnar insert sync. `None` when sync is disabled.
+    pub(crate) fts_outbound: Option<Arc<crate::sync::FtsOutbound<S>>>,
+    /// Durable outbound queue for spatial geometry insert/delete sync. `None` when sync is disabled.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) timeseries_outbound: Option<Arc<crate::sync::TimeseriesOutbound>>,
+    pub(crate) spatial_outbound: Option<Arc<crate::sync::SpatialOutbound<S>>>,
+    /// Durable outbound queue for timeseries-profile columnar insert sync. `None` when sync is disabled.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) timeseries_outbound: Option<Arc<crate::sync::TimeseriesOutbound<S>>>,
+    /// Stable UUID v7 that identifies this Lite instance to Origin.
+    ///
+    /// Loaded once at `open()` via `LiteIdentity::load_or_create`. Sent in every
+    /// sync handshake so Origin can assign a stable producer_id and enforce the
+    /// idempotent-producer gate.
+    ///
+    /// Read only by the sync handshake, which is compiled out on wasm32.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) sync_lite_id: String,
+    /// Monotonic epoch counter, incremented on every `open()`.
+    ///
+    /// A new epoch fences out any still-in-flight writes from the previous
+    /// process incarnation. Origin rejects handshakes where
+    /// `epoch <= last_seen_epoch[lite_id]`.
+    ///
+    /// Read only by the sync handshake, which is compiled out on wasm32.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) sync_epoch: u64,
     /// When `false`, KV operations go directly to storage, bypassing Loro.
     pub(crate) sync_enabled: bool,
     /// Buffered KV writes awaiting batch commit to storage.
@@ -113,12 +139,6 @@ pub struct NodeDbLite<S: StorageEngine> {
     ///
     /// Capacity is controlled by [`crate::config::LiteConfig::kv_cache_capacity`].
     pub(crate) kv_cache: Mutex<lru::LruCache<Vec<u8>, Vec<u8>>>,
-    /// Mirrors `kv_write_buf.overlay.len()` for lock-free fast-path reads.
-    /// Updated under the same lock as the overlay; readers may load with
-    /// `Acquire` to skip the mutex when the overlay is empty. Single-writer
-    /// design means `Release` stores happen-before the lock release; readers
-    /// that see 0 observe a consistent snapshot.
-    pub(crate) kv_overlay_len: AtomicUsize,
     /// Optional per-document sync gate. When set, each document write consults
     /// it; documents the gate rejects are kept local-only — excluded from the
     /// CRDT delta push, the FTS index sync, and the vector insert sync. Used by
@@ -141,13 +161,10 @@ pub trait SyncGate: Send + Sync {
 
 /// Buffered KV writes for batch commit.
 ///
-/// # Safety: single-writer design
-///
-/// The overlay allowing uncommitted reads is intentional and safe because
-/// `NodeDbLite` is designed for single-writer access. All public KV methods
-/// acquire the outer `Mutex<KvWriteBuffer>`, which serializes every write and
-/// read-through-overlay access to this buffer. There is no way for two callers
-/// to observe a torn write or a half-applied overlay entry.
+/// All public KV read and write methods acquire `Mutex<KvWriteBuffer>` before
+/// inspecting or mutating the overlay, so every read-through-overlay access is
+/// serialized against concurrent writes. Reads always lock — there is no
+/// lock-free fast path.
 pub(crate) struct KvWriteBuffer {
     /// Pending write operations for batch commit.
     pub ops: Vec<crate::storage::engine::WriteOp>,

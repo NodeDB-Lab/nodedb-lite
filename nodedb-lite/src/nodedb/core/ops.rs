@@ -42,10 +42,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // Propagate to Origin via sync outbound queue — unless the sync gate
         // keeps this document local-only.
         #[cfg(not(target_arch = "wasm32"))]
-        if self.should_sync_doc(collection, fields) {
-            if let Some(q) = &self.fts_outbound {
-                q.enqueue_index(collection, doc_id, text);
-            }
+        if self.should_sync_doc(collection, fields)
+            && let Some(q) = &self.fts_outbound
+        {
+            q.stage_index(collection, doc_id, text);
         }
         #[cfg(target_arch = "wasm32")]
         let _ = text;
@@ -61,7 +61,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // Propagate deletion to Origin via sync outbound queue.
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(q) = &self.fts_outbound {
-            q.enqueue_delete(collection, doc_id);
+            q.stage_delete(collection, doc_id);
         }
     }
 
@@ -85,7 +85,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         drop(spatial);
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(q) = &self.spatial_outbound {
-            q.enqueue_insert(collection, field, doc_id, geometry);
+            q.stage_insert(collection, field, doc_id, geometry);
         }
     }
 
@@ -96,7 +96,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         drop(spatial);
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(q) = &self.spatial_outbound {
-            q.enqueue_delete(collection, field, doc_id);
+            q.stage_delete(collection, field, doc_id);
         }
     }
 
@@ -405,6 +405,16 @@ impl<S: StorageEngine> NodeDbLite<S> {
         Ok(())
     }
 
+    /// Assign a stable stream seq to a pending CRDT delta (first-send only).
+    ///
+    /// No-op if the delta already has a non-zero seq. Called by the sync
+    /// transport to ensure the same seq is reused on reconnect re-sends.
+    pub fn set_crdt_pending_delta_seq(&self, mutation_id: u64, seq: u64) -> NodeDbResult<()> {
+        let mut crdt = self.crdt.lock_or_recover();
+        crdt.set_pending_delta_seq(mutation_id, seq);
+        Ok(())
+    }
+
     /// Import remote deltas from Origin.
     pub fn import_remote_deltas(&self, data: &[u8]) -> NodeDbResult<()> {
         let crdt = self.crdt.lock_or_recover();
@@ -430,7 +440,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
         self: &Arc<Self>,
         config: crate::sync::SyncConfig,
     ) -> Arc<crate::sync::SyncClient> {
-        let client = Arc::new(crate::sync::SyncClient::new(config, self.peer_id()));
+        let mut client_inner = crate::sync::SyncClient::new(config, self.peer_id());
+        client_inner.set_identity(self.sync_lite_id.clone(), self.sync_epoch);
+        let client = Arc::new(client_inner);
         let delegate: Arc<dyn crate::sync::SyncDelegate> = Arc::clone(self) as _;
         let client_clone = Arc::clone(&client);
         tokio::spawn(async move {

@@ -276,17 +276,32 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             node_id,
             edge_label,
             direction,
-            system_as_of_ms,
+            system_time,
             valid_at_ms,
             ..
         } => {
+            use nodedb_types::SystemTimeScope;
+            // Mirror Origin: AllVersions is not supported on the graph engine.
+            if system_time.is_all_versions() {
+                return Err(LiteError::Unsupported {
+                    detail: "AS OF SYSTEM TIME NULL (all-versions) is not supported on \
+                             the graph engine in Lite"
+                        .into(),
+                });
+            }
             let storage = engine.storage.clone();
             let csr_map = engine.csr.clone();
             let collection = collection.clone();
             let node_id = node_id.clone();
             let edge_label = edge_label.clone();
             let direction = *direction;
-            let system_as_of_ms = *system_as_of_ms;
+            // Only an explicit `AS OF SYSTEM TIME <ts>` narrows the read; every
+            // other scope (`Current`, and the all-versions case already rejected
+            // above) means "no system-time filter" → read the latest version.
+            let system_as_of_ms: Option<i64> = match system_time {
+                SystemTimeScope::AsOf(ms) => Some(*ms),
+                _ => None,
+            };
             let valid_at_ms = *valid_at_ms;
             Box::pin(async move {
                 temporal::temporal_neighbors(
@@ -306,13 +321,28 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
         GraphOp::TemporalAlgorithm {
             algorithm,
             params,
-            system_as_of_ms,
+            system_time,
         } => {
+            use nodedb_types::SystemTimeScope;
+            // Mirror Origin: AllVersions is not supported on the graph engine.
+            if system_time.is_all_versions() {
+                return Err(LiteError::Unsupported {
+                    detail: "AS OF SYSTEM TIME NULL (all-versions) is not supported on \
+                             the graph engine in Lite"
+                        .into(),
+                });
+            }
             let storage = engine.storage.clone();
             let csr_map = engine.csr.clone();
             let algorithm = *algorithm;
             let params = params.clone();
-            let system_as_of_ms = *system_as_of_ms;
+            // Only an explicit `AS OF SYSTEM TIME <ts>` narrows the read; every
+            // other scope (`Current`, and the all-versions case already rejected
+            // above) means "no system-time filter" → read the latest version.
+            let system_as_of_ms: Option<i64> = match system_time {
+                SystemTimeScope::AsOf(ms) => Some(*ms),
+                _ => None,
+            };
             Box::pin(async move {
                 temporal::temporal_algorithm(
                     &storage,

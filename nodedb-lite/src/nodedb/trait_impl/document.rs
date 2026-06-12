@@ -1,4 +1,4 @@
-// SPDX-License-Ientifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 
 //! Document engine helpers for `NodeDbLite`.
 //!
@@ -66,6 +66,14 @@ impl<S: StorageEngine> NodeDbLite<S> {
         collection: &str,
         doc: Document,
     ) -> NodeDbResult<()> {
+        if self.governor.pressure() == crate::memory::PressureLevel::Critical {
+            return Err(NodeDbError::storage(
+                crate::error::LiteError::Backpressure {
+                    detail: "document put rejected: memory governor is at Critical pressure".into(),
+                },
+            ));
+        }
+
         let doc_id = if doc.id.is_empty() {
             nodedb_types::id_gen::uuid_v7()
         } else {
@@ -244,16 +252,21 @@ impl<S: StorageEngine> NodeDbLite<S> {
             }
 
             #[cfg(not(target_arch = "wasm32"))]
-            if sync_doc {
-                if let Some(q) = &self.vector_outbound {
+            if sync_doc && let Some(q) = &self.vector_outbound {
+                crate::sync::reconcile_outbound_enqueue(
                     q.enqueue_insert(
                         vector_collection,
                         id,
                         embedding.to_vec(),
                         embedding.len(),
                         "",
-                    );
-                }
+                    )
+                    .await,
+                    "vector insert (with document)",
+                    vector_collection,
+                    id,
+                )
+                .map_err(NodeDbError::storage)?;
             }
 
             self.update_memory_stats();

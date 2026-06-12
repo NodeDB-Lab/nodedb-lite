@@ -24,6 +24,15 @@ impl<S: StorageEngine> NodeDbLite<S> {
             return Ok(());
         }
 
+        if self.governor.pressure() == crate::memory::PressureLevel::Critical {
+            return Err(NodeDbError::storage(
+                crate::error::LiteError::Backpressure {
+                    detail: "batch vector insert rejected: memory governor is at Critical pressure"
+                        .into(),
+                },
+            ));
+        }
+
         let dim = vectors[0].1.len();
 
         {

@@ -205,9 +205,12 @@ mod tests {
     async fn strict_bitemporal_purge_removes_superseded_rows() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(
-            PagedbStorageDefault::open(dir.path().join("test.pagedb"))
-                .await
-                .unwrap(),
+            PagedbStorageDefault::open(
+                dir.path().join("test.pagedb"),
+                crate::storage::encryption::Encryption::Plaintext,
+            )
+            .await
+            .unwrap(),
         );
         let engine = make_engine(Arc::clone(&storage));
 
@@ -258,9 +261,12 @@ mod tests {
     async fn strict_non_bitemporal_purge_returns_zero() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(
-            PagedbStorageDefault::open(dir.path().join("test.pagedb"))
-                .await
-                .unwrap(),
+            PagedbStorageDefault::open(
+                dir.path().join("test.pagedb"),
+                crate::storage::encryption::Encryption::Plaintext,
+            )
+            .await
+            .unwrap(),
         );
         let engine = make_engine(Arc::clone(&storage));
 
@@ -282,9 +288,12 @@ mod tests {
     async fn columnar_non_bitemporal_purge_returns_zero() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(
-            PagedbStorageDefault::open(dir.path().join("test.pagedb"))
-                .await
-                .unwrap(),
+            PagedbStorageDefault::open(
+                dir.path().join("test.pagedb"),
+                crate::storage::encryption::Encryption::Plaintext,
+            )
+            .await
+            .unwrap(),
         );
         let engine = make_engine(Arc::clone(&storage));
 
@@ -313,9 +322,12 @@ mod tests {
     async fn columnar_bitemporal_purge_removes_tombstoned_segments() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(
-            PagedbStorageDefault::open(dir.path().join("test.pagedb"))
-                .await
-                .unwrap(),
+            PagedbStorageDefault::open(
+                dir.path().join("test.pagedb"),
+                crate::storage::encryption::Encryption::Plaintext,
+            )
+            .await
+            .unwrap(),
         );
         let engine = make_engine(Arc::clone(&storage));
 
@@ -371,9 +383,12 @@ mod tests {
     async fn graph_non_bitemporal_purge_returns_zero() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(
-            PagedbStorageDefault::open(dir.path().join("test.pagedb"))
-                .await
-                .unwrap(),
+            PagedbStorageDefault::open(
+                dir.path().join("test.pagedb"),
+                crate::storage::encryption::Encryption::Plaintext,
+            )
+            .await
+            .unwrap(),
         );
         let engine = make_engine(Arc::clone(&storage));
 
@@ -388,9 +403,12 @@ mod tests {
     async fn strict_bitemporal_purge_cutoff_before_deletion_retains_history() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(
-            PagedbStorageDefault::open(dir.path().join("test.pagedb"))
-                .await
-                .unwrap(),
+            PagedbStorageDefault::open(
+                dir.path().join("test.pagedb"),
+                crate::storage::encryption::Encryption::Plaintext,
+            )
+            .await
+            .unwrap(),
         );
         let engine = make_engine(Arc::clone(&storage));
 

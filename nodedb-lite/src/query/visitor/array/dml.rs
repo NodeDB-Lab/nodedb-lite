@@ -65,6 +65,7 @@ pub(crate) fn lower_insert_array<'a, S: StorageEngine + 'a>(
         array_id: aid,
         cells_msgpack,
         wal_lsn: 0,
+        provenance: None,
     };
     let mut phys = LiteDataPlaneVisitor { engine };
     let fut = phys.array(&op)?;
@@ -93,6 +94,7 @@ pub(crate) fn lower_delete_array<'a, S: StorageEngine + 'a>(
         array_id: aid,
         coords_msgpack,
         wal_lsn: 0,
+        provenance: None,
     };
     let mut phys = LiteDataPlaneVisitor { engine };
     let fut = phys.array(&op)?;

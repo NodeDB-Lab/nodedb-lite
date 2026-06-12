@@ -1,4 +1,4 @@
-// SPDX-License-Ientifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Ingest handler for the timeseries physical visitor.
 
 use std::collections::HashSet;
@@ -25,6 +25,11 @@ static SEEN_LSNS: std::sync::LazyLock<Mutex<HashSet<(String, u64)>>> =
 /// Decodes `payload` per `format` ("ilp", "msgpack", "samples"), performs
 /// WAL-LSN deduplication when `wal_lsn` is `Some`, and delegates to
 /// `ingest_metric` for each decoded sample.
+///
+/// Returns the `QueryResult` together with the decoded samples. The caller is
+/// responsible for converting the samples to column-ordered rows (using the
+/// collection's columnar schema) and calling `engine.columnar.enqueue_outbound`
+/// from an async context to durably queue them for replication to Origin.
 pub fn ingest<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
@@ -32,17 +37,20 @@ pub fn ingest<S: StorageEngine>(
     format: &str,
     wal_lsn: Option<u64>,
     surrogates: &[nodedb_types::Surrogate],
-) -> Result<QueryResult, LiteError> {
+) -> Result<(QueryResult, Vec<ParsedSample>), LiteError> {
     // WAL-LSN deduplication: skip the entire batch if already applied.
     if let Some(lsn) = wal_lsn {
         let mut seen = SEEN_LSNS.lock().map_err(|_| LiteError::LockPoisoned)?;
         let key = (collection.to_string(), lsn);
         if seen.contains(&key) {
-            return Ok(QueryResult {
-                columns: Vec::new(),
-                rows: Vec::new(),
-                rows_affected: 0,
-            });
+            return Ok((
+                QueryResult {
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                    rows_affected: 0,
+                },
+                Vec::new(),
+            ));
         }
         seen.insert(key);
     }
@@ -63,16 +71,44 @@ pub fn ingest<S: StorageEngine>(
             .lock()
             .map_err(|_| LiteError::LockPoisoned)?;
 
-        for (metric_name, tags, sample) in samples {
-            ts_engine.ingest_metric(collection, &metric_name, tags, sample);
+        for (metric_name, tags, sample) in &samples {
+            ts_engine.ingest_metric(collection, metric_name, tags.clone(), *sample);
         }
     }
 
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        rows_affected: count,
-    })
+    Ok((
+        QueryResult {
+            columns: Vec::new(),
+            rows: Vec::new(),
+            rows_affected: count,
+        },
+        samples,
+    ))
+}
+
+/// Convert decoded `ParsedSample`s to column-ordered rows using the given
+/// column names. Columns named `"time"` or `"timestamp"` receive the
+/// millisecond timestamp; columns named `"value"` receive the numeric value;
+/// all other columns receive `Value::Null`.
+pub fn samples_to_rows(
+    samples: &[ParsedSample],
+    col_names: &[String],
+) -> Vec<Vec<nodedb_types::value::Value>> {
+    samples
+        .iter()
+        .map(|(_, _, sample)| {
+            col_names
+                .iter()
+                .map(|name| match name.to_ascii_lowercase().as_str() {
+                    "time" | "timestamp" | "ts" | "timestamp_ms" => {
+                        nodedb_types::value::Value::Integer(sample.timestamp_ms)
+                    }
+                    "value" | "val" | "v" => nodedb_types::value::Value::Float(sample.value),
+                    _ => nodedb_types::value::Value::Null,
+                })
+                .collect()
+        })
+        .collect()
 }
 
 // ── Payload decoders ──────────────────────────────────────────────────────────

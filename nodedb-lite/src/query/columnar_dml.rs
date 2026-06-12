@@ -18,11 +18,14 @@ use super::coerce::build_row;
 ///
 /// Each `row` is a list of `(column_name, SqlValue)` pairs. Values are
 /// coerced to match the schema column type and ordered by schema position.
+/// Returns the query result plus the column-ordered rows actually written, so
+/// the async caller can durably enqueue them for outbound sync (the durable
+/// enqueue can't run inside this sync path).
 pub fn insert_columnar<S: StorageEngine>(
     columnar: &Arc<ColumnarEngine<S>>,
     collection: &str,
     rows: &[Vec<(String, SqlValue)>],
-) -> Result<QueryResult, LiteError> {
+) -> Result<(QueryResult, Vec<Vec<nodedb_types::Value>>), LiteError> {
     let schema = columnar
         .schema(collection)
         .ok_or_else(|| LiteError::BadRequest {
@@ -30,6 +33,7 @@ pub fn insert_columnar<S: StorageEngine>(
         })?;
 
     let mut affected: u64 = 0;
+    let mut written: Vec<Vec<nodedb_types::Value>> = Vec::with_capacity(rows.len());
     for row_pairs in rows {
         let values = build_row(row_pairs, &schema.columns)?;
         columnar
@@ -37,12 +41,16 @@ pub fn insert_columnar<S: StorageEngine>(
             .map_err(|e| LiteError::BadRequest {
                 detail: format!("columnar insert: {e}"),
             })?;
+        written.push(values);
         affected += 1;
     }
 
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        rows_affected: affected,
-    })
+    Ok((
+        QueryResult {
+            columns: Vec::new(),
+            rows: Vec::new(),
+            rows_affected: affected,
+        },
+        written,
+    ))
 }

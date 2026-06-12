@@ -31,11 +31,16 @@ pub struct InsertParams<'a> {
 /// Decodes the payload per `format` ("json", "msgpack", "ilp"), respects
 /// `intent` (Insert / InsertIfAbsent / Put), and assigns surrogates from the
 /// provided list falling back to 0 when the list is shorter than the row count.
+///
+/// Returns the `QueryResult` together with the column-ordered rows that were
+/// actually written to the memtable. The caller is responsible for calling
+/// `engine.columnar.enqueue_outbound` from an async context to durably queue
+/// those rows for replication to Origin.
 pub fn insert<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     params: InsertParams<'_>,
-) -> Result<QueryResult, LiteError> {
+) -> Result<(QueryResult, Vec<Vec<Value>>), LiteError> {
     let InsertParams {
         payload,
         format,
@@ -67,6 +72,7 @@ pub fn insert<S: StorageEngine>(
     let rows = decode_payload(payload, format, &col_names)?;
 
     let mut affected: u64 = 0;
+    let mut inserted_rows: Vec<Vec<Value>> = Vec::new();
 
     for (row_idx, row_values) in rows.into_iter().enumerate() {
         let _surrogate = surrogates
@@ -77,6 +83,7 @@ pub fn insert<S: StorageEngine>(
         match intent {
             ColumnarInsertIntent::Insert => {
                 engine.columnar.insert(collection, &row_values)?;
+                inserted_rows.push(row_values);
                 affected += 1;
             }
             ColumnarInsertIntent::InsertIfAbsent => {
@@ -87,6 +94,7 @@ pub fn insert<S: StorageEngine>(
                     continue;
                 }
                 engine.columnar.insert(collection, &row_values)?;
+                inserted_rows.push(row_values);
                 affected += 1;
             }
             ColumnarInsertIntent::Put => {
@@ -96,6 +104,7 @@ pub fn insert<S: StorageEngine>(
                         let _ = engine.columnar.delete(collection, pk);
                     }
                     engine.columnar.insert(collection, &row_values)?;
+                    inserted_rows.push(row_values);
                     affected += 1;
                 } else {
                     // Merge: read existing row, apply conflict updates, write merged.
@@ -119,17 +128,21 @@ pub fn insert<S: StorageEngine>(
                         let _ = engine.columnar.delete(collection, pk);
                     }
                     engine.columnar.insert(collection, &merged)?;
+                    inserted_rows.push(merged);
                     affected += 1;
                 }
             }
         }
     }
 
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        rows_affected: affected,
-    })
+    Ok((
+        QueryResult {
+            columns: Vec::new(),
+            rows: Vec::new(),
+            rows_affected: affected,
+        },
+        inserted_rows,
+    ))
 }
 
 /// Update rows matching filter predicates.

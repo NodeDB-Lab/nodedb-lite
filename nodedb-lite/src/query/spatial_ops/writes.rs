@@ -27,6 +27,11 @@ pub fn spatial_insert<S: StorageEngine>(
         .lock()
         .map_err(|_| LiteError::LockPoisoned)?
         .index_document(collection, field, &doc_id, geometry);
+    // Stage for durable sync outbound (sync method — no await needed).
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(q) = &engine.spatial_outbound {
+        q.stage_insert(collection, field, &doc_id, geometry);
+    }
     Ok(QueryResult {
         columns: vec![],
         rows: vec![],
@@ -47,6 +52,11 @@ pub fn spatial_delete<S: StorageEngine>(
         .lock()
         .map_err(|_| LiteError::LockPoisoned)?
         .remove_document(collection, field, &doc_id);
+    // Stage for durable sync outbound.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(q) = &engine.spatial_outbound {
+        q.stage_delete(collection, field, &doc_id);
+    }
     Ok(QueryResult {
         columns: vec![],
         rows: vec![],

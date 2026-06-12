@@ -265,4 +265,55 @@ mod tests {
             .unwrap();
         assert!(results.is_empty());
     }
+
+    /// Verify that a vector insert is rejected with Backpressure when the
+    /// memory governor reports Critical pressure.
+    ///
+    /// Strategy: open a db with a tiny budget so that a first insert (which
+    /// calls `update_memory_stats` at the end) pushes reported usage over the
+    /// 95% threshold, then assert the second insert returns a Backpressure
+    /// error.
+    #[tokio::test]
+    async fn vector_insert_rejected_at_critical_pressure() {
+        use crate::config::LiteConfig;
+        use crate::memory::PressureLevel;
+
+        // Budget is tiny (1 byte) so any HNSW usage immediately reports Critical.
+        let config = LiteConfig {
+            memory_budget: 1,
+            ..LiteConfig::default()
+        };
+        let storage = PagedbStorageMem::open_in_memory().await.unwrap();
+        let db = NodeDbLite::open_with_config(storage, 1, config)
+            .await
+            .unwrap();
+
+        // First insert: succeeds and updates memory stats so the governor
+        // reports Critical after this call returns.
+        db.vector_insert("embeddings", "v1", &[1.0, 0.0, 0.0], None)
+            .await
+            .unwrap();
+
+        // Confirm the governor is now Critical before the second insert.
+        assert_eq!(
+            db.governor().pressure(),
+            PressureLevel::Critical,
+            "governor should be Critical after first insert with 1-byte budget"
+        );
+
+        // Second insert must be rejected with a Backpressure error.
+        let result = db
+            .vector_insert("embeddings", "v2", &[0.0, 1.0, 0.0], None)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "second vector insert should fail under Critical pressure"
+        );
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("backpressure") || err_str.contains("Backpressure"),
+            "error should mention backpressure, got: {err_str}"
+        );
+    }
 }
