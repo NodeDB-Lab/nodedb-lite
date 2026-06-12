@@ -28,6 +28,13 @@ use self::send::{encode_and_send, send_binary};
 use super::delegate::SyncDelegate;
 use crate::sync::client::{SyncClient, SyncState};
 
+/// Maximum age of an unACK'd in-flight entry before it is evicted by the stale-
+/// cleanup pass. Entries older than this are treated as losses: flow control
+/// applies AIMD multiplicative decrease and the `stale_timeouts` metric is
+/// incremented. The recovery path is the normal push loop retrying from the
+/// pending queue.
+const STALE_IN_FLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Periodically push pending deltas (and every other outbound queue) to Origin.
 pub(super) async fn delta_push_loop<S>(
     client: &Arc<SyncClient>,
@@ -44,6 +51,19 @@ pub(super) async fn delta_push_loop<S>(
 
         if client.state().await != SyncState::Connected {
             continue;
+        }
+
+        // If Origin has fenced this producer, stop all outbound push until
+        // the sync loop reconnects (which clears the flag). Reconnect alone
+        // does not bump the epoch — epoch is only minted on db-open via
+        // LiteIdentity. A persistently fenced producer requires a process
+        // restart to obtain a new epoch.
+        if client.is_fenced() {
+            tracing::error!(
+                "push loop halted: producer is fenced by Origin; \
+                 waiting for reconnect (process restart required for new epoch)"
+            );
+            return;
         }
 
         if control::push_control_messages(client, sink)
@@ -89,6 +109,14 @@ where
 
         if client.state().await != SyncState::Connected {
             continue;
+        }
+
+        // Stale in-flight cleanup: evict any unACK'd entries that have exceeded
+        // the deadline and apply AIMD multiplicative decrease. This unblocks the
+        // push pipeline when a DeltaAck is silently dropped (e.g. malformed frame).
+        {
+            let mut flow = client.flow().lock().await;
+            flow.cleanup_stale_and_record(STALE_IN_FLIGHT_TIMEOUT, client.metrics());
         }
 
         // Proactive token refresh: check if the token is approaching expiry.

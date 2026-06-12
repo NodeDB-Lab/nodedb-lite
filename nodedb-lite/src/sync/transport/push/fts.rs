@@ -7,7 +7,7 @@ use futures::SinkExt;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 
-use nodedb_types::sync::wire::{SyncFrame, SyncMessageType};
+use nodedb_types::sync::wire::{EngineKind, SyncFrame, SyncMessageType, stream_id_for};
 
 use super::send::send_binary;
 use crate::sync::client::SyncClient;
@@ -23,61 +23,95 @@ where
     S::Error: std::fmt::Display,
 {
     let lite_id = format!("{}", client.peer_id());
+    let producer_id = client.producer_id().await;
+    let epoch = client.accepted_epoch().await;
 
-    for entry in delegate.pending_fts_indexes() {
+    for (durable_key, mut entry) in delegate.pending_fts_indexes().await {
+        let stream_id = stream_id_for(EngineKind::Fts, &entry.collection);
+        if entry.seq == 0 {
+            entry.seq = delegate.next_stream_seq(stream_id).await;
+            if let Err(e) = delegate.persist_fts_index_seq(&durable_key, &entry).await {
+                tracing::warn!(error = %e, "failed to persist stream seq into durable entry; retaining for retry");
+                continue;
+            }
+        }
+        let seq = entry.seq;
         let msg = nodedb_types::sync::wire::FtsIndexMsg {
             lite_id: lite_id.clone(),
             collection: entry.collection.clone(),
             doc_id: entry.doc_id.clone(),
             text: entry.text.clone(),
             batch_id: entry.batch_id,
+            producer_id,
+            epoch,
+            seq,
         };
         let Some(frame) = SyncFrame::try_encode(SyncMessageType::FtsIndex, &msg) else {
             tracing::error!(
                 collection = %entry.collection, doc_id = %entry.doc_id, batch_id = entry.batch_id,
                 "failed to encode FtsIndex frame; dropping entry"
             );
+            delegate.acknowledge_fts_index(durable_key).await;
             continue;
         };
         if let Err(e) = send_binary(sink, frame).await {
             tracing::warn!(
                 collection = %entry.collection, doc_id = %entry.doc_id, batch_id = entry.batch_id, error = %e,
-                "FtsIndex send failed; re-queuing"
+                "FtsIndex send failed; durable entry retained for re-send on reconnect"
             );
-            delegate.reject_fts_index(entry);
             return ControlFlow::Break(());
         }
+        // Mark in-flight: durable entry survives until Origin ack.
+        delegate
+            .mark_fts_index_in_flight(entry.batch_id, durable_key)
+            .await;
         tracing::debug!(
             collection = %entry.collection, doc_id = %entry.doc_id, batch_id = entry.batch_id,
-            "sent FtsIndex to Origin"
+            "sent FtsIndex to Origin; awaiting ack before deleting durable entry"
         );
     }
 
-    for entry in delegate.pending_fts_deletes() {
+    for (durable_key, mut entry) in delegate.pending_fts_deletes().await {
+        let stream_id = stream_id_for(EngineKind::Fts, &entry.collection);
+        if entry.seq == 0 {
+            entry.seq = delegate.next_stream_seq(stream_id).await;
+            if let Err(e) = delegate.persist_fts_delete_seq(&durable_key, &entry).await {
+                tracing::warn!(error = %e, "failed to persist stream seq into durable entry; retaining for retry");
+                continue;
+            }
+        }
+        let seq = entry.seq;
         let msg = nodedb_types::sync::wire::FtsDeleteMsg {
             lite_id: lite_id.clone(),
             collection: entry.collection.clone(),
             doc_id: entry.doc_id.clone(),
             batch_id: entry.batch_id,
+            producer_id,
+            epoch,
+            seq,
         };
         let Some(frame) = SyncFrame::try_encode(SyncMessageType::FtsDelete, &msg) else {
             tracing::error!(
                 collection = %entry.collection, doc_id = %entry.doc_id, batch_id = entry.batch_id,
                 "failed to encode FtsDelete frame; dropping entry"
             );
+            delegate.acknowledge_fts_delete(durable_key).await;
             continue;
         };
         if let Err(e) = send_binary(sink, frame).await {
             tracing::warn!(
                 collection = %entry.collection, doc_id = %entry.doc_id, batch_id = entry.batch_id, error = %e,
-                "FtsDelete send failed; re-queuing"
+                "FtsDelete send failed; durable entry retained for re-send on reconnect"
             );
-            delegate.reject_fts_delete(entry);
             return ControlFlow::Break(());
         }
+        // Mark in-flight: durable entry survives until Origin ack.
+        delegate
+            .mark_fts_delete_in_flight(entry.batch_id, durable_key)
+            .await;
         tracing::debug!(
             collection = %entry.collection, doc_id = %entry.doc_id, batch_id = entry.batch_id,
-            "sent FtsDelete to Origin"
+            "sent FtsDelete to Origin; awaiting ack before deleting durable entry"
         );
     }
     ControlFlow::Continue(())

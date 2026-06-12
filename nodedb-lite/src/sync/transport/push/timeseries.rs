@@ -9,7 +9,7 @@ use futures::SinkExt;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 
-use nodedb_types::sync::wire::{SyncFrame, SyncMessageType};
+use nodedb_types::sync::wire::{EngineKind, SyncFrame, SyncMessageType, stream_id_for};
 
 use super::send::send_binary;
 use crate::sync::client::SyncClient;
@@ -26,12 +26,22 @@ where
     S::Error: std::fmt::Display,
 {
     let lite_id = format!("{}", client.peer_id());
+    let producer_id = client.producer_id().await;
+    let epoch = client.accepted_epoch().await;
 
-    for batch in delegate.pending_timeseries_batches() {
-        let Some(msg) = encode_batch(&lite_id, &batch) else {
-            // Empty batch — drop pending entries for this collection so the
-            // queue does not loop on a zero-row batch.
-            delegate.acknowledge_timeseries_collection(&batch.collection);
+    for (durable_key, mut batch) in delegate.pending_timeseries_batches().await {
+        let stream_id = stream_id_for(EngineKind::Timeseries, &batch.collection);
+        if batch.seq == 0 {
+            batch.seq = delegate.next_stream_seq(stream_id).await;
+            if let Err(e) = delegate.persist_timeseries_seq(&durable_key, &batch).await {
+                tracing::warn!(error = %e, "failed to persist stream seq into durable entry; retaining for retry");
+                continue;
+            }
+        }
+        let seq = batch.seq;
+        let Some(msg) = encode_batch(&lite_id, &batch, producer_id, epoch, seq) else {
+            // Empty batch — delete from durable storage so the queue doesn't loop.
+            delegate.acknowledge_timeseries_batch(durable_key).await;
             continue;
         };
 
@@ -40,21 +50,25 @@ where
                 collection = %batch.collection, batch_id = batch.batch_id,
                 "failed to encode TimeseriesPush frame; dropping batch"
             );
+            delegate.acknowledge_timeseries_batch(durable_key).await;
             continue;
         };
         if let Err(e) = send_binary(sink, frame).await {
             tracing::warn!(
                 collection = %batch.collection, batch_id = batch.batch_id, error = %e,
-                "TimeseriesPush send failed; re-queuing batch"
+                "TimeseriesPush send failed; durable entry retained for re-send on reconnect"
             );
-            delegate.reject_timeseries_batch(batch);
             return ControlFlow::Break(());
         }
         tracing::debug!(
             collection = %batch.collection, batch_id = batch.batch_id,
             samples = msg.sample_count,
-            "sent TimeseriesPush to Origin"
+            "sent TimeseriesPush to Origin; awaiting ack before deleting durable entry"
         );
+        // Mark in-flight keyed by seq (TimeseriesAckMsg echoes applied_seq, not batch_id).
+        delegate
+            .mark_timeseries_batch_in_flight(seq, durable_key)
+            .await;
     }
     ControlFlow::Continue(())
 }
@@ -65,6 +79,9 @@ where
 fn encode_batch(
     lite_id: &str,
     batch: &PendingTimeseriesBatch,
+    producer_id: u64,
+    epoch: u64,
+    seq: u64,
 ) -> Option<nodedb_types::sync::wire::TimeseriesPushMsg> {
     // Time column = first column whose name contains "time"; fall back to col 0.
     let time_col_idx = batch
@@ -119,5 +136,8 @@ fn encode_batch(
         min_ts,
         max_ts,
         watermarks: std::collections::HashMap::new(),
+        producer_id,
+        epoch,
+        seq,
     })
 }

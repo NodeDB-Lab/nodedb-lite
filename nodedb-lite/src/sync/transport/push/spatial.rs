@@ -7,7 +7,7 @@ use futures::SinkExt;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 
-use nodedb_types::sync::wire::{SyncFrame, SyncMessageType};
+use nodedb_types::sync::wire::{EngineKind, SyncFrame, SyncMessageType, stream_id_for};
 
 use super::send::send_binary;
 use crate::sync::client::SyncClient;
@@ -23,8 +23,22 @@ where
     S::Error: std::fmt::Display,
 {
     let lite_id = format!("{}", client.peer_id());
+    let producer_id = client.producer_id().await;
+    let epoch = client.accepted_epoch().await;
 
-    for entry in delegate.pending_spatial_inserts() {
+    for (durable_key, mut entry) in delegate.pending_spatial_inserts().await {
+        let stream_id = stream_id_for(EngineKind::Spatial, &entry.collection);
+        if entry.seq == 0 {
+            entry.seq = delegate.next_stream_seq(stream_id).await;
+            if let Err(e) = delegate
+                .persist_spatial_insert_seq(&durable_key, &entry)
+                .await
+            {
+                tracing::warn!(error = %e, "failed to persist stream seq into durable entry; retaining for retry");
+                continue;
+            }
+        }
+        let seq = entry.seq;
         let msg = nodedb_types::sync::wire::SpatialInsertMsg {
             lite_id: lite_id.clone(),
             collection: entry.collection.clone(),
@@ -32,56 +46,82 @@ where
             doc_id: entry.doc_id.clone(),
             geometry_bytes: entry.geometry_bytes.clone(),
             batch_id: entry.batch_id,
+            producer_id,
+            epoch,
+            seq,
         };
         let Some(frame) = SyncFrame::try_encode(SyncMessageType::SpatialInsert, &msg) else {
             tracing::error!(
                 collection = %entry.collection, field = %entry.field, doc_id = %entry.doc_id, batch_id = entry.batch_id,
                 "failed to encode SpatialInsert frame; dropping entry"
             );
+            delegate.acknowledge_spatial_insert(durable_key).await;
             continue;
         };
         if let Err(e) = send_binary(sink, frame).await {
             tracing::warn!(
                 collection = %entry.collection, field = %entry.field, doc_id = %entry.doc_id,
                 batch_id = entry.batch_id, error = %e,
-                "SpatialInsert send failed; re-queuing"
+                "SpatialInsert send failed; durable entry retained for re-send on reconnect"
             );
-            delegate.reject_spatial_insert(entry);
             return ControlFlow::Break(());
         }
+        // Mark in-flight: durable entry survives until Origin ack.
+        delegate
+            .mark_spatial_insert_in_flight(entry.batch_id, durable_key)
+            .await;
         tracing::debug!(
             collection = %entry.collection, field = %entry.field, doc_id = %entry.doc_id, batch_id = entry.batch_id,
-            "sent SpatialInsert to Origin"
+            "sent SpatialInsert to Origin; awaiting ack before deleting durable entry"
         );
     }
 
-    for entry in delegate.pending_spatial_deletes() {
+    for (durable_key, mut entry) in delegate.pending_spatial_deletes().await {
+        let stream_id = stream_id_for(EngineKind::Spatial, &entry.collection);
+        if entry.seq == 0 {
+            entry.seq = delegate.next_stream_seq(stream_id).await;
+            if let Err(e) = delegate
+                .persist_spatial_delete_seq(&durable_key, &entry)
+                .await
+            {
+                tracing::warn!(error = %e, "failed to persist stream seq into durable entry; retaining for retry");
+                continue;
+            }
+        }
+        let seq = entry.seq;
         let msg = nodedb_types::sync::wire::SpatialDeleteMsg {
             lite_id: lite_id.clone(),
             collection: entry.collection.clone(),
             field: entry.field.clone(),
             doc_id: entry.doc_id.clone(),
             batch_id: entry.batch_id,
+            producer_id,
+            epoch,
+            seq,
         };
         let Some(frame) = SyncFrame::try_encode(SyncMessageType::SpatialDelete, &msg) else {
             tracing::error!(
                 collection = %entry.collection, field = %entry.field, doc_id = %entry.doc_id, batch_id = entry.batch_id,
                 "failed to encode SpatialDelete frame; dropping entry"
             );
+            delegate.acknowledge_spatial_delete(durable_key).await;
             continue;
         };
         if let Err(e) = send_binary(sink, frame).await {
             tracing::warn!(
                 collection = %entry.collection, field = %entry.field, doc_id = %entry.doc_id,
                 batch_id = entry.batch_id, error = %e,
-                "SpatialDelete send failed; re-queuing"
+                "SpatialDelete send failed; durable entry retained for re-send on reconnect"
             );
-            delegate.reject_spatial_delete(entry);
             return ControlFlow::Break(());
         }
+        // Mark in-flight: durable entry survives until Origin ack.
+        delegate
+            .mark_spatial_delete_in_flight(entry.batch_id, durable_key)
+            .await;
         tracing::debug!(
             collection = %entry.collection, field = %entry.field, doc_id = %entry.doc_id, batch_id = entry.batch_id,
-            "sent SpatialDelete to Origin"
+            "sent SpatialDelete to Origin; awaiting ack before deleting durable entry"
         );
     }
     ControlFlow::Continue(())

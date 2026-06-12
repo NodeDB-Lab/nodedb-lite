@@ -41,6 +41,7 @@ impl SyncDelegate for MockDelegate {
     fn acknowledge(&self, mutation_id: u64) {
         self.acked_up_to.store(mutation_id, Ordering::Relaxed);
     }
+    async fn set_pending_delta_seq(&self, _mutation_id: u64, _seq: u64) {}
     fn reject(&self, mutation_id: u64) {
         self.rejected.lock().unwrap().push(mutation_id);
     }
@@ -69,53 +70,128 @@ impl SyncDelegate for MockDelegate {
     }
     fn handle_array_reject(&self, _msg: &nodedb_types::sync::wire::ArrayRejectMsg) {}
 
-    fn pending_columnar_batches(&self) -> Vec<PendingColumnarBatch> {
+    async fn pending_columnar_batches(&self) -> Vec<(Vec<u8>, PendingColumnarBatch)> {
         Vec::new()
     }
-    fn acknowledge_columnar_batch(&self, _batch_id: u64) {}
-    fn reject_columnar_batch(&self, _batch: PendingColumnarBatch) {}
+    async fn mark_columnar_batch_in_flight(&self, _batch_id: u64, _durable_key: Vec<u8>) {}
+    async fn ack_columnar_batch_in_flight(&self, _batch_id: u64) {}
+    async fn acknowledge_columnar_batch(&self, _durable_key: Vec<u8>) {}
 
-    fn pending_vector_inserts(&self) -> Vec<PendingVectorInsert> {
+    async fn pending_vector_inserts(&self) -> Vec<(Vec<u8>, PendingVectorInsert)> {
         Vec::new()
     }
-    fn acknowledge_vector_insert(&self, _batch_id: u64) {}
-    fn reject_vector_insert(&self, _entry: PendingVectorInsert) {}
+    async fn mark_vector_insert_in_flight(&self, _batch_id: u64, _durable_key: Vec<u8>) {}
+    async fn ack_vector_insert_in_flight(&self, _batch_id: u64) {}
+    async fn acknowledge_vector_insert(&self, _durable_key: Vec<u8>) {}
 
-    fn pending_vector_deletes(&self) -> Vec<PendingVectorDelete> {
+    async fn pending_vector_deletes(&self) -> Vec<(Vec<u8>, PendingVectorDelete)> {
         Vec::new()
     }
-    fn acknowledge_vector_delete(&self, _batch_id: u64) {}
-    fn reject_vector_delete(&self, _entry: PendingVectorDelete) {}
+    async fn mark_vector_delete_in_flight(&self, _batch_id: u64, _durable_key: Vec<u8>) {}
+    async fn ack_vector_delete_in_flight(&self, _batch_id: u64) {}
+    async fn acknowledge_vector_delete(&self, _durable_key: Vec<u8>) {}
 
-    fn pending_fts_indexes(&self) -> Vec<PendingFtsIndex> {
+    async fn pending_fts_indexes(&self) -> Vec<(Vec<u8>, PendingFtsIndex)> {
         Vec::new()
     }
-    fn acknowledge_fts_index(&self, _batch_id: u64) {}
-    fn reject_fts_index(&self, _entry: PendingFtsIndex) {}
+    async fn mark_fts_index_in_flight(&self, _batch_id: u64, _durable_key: Vec<u8>) {}
+    async fn ack_fts_index_in_flight(&self, _batch_id: u64) {}
+    async fn acknowledge_fts_index(&self, _durable_key: Vec<u8>) {}
 
-    fn pending_fts_deletes(&self) -> Vec<PendingFtsDelete> {
+    async fn pending_fts_deletes(&self) -> Vec<(Vec<u8>, PendingFtsDelete)> {
         Vec::new()
     }
-    fn acknowledge_fts_delete(&self, _batch_id: u64) {}
-    fn reject_fts_delete(&self, _entry: PendingFtsDelete) {}
+    async fn mark_fts_delete_in_flight(&self, _batch_id: u64, _durable_key: Vec<u8>) {}
+    async fn ack_fts_delete_in_flight(&self, _batch_id: u64) {}
+    async fn acknowledge_fts_delete(&self, _durable_key: Vec<u8>) {}
 
-    fn pending_spatial_inserts(&self) -> Vec<PendingSpatialInsert> {
+    async fn pending_spatial_inserts(&self) -> Vec<(Vec<u8>, PendingSpatialInsert)> {
         Vec::new()
     }
-    fn acknowledge_spatial_insert(&self, _batch_id: u64) {}
-    fn reject_spatial_insert(&self, _entry: PendingSpatialInsert) {}
+    async fn mark_spatial_insert_in_flight(&self, _batch_id: u64, _durable_key: Vec<u8>) {}
+    async fn ack_spatial_insert_in_flight(&self, _batch_id: u64) {}
+    async fn acknowledge_spatial_insert(&self, _durable_key: Vec<u8>) {}
 
-    fn pending_spatial_deletes(&self) -> Vec<PendingSpatialDelete> {
+    async fn pending_spatial_deletes(&self) -> Vec<(Vec<u8>, PendingSpatialDelete)> {
         Vec::new()
     }
-    fn acknowledge_spatial_delete(&self, _batch_id: u64) {}
-    fn reject_spatial_delete(&self, _entry: PendingSpatialDelete) {}
+    async fn mark_spatial_delete_in_flight(&self, _batch_id: u64, _durable_key: Vec<u8>) {}
+    async fn ack_spatial_delete_in_flight(&self, _batch_id: u64) {}
+    async fn acknowledge_spatial_delete(&self, _durable_key: Vec<u8>) {}
 
-    fn pending_timeseries_batches(&self) -> Vec<PendingTimeseriesBatch> {
+    async fn pending_timeseries_batches(&self) -> Vec<(Vec<u8>, PendingTimeseriesBatch)> {
         Vec::new()
     }
-    fn acknowledge_timeseries_collection(&self, _collection: &str) {}
-    fn reject_timeseries_batch(&self, _batch: PendingTimeseriesBatch) {}
+    async fn mark_timeseries_batch_in_flight(&self, _stream_seq: u64, _durable_key: Vec<u8>) {}
+    async fn ack_timeseries_batches_through_seq(&self, _applied_seq: u64) {}
+    async fn acknowledge_timeseries_batch(&self, _durable_key: Vec<u8>) {}
+    async fn clear_engine_in_flight(&self) {}
+
+    async fn persist_producer_state(&self, _producer_id: u64, _accepted_epoch: u64) {}
+    async fn load_producer_state(&self) -> (u64, u64) {
+        (0, 0)
+    }
+    async fn next_stream_seq(&self, _stream_id: u64) -> u64 {
+        0
+    }
+    async fn record_stream_ack(&self, _stream_id: u64, _applied_seq: u64) {}
+
+    async fn persist_columnar_seq(
+        &self,
+        _key: &[u8],
+        _batch: &PendingColumnarBatch,
+    ) -> Result<(), crate::error::LiteError> {
+        Ok(())
+    }
+    async fn persist_timeseries_seq(
+        &self,
+        _key: &[u8],
+        _batch: &PendingTimeseriesBatch,
+    ) -> Result<(), crate::error::LiteError> {
+        Ok(())
+    }
+    async fn persist_vector_insert_seq(
+        &self,
+        _key: &[u8],
+        _insert: &PendingVectorInsert,
+    ) -> Result<(), crate::error::LiteError> {
+        Ok(())
+    }
+    async fn persist_vector_delete_seq(
+        &self,
+        _key: &[u8],
+        _delete: &PendingVectorDelete,
+    ) -> Result<(), crate::error::LiteError> {
+        Ok(())
+    }
+    async fn persist_fts_index_seq(
+        &self,
+        _key: &[u8],
+        _entry: &PendingFtsIndex,
+    ) -> Result<(), crate::error::LiteError> {
+        Ok(())
+    }
+    async fn persist_fts_delete_seq(
+        &self,
+        _key: &[u8],
+        _entry: &PendingFtsDelete,
+    ) -> Result<(), crate::error::LiteError> {
+        Ok(())
+    }
+    async fn persist_spatial_insert_seq(
+        &self,
+        _key: &[u8],
+        _insert: &PendingSpatialInsert,
+    ) -> Result<(), crate::error::LiteError> {
+        Ok(())
+    }
+    async fn persist_spatial_delete_seq(
+        &self,
+        _key: &[u8],
+        _delete: &PendingSpatialDelete,
+    ) -> Result<(), crate::error::LiteError> {
+        Ok(())
+    }
 }
 
 fn make_client() -> Arc<SyncClient> {
@@ -135,6 +211,8 @@ async fn dispatch_delta_ack() {
         mutation_id: 42,
         lsn: 100,
         clock_skew_warning_ms: None,
+        applied_seq: 0,
+        status: nodedb_types::sync::wire::AckStatus::Applied,
     };
     let frame = SyncFrame::try_encode(SyncMessageType::DeltaAck, &ack).expect("test frame encode");
 

@@ -6,15 +6,19 @@
 //! `SyncDelegate`. Pulled out of the main transport module so the giant
 //! `match` over message types lives in one self-contained file instead of
 //! being interleaved with the push loop.
+//!
+//! Engine-level ack dispatch (with AckStatus handling) lives in
+//! `dispatch_acks` to keep this file within the 500-line limit.
 
 use std::sync::Arc;
 
 use futures::StreamExt;
 use tokio_tungstenite::tungstenite::Message;
 
-use nodedb_types::sync::wire::{SyncFrame, SyncMessageType};
+use nodedb_types::sync::wire::{AckStatus, SyncFrame, SyncMessageType};
 
 use super::delegate::SyncDelegate;
+use super::dispatch_acks;
 use crate::error::LiteError;
 use crate::sync::client::SyncClient;
 
@@ -59,8 +63,41 @@ pub(super) async fn dispatch_frame(
     match frame.msg_type {
         SyncMessageType::DeltaAck => {
             if let Some(ack) = frame.decode_body::<nodedb_types::sync::wire::DeltaAckMsg>() {
-                delegate.acknowledge(ack.mutation_id);
+                match &ack.status {
+                    AckStatus::Applied | AckStatus::Duplicate => {
+                        // DeltaAckMsg does not carry a collection field so we
+                        // cannot derive a stream_id to advance the frontier here.
+                        // The durable last_assigned from StreamSeqTracker already
+                        // prevents re-sending un-acked seqs; frontier advancement
+                        // for CRDT deltas is deferred until DeltaAckMsg gains a
+                        // collection field.
+                        delegate.acknowledge(ack.mutation_id);
+                    }
+                    AckStatus::Fenced => {
+                        tracing::error!(
+                            mutation_id = ack.mutation_id,
+                            "DeltaAck: producer fenced by Origin; halting push"
+                        );
+                        client.set_fenced();
+                        delegate.acknowledge(ack.mutation_id);
+                    }
+                    AckStatus::Gap { expected } => {
+                        tracing::warn!(
+                            mutation_id = ack.mutation_id,
+                            expected,
+                            "DeltaAck: sequence gap detected by Origin"
+                        );
+                        delegate.acknowledge(ack.mutation_id);
+                    }
+                }
                 client.handle_delta_ack(&ack).await;
+            } else {
+                client.metrics().record_stale_timeouts(1);
+                tracing::warn!(
+                    frame_len = frame.body.len(),
+                    "DeltaAck frame body failed to decode; \
+                     in-flight entry will be evicted by the stale-timeout pass"
+                );
             }
         }
         SyncMessageType::ResyncRequest => {
@@ -171,118 +208,28 @@ pub(super) async fn dispatch_frame(
             }
         }
         SyncMessageType::ColumnarInsertAck => {
-            if let Some(ack) = frame.decode_body::<nodedb_types::sync::wire::ColumnarInsertAckMsg>()
-            {
-                tracing::debug!(
-                    collection = %ack.collection,
-                    batch_id = ack.batch_id,
-                    accepted = ack.accepted,
-                    rejected = ack.rejected,
-                    "ColumnarInsertAck received from Origin"
-                );
-                delegate.acknowledge_columnar_batch(ack.batch_id);
-            }
+            dispatch_acks::handle_columnar_insert_ack(client, delegate, frame).await;
         }
         SyncMessageType::VectorInsertAck => {
-            if let Some(ack) = frame.decode_body::<nodedb_types::sync::wire::VectorInsertAckMsg>() {
-                tracing::debug!(
-                    collection = %ack.collection,
-                    id = %ack.id,
-                    batch_id = ack.batch_id,
-                    accepted = ack.accepted,
-                    "VectorInsertAck received from Origin"
-                );
-                if !ack.accepted {
-                    tracing::warn!(
-                        collection = %ack.collection,
-                        id = %ack.id,
-                        reason = ?ack.reject_reason,
-                        "VectorInsert rejected by Origin; dropping (no retry for rejected inserts)"
-                    );
-                }
-                // Either way the entry leaves the pending queue — accepted
-                // inserts are durable on Origin; rejected ones cannot be
-                // retried and would loop forever.
-                delegate.acknowledge_vector_insert(ack.batch_id);
-            }
+            dispatch_acks::handle_vector_insert_ack(client, delegate, frame).await;
         }
         SyncMessageType::VectorDeleteAck => {
-            if let Some(ack) = frame.decode_body::<nodedb_types::sync::wire::VectorDeleteAckMsg>() {
-                tracing::debug!(
-                    collection = %ack.collection,
-                    id = %ack.id,
-                    batch_id = ack.batch_id,
-                    accepted = ack.accepted,
-                    "VectorDeleteAck received from Origin"
-                );
-                delegate.acknowledge_vector_delete(ack.batch_id);
-            }
+            dispatch_acks::handle_vector_delete_ack(client, delegate, frame).await;
         }
         SyncMessageType::FtsIndexAck => {
-            if let Some(ack) = frame.decode_body::<nodedb_types::sync::wire::FtsIndexAckMsg>() {
-                tracing::debug!(
-                    collection = %ack.collection,
-                    doc_id = %ack.doc_id,
-                    batch_id = ack.batch_id,
-                    accepted = ack.accepted,
-                    "FtsIndexAck received from Origin"
-                );
-                delegate.acknowledge_fts_index(ack.batch_id);
-            }
+            dispatch_acks::handle_fts_index_ack(client, delegate, frame).await;
         }
         SyncMessageType::FtsDeleteAck => {
-            if let Some(ack) = frame.decode_body::<nodedb_types::sync::wire::FtsDeleteAckMsg>() {
-                tracing::debug!(
-                    collection = %ack.collection,
-                    doc_id = %ack.doc_id,
-                    batch_id = ack.batch_id,
-                    accepted = ack.accepted,
-                    "FtsDeleteAck received from Origin"
-                );
-                delegate.acknowledge_fts_delete(ack.batch_id);
-            }
+            dispatch_acks::handle_fts_delete_ack(client, delegate, frame).await;
         }
         SyncMessageType::SpatialInsertAck => {
-            if let Some(ack) = frame.decode_body::<nodedb_types::sync::wire::SpatialInsertAckMsg>()
-            {
-                tracing::debug!(
-                    collection = %ack.collection,
-                    field = %ack.field,
-                    doc_id = %ack.doc_id,
-                    batch_id = ack.batch_id,
-                    accepted = ack.accepted,
-                    "SpatialInsertAck received from Origin"
-                );
-                delegate.acknowledge_spatial_insert(ack.batch_id);
-            }
+            dispatch_acks::handle_spatial_insert_ack(client, delegate, frame).await;
         }
         SyncMessageType::SpatialDeleteAck => {
-            if let Some(ack) = frame.decode_body::<nodedb_types::sync::wire::SpatialDeleteAckMsg>()
-            {
-                tracing::debug!(
-                    collection = %ack.collection,
-                    field = %ack.field,
-                    doc_id = %ack.doc_id,
-                    batch_id = ack.batch_id,
-                    accepted = ack.accepted,
-                    "SpatialDeleteAck received from Origin"
-                );
-                delegate.acknowledge_spatial_delete(ack.batch_id);
-            }
+            dispatch_acks::handle_spatial_delete_ack(client, delegate, frame).await;
         }
         SyncMessageType::TimeseriesAck => {
-            if let Some(ack) = frame.decode_body::<nodedb_types::sync::wire::TimeseriesAckMsg>() {
-                tracing::debug!(
-                    collection = %ack.collection,
-                    accepted = ack.accepted,
-                    rejected = ack.rejected,
-                    lsn = ack.lsn,
-                    "TimeseriesAck received from Origin"
-                );
-                // Acknowledge by collection — Origin confirmed receipt for
-                // the entire batch; remaining batches drain on the next push.
-                delegate.acknowledge_timeseries_collection(&ack.collection);
-            }
+            dispatch_acks::handle_timeseries_ack(client, delegate, frame).await;
         }
         SyncMessageType::PingPong => {
             // Origin pinged. Our `ping_loop` already keeps the link alive,

@@ -9,7 +9,7 @@ use futures::SinkExt;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 
-use nodedb_types::sync::wire::{SyncFrame, SyncMessageType};
+use nodedb_types::sync::wire::{EngineKind, SyncFrame, SyncMessageType, stream_id_for};
 
 use super::send::{encode_and_send, send_binary};
 use crate::sync::client::SyncClient;
@@ -27,7 +27,10 @@ where
     S::Error: std::fmt::Display,
 {
     if client.is_push_paused_for_auth().await {
-        if let Some(refresh_msg) = client.initiate_token_refresh().await {
+        // Only attempt a refresh if the backoff interval has elapsed.
+        if client.is_refresh_backoff_elapsed().await
+            && let Some(refresh_msg) = client.initiate_token_refresh().await
+        {
             encode_and_send(
                 sink,
                 SyncMessageType::TokenRefresh,
@@ -55,9 +58,11 @@ where
         );
     }
 
-    if let Some(ack) = client.take_pending_array_ack().await
-        && let Some(frame) = SyncFrame::try_encode(SyncMessageType::ArrayAck, &ack)
-    {
+    for ack in client.drain_pending_array_acks().await {
+        let Some(frame) = SyncFrame::try_encode(SyncMessageType::ArrayAck, &ack) else {
+            tracing::warn!(array = %ack.array, "failed to encode ArrayAck frame; dropping");
+            continue;
+        };
         if let Err(e) = send_binary(sink, frame).await {
             tracing::warn!(array = %ack.array, error = %e, "ArrayAck send failed");
             return ControlFlow::Break(());
@@ -88,9 +93,32 @@ where
         .update_pending_stats(pending.len(), pending_bytes)
         .await;
 
-    let msgs = client.build_delta_pushes(&pending).await;
+    let mut msgs = client.build_delta_pushes(&pending).await;
     if msgs.is_empty() {
         return ControlFlow::Continue(()); // flow control window full — wait for ACKs
+    }
+
+    // Stamp each message with producer identity and a stable per-collection
+    // stream seq. The seq is assigned once at first send and stored back on
+    // the engine's pending delta so that reconnect re-sends reuse the same
+    // seq — Origin deduplicates by seq rather than double-applying.
+    let seq_by_mid: std::collections::HashMap<u64, u64> =
+        pending.iter().map(|d| (d.mutation_id, d.seq)).collect();
+    let producer_id = client.producer_id().await;
+    let epoch = client.accepted_epoch().await;
+    for msg in &mut msgs {
+        let stream_id = stream_id_for(EngineKind::Crdt, &msg.collection);
+        let seq = match seq_by_mid.get(&msg.mutation_id).copied() {
+            Some(s) if s != 0 => s, // reuse stable seq (reconnect re-send)
+            _ => {
+                let s = delegate.next_stream_seq(stream_id).await;
+                delegate.set_pending_delta_seq(msg.mutation_id, s).await; // persist back to engine
+                s
+            }
+        };
+        msg.producer_id = producer_id;
+        msg.epoch = epoch;
+        msg.seq = seq;
     }
 
     let mutation_ids: Vec<u64> = msgs.iter().map(|m| m.mutation_id).collect();

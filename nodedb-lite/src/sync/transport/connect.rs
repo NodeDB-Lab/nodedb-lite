@@ -25,9 +25,29 @@ pub(super) async fn connect_and_run(
     client: &Arc<SyncClient>,
     delegate: &Arc<dyn SyncDelegate>,
 ) -> Result<(), LiteError> {
-    // Reset state for a fresh connection.
+    // Reload durable producer identity so the outbound path has a valid
+    // producer_id/accepted_epoch before the handshake is built. This is a
+    // no-op on the very first connect (returns 0, 0) and a restore on
+    // reconnect (returns the last values Origin assigned).
+    let (persisted_producer_id, persisted_accepted_epoch) = delegate.load_producer_state().await;
+    client
+        .load_producer_state(persisted_producer_id, persisted_accepted_epoch)
+        .await;
+
+    // Reset per-connection inbound state (shape LSN gaps, flow control).
+    // The per-stream seq frontier (StreamSeqTracker) is NOT reset here —
+    // it is loaded once from storage at startup and never cleared on reconnect
+    // so outbound frame numbering resumes from the durable last_assigned.
+    // The fenced flag is cleared so this attempt can push; if Origin still
+    // fences the producer the flag will be set again on the first ack.
     client.reset_sequence_tracking().await;
     client.reset_flow_control().await;
+    client.clear_fenced();
+
+    // Clear in-flight maps for all engine outbound queues. The durable entries
+    // are still in storage; clearing in-flight makes them eligible for
+    // re-drain → re-send → Origin deduplicates via its idempotent gate.
+    delegate.clear_engine_in_flight().await;
 
     // ── Connect ──
     let (ws_stream, _response) = tokio_tungstenite::connect_async(&client.config().url)
@@ -92,6 +112,12 @@ pub(super) async fn connect_and_run(
             detail: format!("handshake rejected: {}", ack.error.unwrap_or_default()),
         });
     }
+
+    // Durably persist the server-assigned producer identity so it survives
+    // process restart and is available on the next reconnect.
+    delegate
+        .persist_producer_state(ack.producer_id, ack.accepted_epoch)
+        .await;
 
     // ── Message loop ──
     let sink = Arc::new(Mutex::new(sink));
