@@ -1,10 +1,18 @@
 //! `SyncClient` struct, constructors, and simple accessors.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::Mutex;
 
 use nodedb_types::sync::wire::{ArrayAckMsg, ResyncRequestMsg};
+
+/// Pending array acks keyed by array name.
+///
+/// Holding one entry per array name (the highest-HLC ack seen for that array)
+/// is sufficient to advance Origin's GC frontier: Origin only needs to know the
+/// highest durable HLC per replica per array, not every intermediate ack.
+type PendingArrayAcks = std::collections::HashMap<String, ArrayAckMsg>;
 
 use super::config::{SyncConfig, SyncState};
 use crate::sync::clock::VectorClock;
@@ -51,12 +59,38 @@ pub struct SyncClient {
     pub(super) token_refresh_pending: Arc<Mutex<bool>>,
     /// Whether delta push is paused due to auth failure (awaiting refresh).
     pub(super) push_paused_for_auth: Arc<Mutex<bool>>,
-    /// Pending `ArrayAck` to send on the next push-loop tick.
+    /// Epoch-ms timestamp of the last token refresh attempt (successful or not).
+    /// Used with `token_refresh_backoff_ms` to enforce a minimum retry interval.
+    pub(super) token_last_attempt_ms: Arc<Mutex<u64>>,
+    /// Current backoff delay (ms) before the next refresh attempt is allowed.
+    /// Doubles on each consecutive failure (exponential), capped at 5 minutes.
+    pub(super) token_refresh_backoff_ms: Arc<Mutex<u64>>,
+    /// Pending array acks to send on the next push-loop tick, keyed by array name.
     ///
     /// Set by `dispatch_frame` when an `ArrayDelta` or `ArrayDeltaBatch` is
-    /// successfully applied. The push loop drains it and transmits it to Origin
-    /// to advance the GC frontier.
-    pub(super) pending_array_ack: Arc<Mutex<Option<ArrayAckMsg>>>,
+    /// successfully applied. Each entry holds the highest-HLC ack seen for that
+    /// array since the last drain. The push loop drains all entries and transmits
+    /// them to Origin to advance the GC frontier.
+    pub(super) pending_array_ack: Arc<Mutex<PendingArrayAcks>>,
+    /// Producer ID assigned by Origin in `HandshakeAckMsg`.
+    ///
+    /// Used to stamp outbound frames so Origin can route acks back to this
+    /// producer. `None` until the first successful handshake.
+    pub(super) producer_id: Arc<Mutex<Option<u64>>>,
+    /// Accepted epoch echoed by Origin in `HandshakeAckMsg`.
+    ///
+    /// Confirms Origin accepted the epoch sent in our handshake. `None` until
+    /// the first successful handshake.
+    pub(super) accepted_epoch: Arc<Mutex<Option<u64>>>,
+    /// Set to `true` when Origin returns `AckStatus::Fenced` on any frame.
+    ///
+    /// Means the producer epoch is stale and Origin has a newer epoch on record.
+    /// The sync loop must disconnect and reconnect; on reconnect the handshake
+    /// will present the persisted epoch (from storage) which Origin already
+    /// accepted. If LiteIdentity bumps epoch only on db-open (not reconnect),
+    /// the epoch stays the same across reconnects and will still be fenced.
+    /// In that case the operator must restart the db process to mint a new epoch.
+    pub(crate) fenced: Arc<AtomicBool>,
 }
 
 impl SyncClient {
@@ -89,7 +123,14 @@ impl SyncClient {
             token_set_at_ms: Arc::new(Mutex::new(crate::runtime::now_millis())),
             token_refresh_pending: Arc::new(Mutex::new(false)),
             push_paused_for_auth: Arc::new(Mutex::new(false)),
-            pending_array_ack: Arc::new(Mutex::new(None)),
+            pending_array_ack: Arc::new(Mutex::new(PendingArrayAcks::new())),
+            producer_id: Arc::new(Mutex::new(None)),
+            accepted_epoch: Arc::new(Mutex::new(None)),
+            fenced: Arc::new(AtomicBool::new(false)),
+            token_last_attempt_ms: Arc::new(Mutex::new(0)),
+            token_refresh_backoff_ms: Arc::new(Mutex::new(
+                crate::sync::client::token::TOKEN_REFRESH_MIN_BACKOFF_MS,
+            )),
         }
     }
 
@@ -147,6 +188,63 @@ impl SyncClient {
     /// Access the sync metrics.
     pub fn metrics(&self) -> &Arc<SyncMetrics> {
         &self.metrics
+    }
+
+    /// Producer ID assigned by Origin, or 0 if the handshake has not yet completed.
+    pub async fn producer_id(&self) -> u64 {
+        self.producer_id.lock().await.unwrap_or_default()
+    }
+
+    /// Accepted epoch echoed by Origin, or 0 if the handshake has not yet completed.
+    pub async fn accepted_epoch(&self) -> u64 {
+        self.accepted_epoch.lock().await.unwrap_or_default()
+    }
+
+    /// Store the server-assigned producer ID.
+    pub(super) async fn set_producer_id(&self, id: u64) {
+        *self.producer_id.lock().await = Some(id);
+    }
+
+    /// Store the accepted epoch echoed by Origin.
+    pub(super) async fn set_accepted_epoch(&self, epoch: u64) {
+        *self.accepted_epoch.lock().await = Some(epoch);
+    }
+
+    /// Load producer state (producer_id + accepted_epoch) from previously
+    /// persisted values. Called on reconnect so the client knows its identity
+    /// before the next handshake.
+    pub async fn load_producer_state(&self, producer_id: u64, accepted_epoch: u64) {
+        *self.producer_id.lock().await = Some(producer_id);
+        *self.accepted_epoch.lock().await = Some(accepted_epoch);
+    }
+
+    /// Whether Origin fenced this producer.
+    ///
+    /// When `true`, the sync loop should disconnect and reconnect. The epoch
+    /// is only bumped on db-open (via `LiteIdentity`), so reconnecting
+    /// alone does not change the epoch. A fenced producer requires the
+    /// operator to restart the process to mint a fresh epoch.
+    pub fn is_fenced(&self) -> bool {
+        self.fenced.load(Ordering::Acquire)
+    }
+
+    /// Mark this producer as fenced by Origin.
+    ///
+    /// Also unsets the `push_paused_for_auth` flag so the disconnect path is
+    /// not confused with an auth-pause: fencing is a permanent producer-epoch
+    /// rejection, not a token issue.
+    pub fn set_fenced(&self) {
+        self.fenced.store(true, Ordering::Release);
+        tracing::error!(
+            "producer epoch fenced by Origin — this producer's epoch is stale; \
+             process restart required to mint a new epoch"
+        );
+    }
+
+    /// Clear the fenced flag. Called on reconnect so the client can attempt
+    /// re-registration; if Origin still fences it the flag is set again.
+    pub fn clear_fenced(&self) {
+        self.fenced.store(false, Ordering::Release);
     }
 }
 

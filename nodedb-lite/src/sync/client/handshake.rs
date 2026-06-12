@@ -47,9 +47,18 @@ impl SyncClient {
                 clock.advance(peer_id, counter);
             }
         }
+        drop(clock);
+
+        self.set_producer_id(ack.producer_id).await;
+        self.set_accepted_epoch(ack.accepted_epoch).await;
 
         *self.state.lock().await = SyncState::Connected;
-        tracing::info!(session = %ack.session_id, "sync handshake accepted");
+        tracing::info!(
+            session = %ack.session_id,
+            producer_id = ack.producer_id,
+            accepted_epoch = ack.accepted_epoch,
+            "sync handshake accepted"
+        );
         true
     }
 }
@@ -96,6 +105,8 @@ mod tests {
             error: None,
             fork_detected: false,
             server_wire_version: 1,
+            producer_id: 0,
+            accepted_epoch: 0,
         };
 
         assert!(client.handle_handshake_ack(&ack).await);
@@ -112,6 +123,8 @@ mod tests {
             error: Some("invalid token".into()),
             fork_detected: false,
             server_wire_version: 1,
+            producer_id: 0,
+            accepted_epoch: 0,
         };
 
         assert!(!client.handle_handshake_ack(&ack).await);
