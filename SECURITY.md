@@ -2,17 +2,15 @@
 
 ## Supported versions
 
-| Version      | Supported |
-| ------------ | --------- |
-| 0.1.0-beta.x | Yes       |
+| Version | Supported |
+| ------- | --------- |
+| 0.1.x   | Yes       |
 
 ## Reporting a vulnerability
 
 Please **do not** open a public GitHub issue for security vulnerabilities.
 
-Report security issues by email to **security@nodedb.io**.
-
-Decision pending: a permanent security contact address will be confirmed before the stable 0.1.0 release. If you receive no acknowledgement within 72 hours, follow up by opening a GitHub issue marked `[security]` with no vulnerability details included.
+Report security issues by email to **security@nodedb.io**. If you receive no acknowledgement within 72 hours, follow up by opening a GitHub issue marked `[security]` with no vulnerability details included.
 
 ## Disclosure process
 

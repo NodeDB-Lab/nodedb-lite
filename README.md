@@ -51,7 +51,7 @@ NodeDB Lite replaces the usual SQLite + vector sidecar + ad hoc cache + custom s
 
 NodeDB Lite is in **public beta** as of **v0.1.0 (2026-05-23)**. All engines listed in [`docs/lite-support-matrix.md`](docs/lite-support-matrix.md) are feature-complete and covered by tests. The public surface — the `NodeDb` trait, the supported SQL plan variants, the C FFI ABI, and the WASM / npm bindings — is stable; clients written against 0.1.0 will keep working through 1.0.
 
-**v0.1.0 — Beta (today).** Use it for embedded workloads and for piloting Lite ↔ Origin sync. The public surface is stable; expect internal changes (redb layout, on-disk index format, sync-protocol internals) between minor releases. Patch and minor bumps will land as needed.
+**v0.1.0 — Beta (today).** Use it for embedded workloads and for piloting Lite ↔ Origin sync. The public surface is stable; expect internal changes (pagedb layout, on-disk index format, sync-protocol internals) between minor releases. Patch and minor bumps will land as needed.
 
 **v1.0.0 — Production-ready (target: 2026-07-23).** What 1.0 guarantees:
 
@@ -85,12 +85,12 @@ Pre-1.0 versions may change internals between releases — that work is critical
 
 | Platform                                  | Crate              | Backend                   | Size                                                               |
 | ----------------------------------------- | ------------------ | ------------------------- | ------------------------------------------------------------------ |
-| Linux                                     | `nodedb-lite`      | redb (file-backed)        | Native                                                             |
-| macOS                                     | `nodedb-lite`      | redb (file-backed)        | Native                                                             |
-| Windows                                   | `nodedb-lite`      | redb (file-backed)        | Native                                                             |
-| Android                                   | `nodedb-lite-ffi`  | redb + C FFI + Kotlin/JNI | Native                                                             |
-| iOS _(in progress — not in 0.1.0)_ | `nodedb-lite-ffi`  | redb + C FFI (cbindgen)   | Native _(requires macOS build environment — not yet built/tested)_ |
-| Browser                                   | `nodedb-lite-wasm` | redb (in-memory + OPFS)   | Target: < 10 MB                                                    |
+| Linux                                     | `nodedb-lite`      | pagedb (file-backed)        | Native                                                             |
+| macOS                                     | `nodedb-lite`      | pagedb (file-backed)        | Native                                                             |
+| Windows                                   | `nodedb-lite`      | pagedb (file-backed)        | Native                                                             |
+| Android                                   | `nodedb-lite-ffi`  | pagedb + C FFI + Kotlin/JNI | Native                                                             |
+| iOS _(in progress — not in 0.1.0)_ | `nodedb-lite-ffi`  | pagedb + C FFI (cbindgen)   | Native _(requires macOS build environment — not yet built/tested)_ |
+| Browser                                   | `nodedb-lite-wasm` | pagedb (in-memory + OPFS)   | Target: < 10 MB                                                    |
 
 ## Packages
 
@@ -107,11 +107,11 @@ npm install @nodedb/lite
 The Rust crate API in `0.1.0`:
 
 ```rust
-use nodedb_lite::{NodeDbLite, RedbStorage};
+use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 use nodedb_client::NodeDb;
 
 // Open an in-memory database (peer_id uniquely identifies this device/replica):
-let storage = RedbStorage::open_in_memory()?;
+let storage = PagedbStorageMem::open_in_memory().await?;
 let db = NodeDbLite::open(storage, 1u64).await?;
 
 // Insert a document
@@ -125,7 +125,8 @@ db.document_put("notes", doc).await?;
 
 // Vector search
 db.vector_insert("articles", "a1", &embedding, None).await?;
-let results = db.vector_search("articles", &embedding, 10, None).await?;
+// vector_search(collection, query, k, filter, allowed_ids)
+let results = db.vector_search("articles", &embedding, 10, None, None).await?;
 
 // Graph traversal
 use nodedb_types::id::NodeId;
@@ -140,7 +141,7 @@ The `NodeDb` trait is identical across Lite and Origin. Application code doesn't
 ```rust
 // Works with both NodeDbLite (in-process) and NodeDbRemote (over network)
 async fn search(db: &dyn NodeDb, query: &[f32]) -> Result<Vec<Article>> {
-    db.vector_search("articles", query, 10).await
+    db.vector_search("articles", query, 10, None, None).await
 }
 ```
 
@@ -151,7 +152,7 @@ Moving from embedded to server is a connection string change, not a rewrite.
 Every write produces a delta. Deltas sync to Origin over WebSocket when online. Multiple devices converge regardless of operation order.
 
 ```
-Offline:    App writes locally -> Loro generates delta -> delta persisted to redb
+Offline:    App writes locally -> Loro generates delta -> delta persisted to pagedb
 Reconnect:  Device opens WebSocket -> sends vector clock + accumulated deltas
 Cloud:      Origin validates (RLS, UNIQUE, FK) -> merges -> pushes back missed changes
 Conflict:   Rejected deltas -> dead-letter queue + CompensationHint -> device handles
@@ -233,9 +234,15 @@ nodedb-vector = { path = "../nodedb/nodedb-vector" }
 nodedb-fts = { path = "../nodedb/nodedb-fts" }
 nodedb-strict = { path = "../nodedb/nodedb-strict" }
 nodedb-columnar = { path = "../nodedb/nodedb-columnar" }
+nodedb-array = { path = "../nodedb/nodedb-array" }
 nodedb-sql = { path = "../nodedb/nodedb-sql" }
+nodedb-physical = { path = "../nodedb/nodedb-physical" }
 ```
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE) for details.
+**Apache-2.0** — see [LICENSE](LICENSE). NodeDB Lite is fully open source, with
+**no BSL anywhere in its dependency tree**: it builds only on NodeDB's Apache-2.0
+engine and foundation crates. The Business Source License applies _only_ to the
+[NodeDB Origin](https://github.com/NodeDB-Lab/nodedb) server — never to Lite.
+Embed it anywhere: apps, browsers (WASM/OPFS), mobile, desktop, edge.

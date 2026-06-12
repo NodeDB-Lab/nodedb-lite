@@ -151,6 +151,9 @@ async fn test_delta_push() -> Result<(), String> {
         mutation_id: 1,
         checksum: 0,
         device_valid_time_ms: None,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     };
     ws.send(Message::Binary(
         SyncFrame::try_encode(SyncMessageType::DeltaPush, &delta)
@@ -330,6 +333,9 @@ async fn test_real_loro_delta() -> Result<(), String> {
         mutation_id: 1,
         checksum: 0,
         device_valid_time_ms: None,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     };
     ws.send(Message::Binary(
         SyncFrame::try_encode(SyncMessageType::DeltaPush, &delta_msg)
@@ -395,6 +401,9 @@ async fn test_concurrent_deltas() -> Result<(), String> {
             mutation_id: i as u64 + 1,
             checksum: 0,
             device_valid_time_ms: None,
+            producer_id: 0,
+            epoch: 0,
+            seq: 0,
         };
         ws.send(Message::Binary(
             SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)
@@ -446,6 +455,9 @@ async fn test_rls_violation() -> Result<(), String> {
         mutation_id: 99,
         checksum: 0,
         device_valid_time_ms: None,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     };
     ws.send(Message::Binary(
         SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)
@@ -496,6 +508,9 @@ async fn test_shape_snapshot_lsn() -> Result<(), String> {
             mutation_id: 1,
             checksum: 0,
             device_valid_time_ms: None,
+            producer_id: 0,
+            epoch: 0,
+            seq: 0,
         };
         ws.send(Message::Binary(
             SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)

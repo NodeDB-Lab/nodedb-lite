@@ -7,7 +7,7 @@ use nodedb_lite_ffi::*;
 fn open_close_in_memory() {
     let path = CString::new(":memory:").unwrap();
     unsafe {
-        let handle = nodedb_open(path.as_ptr(), 1);
+        let handle = nodedb_open(path.as_ptr(), 1, std::ptr::null());
         assert!(!handle.is_null());
         nodedb_close(handle);
     }
@@ -31,7 +31,7 @@ fn close_null_is_noop() {
 fn vector_insert_and_search() {
     let path = CString::new(":memory:").unwrap();
     unsafe {
-        let handle = nodedb_open(path.as_ptr(), 1);
+        let handle = nodedb_open(path.as_ptr(), 1, std::ptr::null());
         assert!(!handle.is_null());
 
         let coll = CString::new("vecs").unwrap();
@@ -59,7 +59,7 @@ fn vector_insert_and_search() {
 fn graph_insert_and_traverse() {
     let path = CString::new(":memory:").unwrap();
     unsafe {
-        let handle = nodedb_open(path.as_ptr(), 1);
+        let handle = nodedb_open(path.as_ptr(), 1, std::ptr::null());
 
         let collection = CString::new("social").unwrap();
         let from = CString::new("alice").unwrap();
@@ -93,7 +93,7 @@ fn graph_insert_and_traverse() {
 fn document_crud_via_ffi() {
     let path = CString::new(":memory:").unwrap();
     unsafe {
-        let handle = nodedb_open(path.as_ptr(), 1);
+        let handle = nodedb_open(path.as_ptr(), 1, std::ptr::null());
 
         let coll = CString::new("notes").unwrap();
         let body = CString::new(r#"{"id":"n1","fields":{"title":{"String":"Hello"}}}"#).unwrap();
@@ -125,7 +125,7 @@ fn document_crud_via_ffi() {
 fn sql_execute_returns_json() {
     let path = CString::new(":memory:").unwrap();
     unsafe {
-        let handle = nodedb_open(path.as_ptr(), 1);
+        let handle = nodedb_open(path.as_ptr(), 1, std::ptr::null());
         assert!(!handle.is_null());
 
         // A constant-expression query is always supported.

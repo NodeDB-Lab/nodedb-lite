@@ -88,9 +88,8 @@ drive a `NodeDbLite` instance against it.
 | Spatial insert / delete sync| `SpatialInsert` (`0xAA`/`0xAB`), `SpatialDelete` (`0xAC`/`0xAD`)     | `tests/sync_interop_spatial.rs`          |
 | Timeseries insert sync      | Shares the `ColumnarInsert` (`0xA0`) frame                           | `tests/sync_interop_timeseries.rs`       |
 
-A clean public version of the sync wire contract (wire version,
-vector-clock encoding, frame catalogue) will land in `docs/` before 1.0;
-the internal protocol notes are maintained in the `resource/` directory.
+A documented public version of the sync wire contract (wire version,
+vector-clock encoding, frame catalogue) will land in `docs/` before 1.0.
 
 ---
 

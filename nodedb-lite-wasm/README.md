@@ -2,7 +2,7 @@
 
 WebAssembly bindings for **NodeDB-Lite**, the embedded variant of NodeDB. Runs in browsers and Node.js. Exposes all eight Lite engines (Vector, Graph, Document schemaless, Document strict, Columnar/Timeseries/Spatial, KV, FTS, Array) through a single `NodeDb` API.
 
-> **Lite only.** This crate is _not_ a WASM build of the Origin server. The distributed Origin engine (Tokio Control Plane, io_uring Data Plane, QUIC cluster transport) does not target WebAssembly. To talk to an Origin cluster from the browser, run Lite-WASM locally and sync via WebSocket. See the [WASM deployment guide](../../nodedb/docs/wasm.md) for the full picture.
+> **Lite only.** This crate is _not_ a WASM build of the Origin server. The distributed Origin engine (Tokio Control Plane, io_uring Data Plane, QUIC cluster transport) does not target WebAssembly. To talk to an Origin cluster from the browser, run Lite-WASM locally and sync via WebSocket. See the [WASM deployment guide](https://nodedb.dev/docs/wasm) for the full picture.
 
 ## Status
 
@@ -96,7 +96,7 @@ when executed against Lite (e.g. `CREATE ARRAY`).
 | Spatial         | `CREATE COLLECTION places WITH (profile = 'spatial', ...)`     |
 | Array (NDArray) | `CREATE ARRAY grid DIMS (...) ATTRS (...) TILE_EXTENTS (...)`  |
 
-See the [query language reference](../../nodedb/docs/query-language.md).
+See the [query language reference](https://nodedb.dev/docs/query-language).
 
 ## CRDT Sync to Origin
 
@@ -111,7 +111,7 @@ await db.sync_config({
 });
 ```
 
-Origin validates constraints and returns compensation hints on conflict. See [offline sync patterns](../../nodedb/docs/offline-sync-patterns.md).
+Origin validates constraints and returns compensation hints on conflict. See [offline sync patterns](https://nodedb.dev/docs/offline-sync-patterns).
 
 ## Build Targets
 
@@ -169,6 +169,6 @@ Apache-2.0. See the workspace root `LICENSE` file.
 
 ## See Also
 
-- [WASM deployment guide](../../nodedb/docs/wasm.md)
+- [WASM deployment guide](https://nodedb.dev/docs/wasm)
 - [NodeDB-Lite](../nodedb-lite/) — native embedded crate
 - [NodeDB-Lite FFI](../nodedb-lite-ffi/) — C / Android bindings (iOS lands before 1.0)

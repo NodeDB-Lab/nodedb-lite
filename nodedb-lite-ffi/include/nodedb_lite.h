@@ -38,25 +38,43 @@ typedef struct NodeDbNodeDbHandle NodeDbNodeDbHandle;
  * The caller must call `nodedb_close` to free the handle.
  *
  * # Safety
- * `path` must be a valid null-terminated UTF-8 string.
+ * - `path` must be a valid null-terminated UTF-8 string.
+ * - `passphrase` must be NULL or a valid null-terminated UTF-8 string.
+ *
+ * Encryption convention:
+ * - `passphrase` is NULL and `path` is `":memory:"` → `Encryption::Plaintext` (volatile data, safe).
+ * - `passphrase` is NULL and `path` is a real path → returns NULL (silent plaintext persistent
+ *   storage is refused; pass an empty string to opt out explicitly).
+ * - `passphrase` is `""` (empty string) → `Encryption::Plaintext` (explicit conscious opt-out).
+ * - `passphrase` is a non-empty string → `Encryption::passphrase(passphrase)`.
+ * - `passphrase` is non-NULL but invalid UTF-8 → returns NULL.
  */
-struct NodeDbNodeDbHandle *nodedb_open(const char *path, uint64_t peer_id);
+struct NodeDbNodeDbHandle *nodedb_open(const char *path,
+                                       uint64_t peer_id,
+                                       const char *passphrase);
 
 /**
  * Open or create a NodeDB-Lite database with an explicit memory budget.
  *
  * # Safety
- * `path` must be a valid null-terminated UTF-8 string.
+ * - `path` must be a valid null-terminated UTF-8 string.
+ * - `passphrase` must be NULL or a valid null-terminated UTF-8 string.
+ *
+ * See `nodedb_open` for the passphrase/encryption convention.
+ * `memory_mb` of 0 uses the default memory budget.
  */
 struct NodeDbNodeDbHandle *nodedb_open_with_config(const char *path,
                                                    uint64_t peer_id,
-                                                   uint64_t memory_mb);
+                                                   uint64_t memory_mb,
+                                                   const char *passphrase);
 
 /**
  * Close a NodeDB-Lite database and free the handle.
  *
  * # Safety
- * `handle` must be a valid pointer returned by `nodedb_open`, or NULL (no-op).
+ * `handle` must be a token returned by `nodedb_open`, or NULL/0 (no-op).
+ * The token is a `u64` id packed into a pointer-width integer; it is never
+ * dereferenced as a raw pointer.
  */
 void nodedb_close(struct NodeDbNodeDbHandle *handle);
 
@@ -357,7 +375,10 @@ int32_t nodedb_graph_shortest_path(struct NodeDbNodeDbHandle *handle,
  * Insert a vector into a collection.
  *
  * # Safety
- * All pointer parameters must be valid. `embedding` must point to `dim` floats.
+ * All pointer parameters must be valid. `embedding` must be non-null, properly
+ * aligned for `f32`, and valid for exactly `dim` elements for the entire duration
+ * of this call. No runtime length validation is possible; passing a mismatched
+ * `dim` or a dangling pointer is immediate undefined behaviour.
  */
 int32_t nodedb_vector_insert(struct NodeDbNodeDbHandle *handle,
                              const char *collection,
@@ -371,7 +392,10 @@ int32_t nodedb_vector_insert(struct NodeDbNodeDbHandle *handle,
  * `*out_json` is only written on success. The caller must free via `nodedb_free_string`.
  *
  * # Safety
- * `query` must point to `dim` valid floats. `out_json` must not be null.
+ * `query` must be non-null, properly aligned for `f32`, and valid for exactly `dim`
+ * elements for the entire duration of this call. No runtime length validation is
+ * possible; passing a mismatched `dim` or a dangling pointer is immediate undefined
+ * behaviour. `out_json` must not be null.
  */
 int32_t nodedb_vector_search(struct NodeDbNodeDbHandle *handle,
                              const char *collection,

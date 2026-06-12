@@ -175,6 +175,9 @@ async fn run_client(
             mutation_id: 1,
             checksum: 0,
             device_valid_time_ms: None,
+            producer_id: 0,
+            epoch: 0,
+            seq: 0,
         };
         if ws
             .send(Message::Binary(
