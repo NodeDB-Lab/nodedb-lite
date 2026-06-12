@@ -7,7 +7,7 @@
 //! before the previous process exited.
 
 use nodedb_client::NodeDb;
-use nodedb_lite::{NodeDbLite, PagedbStorageDefault};
+use nodedb_lite::{Encryption, NodeDbLite, PagedbStorageDefault};
 use nodedb_types::document::Document;
 use nodedb_types::text_search::TextSearchParams;
 use nodedb_types::value::Value;
@@ -25,7 +25,9 @@ async fn fts_returns_bitemporal_documents_after_reopen_without_explicit_flush() 
 
     // Process-A-equivalent: write WITHOUT calling flush().
     {
-        let storage = PagedbStorageDefault::open(&path).await.unwrap();
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+            .await
+            .unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
         db.execute_sql("CREATE COLLECTION entries WITH (bitemporal=true)", &[])
             .await
@@ -37,7 +39,9 @@ async fn fts_returns_bitemporal_documents_after_reopen_without_explicit_flush() 
     }
 
     // Process-B-equivalent: reopen, search, MUST find the document.
-    let storage = PagedbStorageDefault::open(&path).await.unwrap();
+    let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+        .await
+        .unwrap();
     let db = NodeDbLite::open(storage, 1).await.unwrap();
     let results = db
         .text_search(
@@ -69,7 +73,9 @@ async fn fts_returns_only_live_versions_after_reopen() {
     let path = tmp.path().to_path_buf();
 
     {
-        let storage = PagedbStorageDefault::open(&path).await.unwrap();
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+            .await
+            .unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
         db.execute_sql("CREATE COLLECTION entries WITH (bitemporal=true)", &[])
             .await
@@ -88,7 +94,9 @@ async fn fts_returns_only_live_versions_after_reopen() {
         // No flush: db drops on scope exit.
     }
 
-    let storage = PagedbStorageDefault::open(&path).await.unwrap();
+    let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+        .await
+        .unwrap();
     let db = NodeDbLite::open(storage, 1).await.unwrap();
 
     let r_live = db
@@ -138,7 +146,9 @@ async fn fts_still_works_for_non_bitemporal_collections_after_reopen() {
     let path = tmp.path().to_path_buf();
 
     {
-        let storage = PagedbStorageDefault::open(&path).await.unwrap();
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+            .await
+            .unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
         // No WITH (bitemporal=true) — plain schemaless collection (no DDL needed).
         let mut doc = Document::new("p1");
@@ -148,7 +158,9 @@ async fn fts_still_works_for_non_bitemporal_collections_after_reopen() {
         db.flush().await.unwrap();
     }
 
-    let storage = PagedbStorageDefault::open(&path).await.unwrap();
+    let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+        .await
+        .unwrap();
     let db = NodeDbLite::open(storage, 1).await.unwrap();
     let results = db
         .text_search("plain", "", "plain", 10, TextSearchParams::default(), None)

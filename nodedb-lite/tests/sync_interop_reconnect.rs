@@ -36,6 +36,9 @@ async fn push_delta(
         mutation_id,
         checksum: 0,
         device_valid_time_ms: None,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     };
     let bytes = SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)
         .expect("encode DeltaPush")
@@ -60,7 +63,10 @@ async fn push_delta(
 /// §7.5a — Reconnect and complete handshake after clean close.
 #[tokio::test]
 async fn reconnect_after_close() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
 
     {
         let mut ws = connect_and_handshake(_server.ws_url).await;
@@ -73,7 +79,10 @@ async fn reconnect_after_close() {
 /// §7.5b — Reconnect latency is below 200 ms.
 #[tokio::test]
 async fn reconnect_latency_under_200ms() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
 
     let start = std::time::Instant::now();
     let _ws = connect_and_handshake(_server.ws_url).await;
@@ -89,7 +98,10 @@ async fn reconnect_latency_under_200ms() {
 /// §7.5c — Replaying the same mutation_id is deduped with DeltaAck (not error).
 #[tokio::test]
 async fn replay_dedup_returns_ack() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let peer_id = 3001u64;
 
     let mut engine = CrdtEngine::new(peer_id).expect("create engine");
@@ -152,7 +164,10 @@ async fn replay_dedup_returns_ack() {
 /// §7.5d — New mutations after reconnect are processed normally.
 #[tokio::test]
 async fn new_mutations_after_reconnect_are_processed() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let peer_id = 3002u64;
 
     let mut engine = CrdtEngine::new(peer_id).expect("create engine");
@@ -220,7 +235,10 @@ async fn new_mutations_after_reconnect_are_processed() {
 /// §7.5e — Origin remains healthy after abrupt disconnect (no close frame).
 #[tokio::test]
 async fn origin_accepts_connection_after_previous_drops() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
 
     {
         let _ws = connect_and_handshake(_server.ws_url).await;

@@ -8,7 +8,7 @@
 //!   on-disk path, query returns identical results (no rebuild from CRDT).
 
 use nodedb_lite::storage::engine::StorageEngine;
-use nodedb_lite::{NodeDbLite, PagedbStorageDefault, PagedbStorageMem};
+use nodedb_lite::{Encryption, NodeDbLite, PagedbStorageDefault, PagedbStorageMem};
 use nodedb_spatial::predicates::{contains::st_contains, intersects::st_intersects};
 use nodedb_types::BoundingBox;
 use nodedb_types::geometry::Geometry;
@@ -206,7 +206,7 @@ async fn spatial_index_persists_across_restart() {
 
     // ── First open: insert points, query, flush, drop ────────────────────────
     {
-        let storage = PagedbStorageDefault::open(&path)
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("open storage");
         let db = NodeDbLite::open(storage, 42)
@@ -234,7 +234,7 @@ async fn spatial_index_persists_across_restart() {
     // Sanity: Namespace::Spatial must have entries after flush.
     {
         use nodedb_types::Namespace;
-        let storage = PagedbStorageDefault::open(&path)
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("storage for count check");
         let spatial_count = storage
@@ -249,7 +249,7 @@ async fn spatial_index_persists_across_restart() {
 
     // ── Second open: reopen, query, assert identical results ─────────────────
     {
-        let storage = PagedbStorageDefault::open(&path)
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("reopen storage");
         let db = NodeDbLite::open(storage, 42)
@@ -299,7 +299,7 @@ async fn upsert_and_delete_after_restart() {
     // Insert "london", flush, reopen, upsert "london" to a new position,
     // verify old position no longer returns and new position does.
     {
-        let storage = PagedbStorageDefault::open(&path)
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("open storage");
         let db = NodeDbLite::open(storage, 1).await.expect("open db");
@@ -313,7 +313,7 @@ async fn upsert_and_delete_after_restart() {
     }
 
     {
-        let storage = PagedbStorageDefault::open(&path)
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("reopen storage");
         let db = NodeDbLite::open(storage, 1).await.expect("reopen db");

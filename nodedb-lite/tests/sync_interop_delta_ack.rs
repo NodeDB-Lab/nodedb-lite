@@ -49,7 +49,10 @@ async fn push_and_recv(
 /// §7.3a — A real Loro CRDT delta is acknowledged by Origin.
 #[tokio::test]
 async fn real_loro_delta_gets_acked() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let mut engine = CrdtEngine::new(1001).expect("create CrdtEngine");
@@ -72,6 +75,9 @@ async fn real_loro_delta_gets_acked() {
         mutation_id: 1,
         checksum: 0,
         device_valid_time_ms: None,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     };
 
     let frame = push_and_recv(&mut ws, &msg).await;
@@ -90,7 +96,10 @@ async fn real_loro_delta_gets_acked() {
 /// §7.3b — Empty delta payload is rejected immediately.
 #[tokio::test]
 async fn empty_delta_is_rejected() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let msg = DeltaPushMsg {
@@ -101,6 +110,9 @@ async fn empty_delta_is_rejected() {
         mutation_id: 2,
         checksum: 0,
         device_valid_time_ms: None,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     };
 
     let frame = push_and_recv(&mut ws, &msg).await;
@@ -116,7 +128,10 @@ async fn empty_delta_is_rejected() {
 /// §7.3c — CRC32C checksum mismatch is rejected.
 #[tokio::test]
 async fn crc_mismatch_delta_is_rejected() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let payload = vec![1u8, 2, 3, 4, 5];
@@ -130,6 +145,9 @@ async fn crc_mismatch_delta_is_rejected() {
         mutation_id: 3,
         checksum: bad_checksum,
         device_valid_time_ms: None,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     };
 
     let frame = push_and_recv(&mut ws, &msg).await;
@@ -145,7 +163,10 @@ async fn crc_mismatch_delta_is_rejected() {
 /// §7.3d — Multiple sequential deltas from the same peer are all acked.
 #[tokio::test]
 async fn sequential_deltas_all_acked() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let mut engine = CrdtEngine::new(1004).expect("create CrdtEngine");
@@ -174,6 +195,9 @@ async fn sequential_deltas_all_acked() {
             mutation_id: i,
             checksum: 0,
             device_valid_time_ms: None,
+            producer_id: 0,
+            epoch: 0,
+            seq: 0,
         };
 
         let frame = push_and_recv(&mut ws, &msg).await;
@@ -189,7 +213,10 @@ async fn sequential_deltas_all_acked() {
 /// §7.3e — Ping/pong round-trip works after a successful handshake.
 #[tokio::test]
 async fn ping_pong_round_trip() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let ping = PingPongMsg {
@@ -223,7 +250,10 @@ async fn ping_pong_round_trip() {
 /// §7.3f — VectorClockSync message is processed without error.
 #[tokio::test]
 async fn vector_clock_sync_accepted() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let clock = VectorClockSyncMsg {

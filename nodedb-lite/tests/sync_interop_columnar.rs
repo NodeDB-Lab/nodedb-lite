@@ -65,7 +65,10 @@ async fn open_lite() -> Arc<NodeDbLite<PagedbStorageMem>> {
 /// the `ColumnarInsert` sync frame and they are readable via pgwire SELECT.
 #[tokio::test]
 async fn columnar_inserts_replicate_to_origin() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
 
     // Create the collection on both sides.
@@ -151,7 +154,10 @@ async fn columnar_inserts_replicate_to_origin() {
 /// Origin eventually receives them.
 #[tokio::test]
 async fn columnar_pre_connection_inserts_sync_after_connect() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
 
     pg.execute(CREATE_ORIGIN).await;

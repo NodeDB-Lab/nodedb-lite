@@ -69,7 +69,10 @@ async fn recv_handshake_ack(
 /// §7.2a — Trust-mode handshake with current wire version succeeds.
 #[tokio::test]
 async fn handshake_trust_mode_succeeds() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = raw_connect(_server.ws_url).await;
 
     let hs = HandshakeMsg {
@@ -103,7 +106,10 @@ async fn handshake_trust_mode_succeeds() {
 /// §7.2b — Server returns wire version in ack so the client can detect mismatches.
 #[tokio::test]
 async fn handshake_ack_contains_server_wire_version() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = raw_connect(_server.ws_url).await;
 
     let hs = HandshakeMsg {
@@ -130,7 +136,10 @@ async fn handshake_ack_contains_server_wire_version() {
 /// §7.2c — Stale wire version (0) is rejected with a clear error.
 #[tokio::test]
 async fn handshake_rejects_wire_version_zero() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = raw_connect(_server.ws_url).await;
 
     let hs = HandshakeMsg {
@@ -162,7 +171,10 @@ async fn handshake_rejects_wire_version_zero() {
 /// §7.2d — The high-level `connect_and_handshake` helper completes end-to-end.
 #[tokio::test]
 async fn helper_connect_and_handshake_works() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let _ws = connect_and_handshake(_server.ws_url).await;
     // Success = no panic.
 }
@@ -170,7 +182,10 @@ async fn helper_connect_and_handshake_works() {
 /// §7.2e — Multiple sequential connections are all accepted (no session leak).
 #[tokio::test]
 async fn multiple_sequential_handshakes_all_succeed() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
 
     for i in 0..5 {
         let mut ws = raw_connect(_server.ws_url).await;

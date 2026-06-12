@@ -100,7 +100,10 @@ fn make_doc(id: &str, body: &str) -> Document {
 /// `text_match` on Origin returns all 3 matching documents.
 #[tokio::test]
 async fn fts_inserts_replicate_to_origin() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
 
     // Create the collection on Origin.
@@ -157,7 +160,10 @@ async fn fts_inserts_replicate_to_origin() {
 /// appears in FTS search results on Origin.
 #[tokio::test]
 async fn fts_delete_replicates_to_origin() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
 
     pg.execute(CREATE_ORIGIN).await;
@@ -271,7 +277,10 @@ async fn fts_delete_replicates_to_origin() {
 /// comes up — same guarantee as vector/columnar.
 #[tokio::test]
 async fn fts_pre_connection_inserts_sync_after_connect() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
 
     pg.execute(CREATE_ORIGIN).await;

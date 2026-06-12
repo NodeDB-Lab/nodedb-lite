@@ -95,7 +95,10 @@ async fn wait_for_connected(client: &Arc<SyncClient>) {
 /// wire plumbing.
 #[tokio::test]
 async fn timeseries_inserts_replicate_to_origin() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
 
     // Create the collection on both sides.
@@ -162,7 +165,10 @@ async fn timeseries_inserts_replicate_to_origin() {
 /// is established are flushed once the connection comes up.
 #[tokio::test]
 async fn timeseries_pre_connection_inserts_sync_after_connect() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
 
     pg.execute(CREATE_ORIGIN).await;

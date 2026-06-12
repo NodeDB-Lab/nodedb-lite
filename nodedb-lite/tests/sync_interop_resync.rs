@@ -12,7 +12,8 @@ use futures::{SinkExt, StreamExt};
 use nodedb_lite::engine::crdt::CrdtEngine;
 use nodedb_types::sync::shape::{ShapeDefinition, ShapeType};
 use nodedb_types::sync::wire::{
-    DeltaPushMsg, ShapeSnapshotMsg, ShapeSubscribeMsg, SyncFrame, SyncMessageType,
+    DeltaPushMsg, ResyncReason, ResyncRequestMsg, ShapeSnapshotMsg, ShapeSubscribeMsg, SyncFrame,
+    SyncMessageType,
 };
 use tokio_tungstenite::tungstenite::Message;
 
@@ -70,7 +71,10 @@ async fn subscribe_shape(
 /// §7.6a — Shape subscription returns a snapshot with the correct shape_id.
 #[tokio::test]
 async fn shape_subscribe_returns_snapshot() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let snapshot = subscribe_shape(&mut ws, "resync-shape-a", "resync_test").await;
@@ -84,7 +88,10 @@ async fn shape_subscribe_returns_snapshot() {
 /// §7.6b — Snapshot LSN reflects real WAL state after a delta push.
 #[tokio::test]
 async fn snapshot_lsn_reflects_wal_state() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let mut engine = CrdtEngine::new(4001).expect("create engine");
@@ -101,6 +108,9 @@ async fn snapshot_lsn_reflects_wal_state() {
         mutation_id: 1,
         checksum: 0,
         device_valid_time_ms: None,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     };
     let bytes = SyncFrame::try_encode(SyncMessageType::DeltaPush, &push_msg)
         .expect("encode DeltaPush")
@@ -122,7 +132,10 @@ async fn snapshot_lsn_reflects_wal_state() {
 /// §7.6c — Two concurrent deltas from different peers are both handled.
 #[tokio::test]
 async fn concurrent_deltas_from_two_peers() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let mut engine1 = CrdtEngine::new(4002).expect("create engine1");
@@ -156,6 +169,9 @@ async fn concurrent_deltas_from_two_peers() {
             mutation_id,
             checksum: 0,
             device_valid_time_ms: None,
+            producer_id: 0,
+            epoch: 0,
+            seq: 0,
         };
         let bytes = SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)
             .expect("encode DeltaPush")
@@ -184,10 +200,74 @@ async fn concurrent_deltas_from_two_peers() {
     }
 }
 
+/// §7.6e — ResyncRequest with a known shape_id returns a ShapeSnapshot echoing
+/// the real shape_id (not a "resync:"-prefixed string).
+///
+/// Regression guard: the resync handler must look up the shape from the
+/// persistent registry (populated by the preceding subscribe), not a
+/// throwaway per-connection map.  If the registry lookup returns None the
+/// handler produces no snapshot, and the assertion below fails.
+#[tokio::test]
+async fn resync_request_returns_snapshot_with_real_shape_id() {
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
+    let mut ws = connect_and_handshake(_server.ws_url).await;
+
+    // Populate Origin's persistent shape registry for this session.
+    subscribe_shape(&mut ws, "resync-rt-shape", "resync_rt_collection").await;
+
+    // Construct and send a ResyncRequest for the shape we just subscribed to.
+    let resync_msg = ResyncRequestMsg {
+        reason: ResyncReason::SequenceGap {
+            expected: 1,
+            received: 3,
+        },
+        from_mutation_id: 1,
+        collection: String::new(),
+        shape_id: "resync-rt-shape".into(),
+    };
+    let bytes = SyncFrame::try_encode(SyncMessageType::ResyncRequest, &resync_msg)
+        .expect("encode ResyncRequest")
+        .to_bytes();
+    ws.send(Message::Binary(bytes.into()))
+        .await
+        .expect("send ResyncRequest");
+
+    // Drain frames until we see a ShapeSnapshot (skip acks, pings, etc.).
+    let snapshot: ShapeSnapshotMsg = loop {
+        let frame_msg = tokio::time::timeout(Duration::from_secs(10), ws.next())
+            .await
+            .expect("timeout waiting for ShapeSnapshot after ResyncRequest")
+            .expect("stream closed before ShapeSnapshot")
+            .expect("WebSocket read error");
+
+        let frame =
+            SyncFrame::from_bytes(frame_msg.into_data().as_ref()).expect("decode sync frame");
+
+        if frame.msg_type == SyncMessageType::ShapeSnapshot {
+            break frame
+                .decode_body::<ShapeSnapshotMsg>()
+                .expect("decode ShapeSnapshotMsg");
+        }
+        // Non-snapshot frame (ack, ping, etc.) — keep draining.
+    };
+
+    assert_eq!(
+        snapshot.shape_id, "resync-rt-shape",
+        "resync handler must echo the real shape_id from the persistent registry, \
+         not a synthesised 'resync:' prefix — if this fails the registry was not populated"
+    );
+}
+
 /// §7.6d — Subscribing to the same shape_id twice returns two snapshots.
 #[tokio::test]
 async fn double_shape_subscribe_returns_two_snapshots() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let _snap1 = subscribe_shape(&mut ws, "double-shape", "double_collection").await;

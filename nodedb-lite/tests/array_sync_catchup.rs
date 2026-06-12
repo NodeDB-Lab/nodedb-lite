@@ -195,8 +195,8 @@ async fn snapshot_stream_applies_all_ops() {
 /// `CatchupTracker::record` persists across a reload from the same storage.
 #[tokio::test(flavor = "multi_thread")]
 async fn catchup_last_seen_persists_across_reload() {
-    use nodedb_lite::PagedbStorageDefault;
     use nodedb_lite::sync::array::catchup::CatchupTracker;
+    use nodedb_lite::{Encryption, PagedbStorageDefault};
     use std::sync::Arc;
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -205,7 +205,11 @@ async fn catchup_last_seen_persists_across_reload() {
     let target_hlc = common::hlc1(77_000);
 
     {
-        let storage = Arc::new(PagedbStorageDefault::open(&path).await.expect("open"));
+        let storage = Arc::new(
+            PagedbStorageDefault::open(&path, Encryption::Plaintext)
+                .await
+                .expect("open"),
+        );
         let tracker = CatchupTracker::load(Arc::clone(&storage))
             .await
             .expect("load");
@@ -213,7 +217,11 @@ async fn catchup_last_seen_persists_across_reload() {
     }
 
     {
-        let storage = Arc::new(PagedbStorageDefault::open(&path).await.expect("reopen"));
+        let storage = Arc::new(
+            PagedbStorageDefault::open(&path, Encryption::Plaintext)
+                .await
+                .expect("reopen"),
+        );
         let tracker = CatchupTracker::load(storage)
             .await
             .expect("load after restart");

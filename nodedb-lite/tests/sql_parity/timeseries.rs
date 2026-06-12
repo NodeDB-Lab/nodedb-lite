@@ -32,7 +32,10 @@ const CREATE_ORIGIN: &str = "CREATE COLLECTION ts_parity (
 
 #[tokio::test]
 async fn timeseries_create_and_drop() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
     let db = open_lite().await;
 
@@ -49,7 +52,10 @@ async fn timeseries_create_and_drop() {
 
 #[tokio::test]
 async fn timeseries_insert_acknowledged() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
     let db = open_lite().await;
 
@@ -75,7 +81,10 @@ async fn timeseries_insert_acknowledged() {
 
 #[tokio::test]
 async fn timeseries_select_all_rows() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
     let db = open_lite().await;
 

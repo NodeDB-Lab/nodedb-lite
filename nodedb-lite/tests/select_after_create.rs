@@ -10,7 +10,7 @@ use nodedb_types::document::Document;
 use nodedb_types::value::Value;
 
 #[cfg(not(target_arch = "wasm32"))]
-use nodedb_lite::PagedbStorageDefault;
+use nodedb_lite::{Encryption, PagedbStorageDefault};
 
 // ── In-memory: SELECT works in the same session as CREATE ────────────────────
 
@@ -78,7 +78,9 @@ async fn select_after_reopen_works() {
     let path = dir.path().join("reopen.db");
 
     {
-        let storage = PagedbStorageDefault::open(&path).await.unwrap();
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+            .await
+            .unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
 
         db.execute_sql("CREATE COLLECTION baz WITH (bitemporal=true)", &[])
@@ -94,7 +96,9 @@ async fn select_after_reopen_works() {
     }
 
     {
-        let storage = PagedbStorageDefault::open(&path).await.unwrap();
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+            .await
+            .unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
 
         let result = db

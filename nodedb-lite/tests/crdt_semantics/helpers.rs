@@ -104,6 +104,9 @@ pub fn push_msg_with_crc(
         mutation_id,
         checksum,
         device_valid_time_ms: None,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     }
 }
 
@@ -123,6 +126,9 @@ pub fn push_msg_no_crc(
         mutation_id,
         checksum: 0,
         device_valid_time_ms: None,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     }
 }
 

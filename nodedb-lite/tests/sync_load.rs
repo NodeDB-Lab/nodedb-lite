@@ -33,7 +33,10 @@ const NUM_CLIENTS: u32 = 100;
 #[ignore = "load test — run explicitly with --include-ignored; requires Origin on port 9090"]
 async fn sync_load_100_concurrent_clients() {
     // Spawn Origin.
-    let binary = find_origin_binary();
+    let Some(binary) = find_origin_binary() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut child = std::process::Command::new(&binary)
         .env_remove("RUST_LOG")
         .stdout(std::process::Stdio::null())
@@ -201,6 +204,9 @@ async fn run_client(
             mutation_id: 1,
             checksum: 0,
             device_valid_time_ms: None,
+            producer_id: 0,
+            epoch: 0,
+            seq: 0,
         };
         if ws
             .send(Message::Binary(

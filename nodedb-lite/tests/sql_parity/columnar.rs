@@ -28,7 +28,10 @@ const CREATE_ORIGIN: &str = "CREATE COLLECTION col_parity (
 
 #[tokio::test]
 async fn columnar_create_and_drop() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
     let db = open_lite().await;
 
@@ -46,7 +49,10 @@ async fn columnar_create_and_drop() {
 #[tokio::test]
 async fn columnar_insert_acknowledged() {
     // Both sides must acknowledge rows_affected >= 1 for a columnar INSERT.
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
     let db = open_lite().await;
 
@@ -73,7 +79,10 @@ async fn columnar_insert_acknowledged() {
 
 #[tokio::test]
 async fn columnar_select_all_rows() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
     let db = open_lite().await;
 

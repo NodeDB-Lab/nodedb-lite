@@ -80,7 +80,10 @@ async fn subscribe_and_recv_snapshot(
 /// `last_lsn` must match the `snapshot_lsn` from Origin.
 #[tokio::test]
 async fn shape_snapshot_populates_sync_client_state() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     // Create a Lite SyncClient tracking the subscription state (mirrors
@@ -137,7 +140,10 @@ async fn shape_snapshot_populates_sync_client_state() {
 /// which is the same code path run_sync_loop uses in production.
 #[tokio::test]
 async fn shape_delta_advances_lsn_after_snapshot() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let client = Arc::new(SyncClient::new(SyncConfig::new(_server.ws_url, ""), 9002));
@@ -203,7 +209,10 @@ async fn shape_delta_advances_lsn_after_snapshot() {
 /// The ResyncRequest is constructed exactly as transport.rs does it.
 #[tokio::test]
 async fn sequence_gap_detection_and_resync_on_real_connection() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let client = Arc::new(SyncClient::new(SyncConfig::new(_server.ws_url, ""), 9003));

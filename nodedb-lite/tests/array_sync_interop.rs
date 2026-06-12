@@ -17,7 +17,10 @@ mod common;
 #[test]
 #[ignore = "array sync over real Origin transport not yet wired; see module doc"]
 fn array_interop_put_roundtrip() {
-    let _origin = common::origin::OriginServer::spawn();
+    let Some(_origin) = common::origin::OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     // When unignored this test should:
     // 1. Connect a Lite sync client to _origin.sync_addr().
     // 2. Subscribe to an array shape.
@@ -36,7 +39,10 @@ fn array_interop_put_roundtrip() {
 #[test]
 #[ignore = "array sync over real Origin transport not yet wired; see module doc"]
 fn array_interop_catchup_after_gap() {
-    let _origin = common::origin::OriginServer::spawn();
+    let Some(_origin) = common::origin::OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     // When unignored this test should:
     // 1. Seed Origin with array ops via a Lite client that then disconnects.
     // 2. Connect a fresh Lite client with a stale cursor.

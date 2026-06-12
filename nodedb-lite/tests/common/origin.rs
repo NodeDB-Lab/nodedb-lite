@@ -3,8 +3,13 @@
 //! Tests that need a live Origin sync endpoint use [`OriginServer`].
 //! The guard kills the process on drop.
 //!
-//! The Origin binary is located relative to the nodedb workspace target dir.
-//! If the binary is not present the test fails immediately with a clear message.
+//! The Origin binary is located in one of three ways (in priority order):
+//! 1. `NODEDB_BIN` env var — set by the nextest setup script.
+//! 2. `<project-root>/nodedb/target/release/nodedb` (pre-built release).
+//! 3. `<project-root>/nodedb/target/debug/nodedb` (pre-built debug).
+//!
+//! If no binary is found, [`OriginServer::try_spawn`] returns `None` and
+//! the calling test should print a skip message and return early.
 //!
 //! The sync WebSocket listener always binds to `0.0.0.0:9090` (the
 //! `SyncListenerConfig` default). All interop test files are placed in the
@@ -19,47 +24,46 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Locate the nodedb Origin binary.
+/// Locate the nodedb Origin binary, if available.
+///
+/// Returns `None` when no binary can be found — interop tests treat that as a
+/// skip (see [`OriginServer::try_spawn`]), so a Lite-only checkout still passes.
 ///
 /// Search order:
-/// 1. `NODEDB_BIN` env var (CI override).
-/// 2. `<project-root>/nodedb/target/release/nodedb`
-/// 3. `<project-root>/nodedb/target/debug/nodedb`
+/// 1. `NODEDB_BIN` env var — exported by the `build-origin` nextest setup
+///    script (`scripts/ensure-origin.sh`), which runs `cargo build -p nodedb`
+///    against this workspace's dev-dependency. This is the normal path under
+///    `cargo nextest run`.
+/// 2. This workspace's own `target/{debug,release}/nodedb` — for a manual
+///    `cargo build -p nodedb` outside nextest.
 ///
-/// Project root is inferred by walking up from `CARGO_MANIFEST_DIR`.
-pub fn find_origin_binary() -> PathBuf {
-    if let Ok(path) = env::var("NODEDB_BIN") {
-        return PathBuf::from(path);
+/// There is deliberately NO hardcoded sibling-repo path: the Origin crate is
+/// resolved through cargo (crates.io or the local `[patch.crates-io]`), so its
+/// binary always lands in this workspace's own target directory.
+pub fn find_origin_binary() -> Option<PathBuf> {
+    if let Ok(val) = env::var("NODEDB_BIN") {
+        let p = PathBuf::from(&val);
+        if p.is_file() {
+            return Some(p);
+        }
     }
 
-    // Walk up from CARGO_MANIFEST_DIR (nodedb-lite/nodedb-lite/).
-    let manifest =
-        env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set in test environment");
-    let manifest = Path::new(&manifest);
-    // Up two levels: nodedb-lite/nodedb-lite → nodedb-lite → project root.
-    let project_root = manifest
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("could not determine project root from CARGO_MANIFEST_DIR");
+    // This workspace's own cargo target dir. CARGO_MANIFEST_DIR is
+    // nodedb-lite/nodedb-lite/; its parent is the workspace root nodedb-lite/.
+    let manifest = env::var("CARGO_MANIFEST_DIR").ok()?;
+    let workspace_root = Path::new(&manifest).parent()?.to_path_buf();
+    let target = env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| workspace_root.join("target"));
 
-    let release = project_root.join("nodedb/target/release/nodedb");
-    if release.exists() {
-        return release;
+    for profile in ["debug", "release"] {
+        let candidate = target.join(profile).join("nodedb");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
     }
 
-    let debug = project_root.join("nodedb/target/debug/nodedb");
-    if debug.exists() {
-        return debug;
-    }
-
-    panic!(
-        "Origin binary not found. Expected one of:\n  {}\n  {}\n\
-         Build with: cd {}/nodedb && cargo build -p nodedb\n\
-         Or set NODEDB_BIN=/path/to/nodedb",
-        release.display(),
-        debug.display(),
-        project_root.display(),
-    )
+    None
 }
 
 /// The sync WebSocket URL that Origin always listens on.
@@ -71,7 +75,7 @@ pub const ORIGIN_PGWIRE_ADDR: &str = "127.0.0.1:6432";
 /// Guard for a running Origin server process.
 ///
 /// Kills the process on drop. Tests obtain an instance via
-/// [`OriginServer::spawn`] or [`OriginServer::spawn_with_pgwire`].
+/// [`OriginServer::try_spawn`] or [`OriginServer::try_spawn_with_pgwire`].
 ///
 /// Each instance has its own temporary data directory so WAL / storage
 /// state from previous runs cannot interfere.
@@ -88,22 +92,28 @@ pub struct OriginServer {
 impl OriginServer {
     /// Spawn a fresh Origin server with a private temp data directory.
     ///
+    /// Returns `None` if the Origin binary cannot be found (Origin repo absent
+    /// or not built). The caller should print a skip message and return early.
+    ///
     /// Blocks (up to 30 s) until the sync WebSocket port is accepting TCP
     /// connections.
-    pub fn spawn() -> Self {
-        Self::spawn_inner(false)
+    pub fn try_spawn() -> Option<Self> {
+        let binary = find_origin_binary()?;
+        Some(Self::spawn_inner(binary, false))
     }
 
     /// Spawn a fresh Origin server with both the sync WebSocket (port 9090)
     /// and the pgwire listener (port 6432) enabled in trust auth mode.
     ///
+    /// Returns `None` if the Origin binary cannot be found.
+    ///
     /// Blocks until **both** ports are accepting TCP connections (up to 30 s).
-    pub fn spawn_with_pgwire() -> Self {
-        Self::spawn_inner(true)
+    pub fn try_spawn_with_pgwire() -> Option<Self> {
+        let binary = find_origin_binary()?;
+        Some(Self::spawn_inner(binary, true))
     }
 
-    fn spawn_inner(with_pgwire: bool) -> Self {
-        let binary = find_origin_binary();
+    fn spawn_inner(binary: PathBuf, with_pgwire: bool) -> Self {
         let data_dir = tempfile::tempdir().expect("create temp data dir for Origin");
 
         let (mut cmd, config_dir) = if with_pgwire {

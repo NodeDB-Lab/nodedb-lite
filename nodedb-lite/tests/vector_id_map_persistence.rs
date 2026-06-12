@@ -11,7 +11,7 @@
 //! index with no per-insert durability path). The id_map follows the same contract.
 
 use nodedb_client::NodeDb;
-use nodedb_lite::{NodeDbLite, PagedbStorageDefault};
+use nodedb_lite::{Encryption, NodeDbLite, PagedbStorageDefault};
 
 fn make_embedding(seed: f32, dim: usize) -> Vec<f32> {
     (0..dim).map(|i| seed + i as f32 * 0.001).collect()
@@ -24,7 +24,9 @@ async fn vector_search_returns_real_doc_id_after_flush_and_reopen() {
 
     // ── Write + flush ──────────────────────────────────────────────────────────
     {
-        let storage = PagedbStorageDefault::open(&path).await.unwrap();
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+            .await
+            .unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
 
         let embedding = make_embedding(0.1, 384);
@@ -37,7 +39,9 @@ async fn vector_search_returns_real_doc_id_after_flush_and_reopen() {
     }
 
     // ── Reopen + search ────────────────────────────────────────────────────────
-    let storage = PagedbStorageDefault::open(&path).await.unwrap();
+    let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+        .await
+        .unwrap();
     let db = NodeDbLite::open(storage, 1).await.unwrap();
 
     let query = make_embedding(0.1, 384);
@@ -65,7 +69,9 @@ async fn vector_search_multiple_collections_preserve_ids_after_reopen() {
 
     // ── Write two collections with two docs each, flush ────────────────────────
     {
-        let storage = PagedbStorageDefault::open(&path).await.unwrap();
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+            .await
+            .unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
 
         // alpha: doc-a0 and doc-a1
@@ -84,7 +90,9 @@ async fn vector_search_multiple_collections_preserve_ids_after_reopen() {
     }
 
     // ── Reopen + verify each collection independently ──────────────────────────
-    let storage = PagedbStorageDefault::open(&path).await.unwrap();
+    let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+        .await
+        .unwrap();
     let db = NodeDbLite::open(storage, 1).await.unwrap();
 
     // Query close to doc-a0's embedding.

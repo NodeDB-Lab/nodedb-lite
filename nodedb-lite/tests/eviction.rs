@@ -2,7 +2,7 @@
 //! data survives in storage, lazy reload on next access.
 
 use nodedb_client::NodeDb;
-use nodedb_lite::{NodeDbLite, PagedbStorageDefault, PagedbStorageMem};
+use nodedb_lite::{Encryption, NodeDbLite, PagedbStorageDefault, PagedbStorageMem};
 
 async fn open_db_with_budget(budget: usize) -> NodeDbLite<PagedbStorageMem> {
     let storage = PagedbStorageMem::open_in_memory().await.unwrap();
@@ -127,7 +127,9 @@ async fn startup_loads_only_persisted_collections() {
 
     // Write data, flush, close.
     {
-        let storage = PagedbStorageDefault::open(&path).await.unwrap();
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+            .await
+            .unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
 
         db.batch_vector_insert("active", &[("v1", &[1.0f32, 0.0][..])])
@@ -139,7 +141,9 @@ async fn startup_loads_only_persisted_collections() {
 
     // Reopen — both should be loaded from storage.
     {
-        let storage = PagedbStorageDefault::open(&path).await.unwrap();
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+            .await
+            .unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
 
         let loaded = db.loaded_collections().unwrap();

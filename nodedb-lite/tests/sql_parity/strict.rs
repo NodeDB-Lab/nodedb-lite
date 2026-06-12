@@ -29,7 +29,10 @@ const CREATE_ORIGIN: &str = "CREATE COLLECTION strict_parity (
 
 #[tokio::test]
 async fn strict_create_and_drop() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
     let db = open_lite().await;
 
@@ -48,7 +51,10 @@ async fn strict_create_and_drop() {
 
 #[tokio::test]
 async fn strict_insert_returns_affected() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
     let db = open_lite().await;
 
@@ -92,7 +98,10 @@ async fn strict_insert_returns_affected() {
 
 #[tokio::test]
 async fn strict_select_all_rows() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
     let db = open_lite().await;
 
@@ -164,7 +173,10 @@ async fn strict_select_all_rows() {
 
 #[tokio::test]
 async fn strict_update_returns_affected() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
     let db = open_lite().await;
 
@@ -200,7 +212,10 @@ async fn strict_update_returns_affected() {
 
 #[tokio::test]
 async fn strict_delete_returns_affected() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
     let db = open_lite().await;
 
@@ -235,7 +250,10 @@ async fn strict_delete_returns_affected() {
 
 #[tokio::test]
 async fn strict_point_get_by_primary_key() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
     let db = open_lite().await;
 

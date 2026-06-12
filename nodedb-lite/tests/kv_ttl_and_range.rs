@@ -5,7 +5,7 @@
 //! Exercises: kv_put_with_ttl, kv_get (expiry), kv_range_scan.
 //! See docs/lite-support-matrix.md §Key-value.
 
-use nodedb_lite::{NodeDbLite, PagedbStorageDefault, PagedbStorageMem};
+use nodedb_lite::{Encryption, NodeDbLite, PagedbStorageDefault, PagedbStorageMem};
 
 async fn open_memory_db() -> NodeDbLite<PagedbStorageMem> {
     let storage = PagedbStorageMem::open_in_memory()
@@ -56,7 +56,7 @@ async fn ttl_survives_reopen() {
     let path = dir.path().join("ttl_survive.pagedb");
 
     {
-        let storage = PagedbStorageDefault::open(&path)
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("open storage");
         let db = NodeDbLite::open(storage, 1).await.expect("open db");
@@ -67,7 +67,7 @@ async fn ttl_survives_reopen() {
     }
 
     {
-        let storage = PagedbStorageDefault::open(&path)
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("reopen storage");
         let db = NodeDbLite::open(storage, 1).await.expect("reopen db");
@@ -92,7 +92,7 @@ async fn ttl_expired_after_reopen() {
     let path = dir.path().join("ttl_expired_reopen.pagedb");
 
     {
-        let storage = PagedbStorageDefault::open(&path)
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("open storage");
         let db = NodeDbLite::open(storage, 1).await.expect("open db");
@@ -106,7 +106,7 @@ async fn ttl_expired_after_reopen() {
     std::thread::sleep(std::time::Duration::from_millis(75));
 
     {
-        let storage = PagedbStorageDefault::open(&path)
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("reopen storage");
         let db = NodeDbLite::open(storage, 1).await.expect("reopen db");

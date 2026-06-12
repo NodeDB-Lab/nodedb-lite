@@ -104,7 +104,10 @@ async fn start_sync(lite: Arc<NodeDbLite<PagedbStorageMem>>, peer_id: u64) -> Ar
 /// string id from Lite), so presence is verified by result count.
 #[tokio::test]
 async fn vector_inserts_replicate_to_origin() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
 
     // Create the collection on Origin.
@@ -158,7 +161,10 @@ async fn vector_inserts_replicate_to_origin() {
 /// nearest-neighbour result count drops from 6 to 5.
 #[tokio::test]
 async fn vector_delete_replicates_to_origin() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
 
     pg.execute(CREATE_ORIGIN).await;
@@ -245,7 +251,10 @@ async fn vector_delete_replicates_to_origin() {
 /// once the connection comes up (same guarantee as columnar).
 #[tokio::test]
 async fn vector_pre_connection_inserts_sync_after_connect() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
 
     pg.execute(CREATE_ORIGIN).await;

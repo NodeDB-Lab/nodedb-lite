@@ -155,6 +155,9 @@ impl SyncHarness {
         let msg = ArrayDeltaMsg {
             array: op.header.array.clone(),
             op_payload: payload,
+            producer_id: 0,
+            epoch: 0,
+            seq: 0,
         };
         self.inbound.handle_delta(&msg).expect("handle_delta")
     }

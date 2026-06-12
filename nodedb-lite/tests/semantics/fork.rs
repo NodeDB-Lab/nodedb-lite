@@ -7,7 +7,10 @@ use nodedb_types::sync::wire::HandshakeMsg;
 /// §8.3a — Same `lite_id`, bumped `epoch` → legitimate reconnect, no fork.
 #[tokio::test]
 async fn bumped_epoch_is_not_a_fork() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let lite_id = "test-lite-id-bumped-epoch-a1b2c3d4".to_string();
 
     // First connect: epoch=1.
@@ -46,11 +49,16 @@ async fn bumped_epoch_is_not_a_fork() {
     }
 }
 
-/// §8.3b — Cloned device: same `lite_id` + same `epoch` as already seen → fork.
+/// §8.3b — Same `lite_id` + same `epoch` reconnect is an idempotent producer resume,
+/// NOT a fork (clone-with-stale-epoch is caught by `lower_epoch_than_seen_triggers_fork`;
+/// same-epoch divergence is handled by the seq gate).
 #[tokio::test]
-async fn cloned_device_same_epoch_triggers_fork() {
-    let _server = OriginServer::spawn();
-    let lite_id = "test-lite-id-clone-scenario-x9y8z7".to_string();
+async fn same_epoch_reconnect_is_idempotent_accept() {
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
+    let lite_id = "test-lite-id-idempotent-reconnect-x9y8z7".to_string();
 
     // Register lite_id+epoch on Origin.
     {
@@ -69,7 +77,7 @@ async fn cloned_device_same_epoch_triggers_fork() {
         );
     }
 
-    // "Cloned device" connects with same lite_id + epoch → fork.
+    // Second connection with same lite_id + epoch → idempotent accept, not a fork.
     {
         let mut ws = raw_connect(_server.ws_url).await;
         let hs = HandshakeMsg {
@@ -81,17 +89,13 @@ async fn cloned_device_same_epoch_triggers_fork() {
         let ack = recv_ack(&mut ws).await;
 
         assert!(
-            !ack.success,
-            "same lite_id+epoch after prior registration must be rejected"
+            ack.success,
+            "same lite_id+epoch reconnect must be accepted as idempotent resume; error: {:?}",
+            ack.error
         );
         assert!(
-            ack.fork_detected,
-            "fork_detected must be true for cloned-device scenario"
-        );
-        let err = ack.error.expect("error must be present on fork rejection");
-        assert!(
-            err.contains("FORK_DETECTED") || err.contains("fork"),
-            "error must mention fork; got: {err}"
+            !ack.fork_detected,
+            "fork_detected must be false for same-epoch idempotent reconnect"
         );
     }
 }
@@ -99,7 +103,10 @@ async fn cloned_device_same_epoch_triggers_fork() {
 /// §8.3c — Stale epoch (lower than last seen) → also triggers fork detection.
 #[tokio::test]
 async fn lower_epoch_than_seen_triggers_fork() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let lite_id = "test-lite-id-stale-epoch-p5q6r7s8".to_string();
 
     // Register at epoch=10.
@@ -142,7 +149,12 @@ async fn reconnect_after_origin_restart_not_a_fork() {
     let epoch = 7_u64;
 
     {
-        let server = OriginServer::spawn();
+        let Some(server) = OriginServer::try_spawn() else {
+            eprintln!(
+                "SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)"
+            );
+            return;
+        };
         let mut ws = raw_connect(server.ws_url).await;
         let hs = HandshakeMsg {
             lite_id: lite_id.clone(),
@@ -155,7 +167,10 @@ async fn reconnect_after_origin_restart_not_a_fork() {
     } // server killed here.
 
     // Fresh Origin process: tracker is empty.
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = raw_connect(_server.ws_url).await;
     let hs = HandshakeMsg {
         lite_id: lite_id.clone(),
@@ -177,7 +192,10 @@ async fn reconnect_after_origin_restart_not_a_fork() {
 /// §8.3e — Empty `lite_id` with any epoch → fork detection is skipped.
 #[tokio::test]
 async fn empty_lite_id_skips_fork_detection() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = raw_connect(_server.ws_url).await;
 
     let hs = HandshakeMsg {
@@ -202,7 +220,10 @@ async fn empty_lite_id_skips_fork_detection() {
 /// §8.3f — `epoch=0` with non-empty `lite_id` → fork detection skipped (never recorded).
 #[tokio::test]
 async fn epoch_zero_skips_fork_detection() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
 
     {
         let mut ws = raw_connect(_server.ws_url).await;

@@ -7,7 +7,7 @@
 
 use nodedb_client::NodeDb;
 use nodedb_lite::storage::engine::StorageEngine;
-use nodedb_lite::{NodeDbLite, PagedbStorageDefault};
+use nodedb_lite::{Encryption, NodeDbLite, PagedbStorageDefault};
 use nodedb_types::document::Document;
 use nodedb_types::text_search::TextSearchParams;
 use nodedb_types::value::Value;
@@ -39,7 +39,7 @@ async fn fts_index_persists_across_restart() {
 
     // ── First open: insert documents, search, flush, drop ────────────────────
     {
-        let storage = PagedbStorageDefault::open(&path)
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("open storage");
         let db = NodeDbLite::open(storage, 42)
@@ -81,7 +81,7 @@ async fn fts_index_persists_across_restart() {
         // Sanity check: Fts namespace must have entries after flush.
         {
             use nodedb_types::Namespace;
-            let storage = PagedbStorageDefault::open(&path)
+            let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
                 .await
                 .expect("storage for fts count check");
             let fts_count = storage.count(Namespace::Fts).await.expect("fts count");
@@ -91,7 +91,7 @@ async fn fts_index_persists_across_restart() {
             );
         }
 
-        let storage = PagedbStorageDefault::open(&path)
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("reopen storage");
         let db = NodeDbLite::open(storage, 42)

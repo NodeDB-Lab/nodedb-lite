@@ -94,7 +94,10 @@ async fn wait_for_definition_frame(
 /// (0x70) frame with `action = "put"` and the frame decodes successfully.
 #[tokio::test]
 async fn definition_sync_function_put() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
 
     // Open a WebSocket sync connection and complete the handshake.
     let mut ws = connect_and_handshake(_origin.ws_url).await;
@@ -143,7 +146,10 @@ async fn definition_sync_function_put() {
 /// frame with `action = "delete"`.
 #[tokio::test]
 async fn definition_sync_function_delete() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
 
     let mut ws = connect_and_handshake(_origin.ws_url).await;
 
@@ -186,7 +192,10 @@ async fn definition_sync_function_delete() {
 /// `action = "put"` and the payload contains the expected fields.
 #[tokio::test]
 async fn definition_sync_trigger_put() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
 
     let mut ws = connect_and_handshake(_origin.ws_url).await;
 
@@ -238,7 +247,10 @@ async fn definition_sync_trigger_put() {
 /// `action = "put"` and the payload is valid.
 #[tokio::test]
 async fn definition_sync_procedure_put() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
 
     let mut ws = connect_and_handshake(_origin.ws_url).await;
 

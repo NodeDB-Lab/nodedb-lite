@@ -15,7 +15,10 @@ use nodedb_types::wire_version::WIRE_FORMAT_VERSION;
 /// test fails with a message pointing at the constant.
 #[tokio::test]
 async fn exact_wire_version_4_is_accepted() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = raw_connect(_server.ws_url).await;
 
     assert_eq!(
@@ -44,7 +47,10 @@ async fn exact_wire_version_4_is_accepted() {
 /// §8.2b — Wire version 0 (missing field / ancient client) must be rejected.
 #[tokio::test]
 async fn wire_version_zero_is_rejected() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = raw_connect(_server.ws_url).await;
 
     let hs = HandshakeMsg {
@@ -73,7 +79,10 @@ async fn wire_version_zero_is_rejected() {
 /// must fail.
 #[tokio::test]
 async fn wire_version_3_is_rejected() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = raw_connect(_server.ws_url).await;
 
     let hs = HandshakeMsg {
@@ -93,7 +102,10 @@ async fn wire_version_3_is_rejected() {
 /// fork_detected false, server_wire_version >= 1.
 #[tokio::test]
 async fn ack_shape_on_success() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = raw_connect(_server.ws_url).await;
 
     send_hs(&mut ws, &minimal_hs()).await;
@@ -122,7 +134,10 @@ async fn ack_shape_on_success() {
 /// §8.2e — Exact ack shape on rejection: success=false, error=Some, session_id echoed.
 #[tokio::test]
 async fn ack_shape_on_rejection() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = raw_connect(_server.ws_url).await;
 
     let hs = HandshakeMsg {

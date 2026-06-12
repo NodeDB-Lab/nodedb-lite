@@ -159,6 +159,9 @@ async fn schema_too_new_surfaces_as_rejected_outcome() {
     let msg = ArrayDeltaMsg {
         array: "schema_rej".into(),
         op_payload: payload,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     };
 
     let outcome = harness.inbound.handle_delta(&msg).expect("handle_delta");

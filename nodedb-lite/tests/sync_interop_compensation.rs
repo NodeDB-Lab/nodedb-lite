@@ -56,7 +56,10 @@ async fn push_and_recv_reject(
 /// §7.4a — Empty delta produces a DeltaReject (no compensation hint).
 #[tokio::test]
 async fn empty_delta_reject_no_hint() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let msg = DeltaPushMsg {
@@ -67,6 +70,9 @@ async fn empty_delta_reject_no_hint() {
         mutation_id: 1,
         checksum: 0,
         device_valid_time_ms: None,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     };
 
     let reject = push_and_recv_reject(&mut ws, &msg).await;
@@ -81,7 +87,10 @@ async fn empty_delta_reject_no_hint() {
 /// §7.4b — CRC32C mismatch produces `CompensationHint::IntegrityViolation`.
 #[tokio::test]
 async fn crc_mismatch_yields_integrity_violation_hint() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let payload = vec![10u8, 20, 30, 40];
@@ -95,6 +104,9 @@ async fn crc_mismatch_yields_integrity_violation_hint() {
         mutation_id: 2,
         checksum: wrong_checksum,
         device_valid_time_ms: None,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     };
 
     let reject = push_and_recv_reject(&mut ws, &msg).await;
@@ -111,7 +123,10 @@ async fn crc_mismatch_yields_integrity_violation_hint() {
 /// §7.4c — DeltaReject for an unauthenticated session carries `PermissionDenied`.
 #[tokio::test]
 async fn unauthenticated_push_yields_permission_denied() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
 
     let (mut ws, _) = tokio_tungstenite::connect_async(_server.ws_url)
         .await
@@ -125,6 +140,9 @@ async fn unauthenticated_push_yields_permission_denied() {
         mutation_id: 3,
         checksum: 0,
         device_valid_time_ms: None,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     };
 
     let bytes = SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)

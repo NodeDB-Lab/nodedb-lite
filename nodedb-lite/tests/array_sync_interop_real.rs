@@ -82,6 +82,9 @@ async fn array_delta_apply_and_ack() {
     let msg = ArrayDeltaMsg {
         array: "arr".into(),
         op_payload: payload,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     };
 
     // This is the exact call `dispatch_frame` makes.
@@ -145,6 +148,9 @@ async fn array_delta_idempotent_no_ack() {
     let msg = ArrayDeltaMsg {
         array: "idem".into(),
         op_payload: payload,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     };
 
     // First application — ack expected.
@@ -242,6 +248,9 @@ fn array_delta_frame_roundtrip() {
     let msg = ArrayDeltaMsg {
         array: "rt_arr".into(),
         op_payload: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     };
 
     let frame = SyncFrame::try_encode(SyncMessageType::ArrayDelta, &msg)

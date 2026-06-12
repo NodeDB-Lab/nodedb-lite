@@ -33,7 +33,10 @@ use tokio_tungstenite::tungstenite::Message;
 /// — first check in `handle_delta_push` is `self.authenticated`.
 #[tokio::test]
 async fn origin_rejects_unauthenticated_push_with_permission_denied() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
 
     // Open a raw WebSocket — intentionally skip the handshake.
     let (mut ws, _) = tokio_tungstenite::connect_async(_server.ws_url)
@@ -80,7 +83,10 @@ async fn origin_rejects_unauthenticated_push_with_permission_denied() {
 /// — CRC32C check fires when `msg.checksum != 0`.
 #[tokio::test]
 async fn origin_rejects_crc_mismatch_with_integrity_violation() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let delta = minimal_delta_payload();
@@ -96,6 +102,9 @@ async fn origin_rejects_crc_mismatch_with_integrity_violation() {
         mutation_id: 20,
         checksum: wrong_crc,
         device_valid_time_ms: None,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     };
 
     let reject = expect_reject(&mut ws, &msg, "INTEGRITY_VIOLATION").await;
@@ -115,7 +124,10 @@ async fn origin_rejects_crc_mismatch_with_integrity_violation() {
 /// Evidence: `session/delta.rs:52` — `if msg.checksum != 0` guard.
 #[tokio::test]
 async fn origin_accepts_delta_with_zero_checksum() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let delta = minimal_delta_payload();
@@ -160,7 +172,10 @@ async fn origin_accepts_delta_with_zero_checksum() {
 /// and documents what was actually received.
 #[tokio::test]
 async fn origin_unique_violation_produces_compensation_hint() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     // Build a Loro-style delta payload with a CRDT upsert for field "email".
@@ -204,7 +219,10 @@ async fn origin_unique_violation_produces_compensation_hint() {
 /// returns a different code. The test documents what was received.
 #[tokio::test]
 async fn origin_fk_missing_produces_compensation_hint() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     // Delta for a "posts" document referencing a "user-nonexistent" parent.

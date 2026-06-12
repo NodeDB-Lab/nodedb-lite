@@ -104,7 +104,10 @@ async fn query_dwithin(pg: &OriginPgwire, lng: f64, lat: f64, distance_m: f64) -
 /// an `st_dwithin` query on Origin returns all 3 documents.
 #[tokio::test]
 async fn spatial_inserts_replicate_to_origin() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
 
     pg.execute(CREATE_ORIGIN).await;
@@ -155,7 +158,10 @@ async fn spatial_inserts_replicate_to_origin() {
 /// appears in spatial queries on Origin.
 #[tokio::test]
 async fn spatial_delete_replicates_to_origin() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
 
     pg.execute(CREATE_ORIGIN).await;
@@ -232,7 +238,10 @@ async fn spatial_delete_replicates_to_origin() {
 /// comes up — same guarantee as fts/vector/columnar.
 #[tokio::test]
 async fn spatial_pre_connection_inserts_sync_after_connect() {
-    let _origin = OriginServer::spawn_with_pgwire();
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let pg = OriginPgwire::connect().await;
 
     pg.execute(CREATE_ORIGIN).await;

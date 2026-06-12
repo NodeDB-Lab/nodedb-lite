@@ -13,7 +13,10 @@ use nodedb_types::sync::wire::HandshakeMsg;
 /// This must be accepted without error.
 #[tokio::test]
 async fn global_clock_encoding_is_accepted() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = raw_connect(_server.ws_url).await;
 
     let peer_hex = format!("{:016x}", 0xdeadbeef_u64);
@@ -49,7 +52,10 @@ async fn global_clock_encoding_is_accepted() {
 ///   3. Reconnect with C+10 (post-write advance) also succeeds.
 #[tokio::test]
 async fn global_clock_reconnect_resumes_cleanly() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
 
     let peer_hex = format!("{:016x}", 0xc1_0c_u64);
     let base_counter = 100_u64;
@@ -115,7 +121,10 @@ async fn global_clock_reconnect_resumes_cleanly() {
 /// §8.1c — Empty vector clock is accepted (fresh device, no prior state).
 #[tokio::test]
 async fn empty_clock_accepted_for_fresh_device() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = raw_connect(_server.ws_url).await;
 
     send_hs(&mut ws, &minimal_hs()).await;

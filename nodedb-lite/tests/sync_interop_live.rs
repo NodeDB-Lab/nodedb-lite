@@ -25,7 +25,10 @@ use common::origin::{OriginServer, connect_and_handshake};
 
 #[tokio::test]
 async fn live_handshake() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let (mut ws, _) = tokio_tungstenite::connect_async(_server.ws_url)
         .await
         .expect("connect");
@@ -65,7 +68,10 @@ async fn live_handshake() {
 
 #[tokio::test]
 async fn live_delta_push() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let payload =
@@ -79,6 +85,9 @@ async fn live_delta_push() {
         mutation_id: 1,
         checksum: 0,
         device_valid_time_ms: None,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     };
     ws.send(Message::Binary(
         SyncFrame::try_encode(SyncMessageType::DeltaPush, &delta)
@@ -108,7 +117,10 @@ async fn live_delta_push() {
 
 #[tokio::test]
 async fn live_ping_pong() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let ping = PingPongMsg {
@@ -142,7 +154,10 @@ async fn live_ping_pong() {
 
 #[tokio::test]
 async fn live_reconnect_under_200ms() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let start = std::time::Instant::now();
     let _ws = connect_and_handshake(_server.ws_url).await;
     let elapsed = start.elapsed();
@@ -157,7 +172,10 @@ async fn live_reconnect_under_200ms() {
 
 #[tokio::test]
 async fn live_vector_clock_sync() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let clock = VectorClockSyncMsg {
@@ -191,7 +209,10 @@ async fn live_vector_clock_sync() {
 
 #[tokio::test]
 async fn live_shape_subscribe() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let subscribe = ShapeSubscribeMsg {
@@ -232,7 +253,10 @@ async fn live_shape_subscribe() {
 
 #[tokio::test]
 async fn live_real_loro_delta_push() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let mut engine = CrdtEngine::new(100).expect("crdt engine");
@@ -255,6 +279,9 @@ async fn live_real_loro_delta_push() {
         mutation_id: 1,
         checksum: 0,
         device_valid_time_ms: None,
+        producer_id: 0,
+        epoch: 0,
+        seq: 0,
     };
     ws.send(Message::Binary(
         SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)
@@ -284,7 +311,10 @@ async fn live_real_loro_delta_push() {
 
 #[tokio::test]
 async fn live_concurrent_delta_push() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let mut engine1 = CrdtEngine::new(201).expect("engine1");
@@ -316,6 +346,9 @@ async fn live_concurrent_delta_push() {
             mutation_id: i as u64 + 1,
             checksum: 0,
             device_valid_time_ms: None,
+            producer_id: 0,
+            epoch: 0,
+            seq: 0,
         };
         ws.send(Message::Binary(
             SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)
@@ -348,7 +381,10 @@ async fn live_concurrent_delta_push() {
 
 #[tokio::test]
 async fn live_shape_snapshot_with_wal_lsn() {
-    let _server = OriginServer::spawn();
+    let Some(_server) = OriginServer::try_spawn() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
     let mut engine = CrdtEngine::new(300).expect("engine");
@@ -364,6 +400,9 @@ async fn live_shape_snapshot_with_wal_lsn() {
             mutation_id: 1,
             checksum: 0,
             device_valid_time_ms: None,
+            producer_id: 0,
+            epoch: 0,
+            seq: 0,
         };
         ws.send(Message::Binary(
             SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)

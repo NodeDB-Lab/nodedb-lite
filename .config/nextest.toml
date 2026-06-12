@@ -5,6 +5,13 @@
 #
 # Run with: cargo nextest run -p nodedb-lite
 
+experimental = ["setup-scripts"]
+
+[scripts.setup.build-origin]
+command = { command-line = "scripts/ensure-origin.sh", relative-to = "workspace-root" }
+slow-timeout = { period = "600s", terminate-after = 1 }
+capture-stderr = true
+
 [profile.default]
 # Hard ceiling per test. Anything above this is a bug, not a slow test.
 slow-timeout = { period = "30s", terminate-after = 4 }
@@ -47,6 +54,10 @@ binary(/concurrency/)
 test-group = 'heavy'
 threads-required = 'num-test-threads'
 
+[[profile.default.scripts]]
+filter = 'binary(/sync_interop/) | binary(/sync_load/) | binary(/definition_sync_interop/) | binary(/sql_parity/)'
+setup = 'build-origin'
+
 [test-groups]
 heavy = { max-threads = 1 }
 
@@ -56,3 +67,7 @@ fail-fast = false
 
 [profile.ci.junit]
 path = "junit.xml"
+
+[[profile.ci.scripts]]
+filter = 'binary(/sync_interop/) | binary(/sync_load/) | binary(/definition_sync_interop/) | binary(/sql_parity/)'
+setup = 'build-origin'

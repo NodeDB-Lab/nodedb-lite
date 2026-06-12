@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use nodedb_client::NodeDb;
-use nodedb_lite::{NodeDbLite, PagedbStorageDefault, PagedbStorageMem};
+use nodedb_lite::{Encryption, NodeDbLite, PagedbStorageDefault, PagedbStorageMem};
 use nodedb_types::document::Document;
 use nodedb_types::id::NodeId;
 use nodedb_types::value::Value;
@@ -175,7 +175,9 @@ async fn flush_and_reopen_persists_all() {
     let path = dir.path().join("persist.db");
 
     {
-        let storage = PagedbStorageDefault::open(&path).await.unwrap();
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+            .await
+            .unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
 
         db.batch_vector_insert("vecs", &[("v1", &[1.0, 2.0, 3.0][..])])
@@ -190,7 +192,9 @@ async fn flush_and_reopen_persists_all() {
     }
 
     {
-        let storage = PagedbStorageDefault::open(&path).await.unwrap();
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+            .await
+            .unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
 
         let doc = db.document_get("docs", "d1").await.unwrap();
