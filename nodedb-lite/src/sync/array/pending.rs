@@ -266,14 +266,28 @@ mod tests {
         let path = dir.path().join("pending_test.pagedb");
 
         {
-            let storage = Arc::new(PagedbStorageDefault::open(&path).await.unwrap());
+            let storage = Arc::new(
+                PagedbStorageDefault::open(
+                    &path,
+                    crate::storage::encryption::Encryption::Plaintext,
+                )
+                .await
+                .unwrap(),
+            );
             let q = PendingQueue::new(storage);
             q.enqueue(&make_op(5)).await.unwrap();
             q.enqueue(&make_op(15)).await.unwrap();
         }
 
         {
-            let storage = Arc::new(PagedbStorageDefault::open(&path).await.unwrap());
+            let storage = Arc::new(
+                PagedbStorageDefault::open(
+                    &path,
+                    crate::storage::encryption::Encryption::Plaintext,
+                )
+                .await
+                .unwrap(),
+            );
             let q = PendingQueue::new(storage);
             assert_eq!(q.len().await.unwrap(), 2);
             let ops = q.drain_batch(usize::MAX).await.unwrap();

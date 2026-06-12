@@ -302,14 +302,28 @@ mod tests {
 
         let schema_hlc;
         {
-            let storage = Arc::new(PagedbStorageDefault::open(&path).await.unwrap());
+            let storage = Arc::new(
+                PagedbStorageDefault::open(
+                    &path,
+                    crate::storage::encryption::Encryption::Plaintext,
+                )
+                .await
+                .unwrap(),
+            );
             let replica = Arc::new(ReplicaState::load_or_init(&*storage).await.unwrap());
             let reg = SchemaRegistry::new(Arc::clone(&storage), Arc::clone(&replica));
             schema_hlc = reg.put_schema("arr", &simple_schema("arr")).await.unwrap();
         }
 
         {
-            let storage = Arc::new(PagedbStorageDefault::open(&path).await.unwrap());
+            let storage = Arc::new(
+                PagedbStorageDefault::open(
+                    &path,
+                    crate::storage::encryption::Encryption::Plaintext,
+                )
+                .await
+                .unwrap(),
+            );
             let replica = Arc::new(ReplicaState::load_or_init(&*storage).await.unwrap());
             let reg = SchemaRegistry::load(Arc::clone(&storage), replica)
                 .await

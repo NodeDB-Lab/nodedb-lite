@@ -85,6 +85,8 @@ async fn send_acks<S: StorageEngine>(
             array: array.clone(),
             replica_id: replica_id.as_u64(),
             ack_hlc_bytes: ack_hlc.to_bytes(),
+            applied_seq: 0,
+            status: nodedb_types::sync::wire::AckStatus::Applied,
         };
 
         let frame = match nodedb_types::sync::wire::SyncFrame::try_encode(

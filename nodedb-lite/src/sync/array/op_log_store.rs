@@ -446,7 +446,14 @@ mod tests {
         let path = dir.path().join("op_log_test.pagedb");
 
         {
-            let storage = Arc::new(PagedbStorageDefault::open(&path).await.unwrap());
+            let storage = Arc::new(
+                PagedbStorageDefault::open(
+                    &path,
+                    crate::storage::encryption::Encryption::Plaintext,
+                )
+                .await
+                .unwrap(),
+            );
             let log = KvOpLogStore::new(Arc::clone(&storage));
             log.append(&make_op("arr", 10)).unwrap();
             log.append(&make_op("arr", 20)).unwrap();
@@ -454,7 +461,14 @@ mod tests {
 
         // Reopen the same file.
         {
-            let storage = Arc::new(PagedbStorageDefault::open(&path).await.unwrap());
+            let storage = Arc::new(
+                PagedbStorageDefault::open(
+                    &path,
+                    crate::storage::encryption::Encryption::Plaintext,
+                )
+                .await
+                .unwrap(),
+            );
             let log = KvOpLogStore::new(storage);
             assert_eq!(log.len().unwrap(), 2);
             let ops: Vec<_> = log

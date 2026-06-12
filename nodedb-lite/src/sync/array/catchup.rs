@@ -234,14 +234,28 @@ mod tests {
         let target_hlc = hlc(42_000);
 
         {
-            let storage = Arc::new(PagedbStorageDefault::open(&path).await.unwrap());
+            let storage = Arc::new(
+                PagedbStorageDefault::open(
+                    &path,
+                    crate::storage::encryption::Encryption::Plaintext,
+                )
+                .await
+                .unwrap(),
+            );
             let tracker = CatchupTracker::load(Arc::clone(&storage)).await.unwrap();
             tracker.record("arr", target_hlc).await.unwrap();
             assert_eq!(tracker.last_seen("arr"), target_hlc);
         }
 
         {
-            let storage = Arc::new(PagedbStorageDefault::open(&path).await.unwrap());
+            let storage = Arc::new(
+                PagedbStorageDefault::open(
+                    &path,
+                    crate::storage::encryption::Encryption::Plaintext,
+                )
+                .await
+                .unwrap(),
+            );
             let tracker = CatchupTracker::load(storage).await.unwrap();
             assert_eq!(
                 tracker.last_seen("arr"),

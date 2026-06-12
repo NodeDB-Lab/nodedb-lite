@@ -95,6 +95,9 @@ mod tests {
         let msg = ArrayDeltaMsg {
             array: "arr".into(),
             op_payload: payload,
+            producer_id: 0,
+            epoch: 0,
+            seq: 0,
         };
         let outcome = inbound.handle_delta(&msg).unwrap();
         assert_eq!(outcome, InboundOutcome::Applied);
@@ -133,6 +136,9 @@ mod tests {
         let msg = ArrayDeltaMsg {
             array: "arr".into(),
             op_payload: payload.clone(),
+            producer_id: 0,
+            epoch: 0,
+            seq: 0,
         };
 
         // First application — should be Applied.
@@ -143,6 +149,9 @@ mod tests {
         let msg2 = ArrayDeltaMsg {
             array: "arr".into(),
             op_payload: payload,
+            producer_id: 0,
+            epoch: 0,
+            seq: 0,
         };
         let o2 = inbound.handle_delta(&msg2).unwrap();
         assert_eq!(o2, InboundOutcome::Idempotent);
@@ -157,6 +166,9 @@ mod tests {
         let msg = ArrayDeltaMsg {
             array: "unknown_arr".into(),
             op_payload: payload,
+            producer_id: 0,
+            epoch: 0,
+            seq: 0,
         };
         let outcome = inbound.handle_delta(&msg).unwrap();
         assert!(
@@ -201,6 +213,9 @@ mod tests {
         let msg = ArrayDeltaMsg {
             array: "arr".into(),
             op_payload: payload,
+            producer_id: 0,
+            epoch: 0,
+            seq: 0,
         };
         let outcome = inbound.handle_delta(&msg).unwrap();
         assert!(
