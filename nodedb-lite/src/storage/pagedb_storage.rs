@@ -26,7 +26,7 @@ use pagedb::vfs::traits::Vfs;
 use pagedb::{Db, RealmId};
 
 use crate::error::LiteError;
-use crate::storage::engine::{KvPair, StorageEngine, WriteOp};
+use crate::storage::engine::{CompactionOutcome, KvPair, StorageEngine, WriteOp};
 use nodedb_types::Namespace;
 
 // ─── VFS aliases ─────────────────────────────────────────────────────────────
@@ -453,6 +453,15 @@ where
             .collect())
     }
 
+    async fn compact(&self) -> Result<CompactionOutcome, LiteError> {
+        let stats = self.db.compact_now().await.map_err(LiteError::from)?;
+        Ok(CompactionOutcome {
+            reclaimed_pages: stats.main_db_pages_reclaimed,
+            segments_repacked: stats.segments_repacked,
+            file_bytes_freed: stats.bytes_truncated,
+        })
+    }
+
     fn as_vector_segment_ext(
         &self,
     ) -> Option<&dyn crate::storage::vector_segment_ext::VectorSegmentExt> {
@@ -743,6 +752,15 @@ impl<V: Vfs + Clone + 'static> StorageEngine for PagedbStorage<V> {
             .take(effective_limit)
             .map(|(k, v)| (strip_prefix(&k).to_vec(), v))
             .collect())
+    }
+
+    async fn compact(&self) -> Result<CompactionOutcome, LiteError> {
+        let stats = self.db.compact_now().await.map_err(LiteError::from)?;
+        Ok(CompactionOutcome {
+            reclaimed_pages: stats.main_db_pages_reclaimed,
+            segments_repacked: stats.segments_repacked,
+            file_bytes_freed: stats.bytes_truncated,
+        })
     }
 }
 
@@ -1225,6 +1243,65 @@ mod tests {
         assert_eq!(results[0].0, &[2u8]);
         assert_eq!(results[1].0, &[3u8]);
         assert_eq!(results[2].0, &[4u8]);
+    }
+
+    /// In-memory engine: `compact()` is a successful no-op (nothing to reclaim).
+    #[tokio::test]
+    async fn compact_mem_is_ok_noop() {
+        let s = make_storage().await;
+        s.put(Namespace::Vector, b"v1", b"hello").await.unwrap();
+        s.put(Namespace::Graph, b"g1", b"world").await.unwrap();
+        let outcome = s.compact().await.unwrap();
+        // Data still readable after compaction.
+        assert_eq!(
+            s.get(Namespace::Vector, b"v1").await.unwrap().as_deref(),
+            Some(b"hello".as_slice())
+        );
+        // MemVfs has no file truncation, but the call must succeed regardless.
+        let _ = outcome.reclaimed_pages;
+    }
+
+    /// Disk-backed engine on a tempdir: write rows (including churn that leaves
+    /// dead pages), then `compact()` must succeed and report a non-negative
+    /// outcome. Data must remain intact afterward.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn compact_default_disk_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("compact-test.db");
+        let s = PagedbStorage::<DefaultVfs>::open(
+            &path,
+            crate::storage::encryption::Encryption::Plaintext,
+        )
+        .await
+        .unwrap();
+
+        // Churn: write then overwrite/delete a batch of keys so the
+        // deferred-free list has pages to reclaim.
+        for i in 0u32..200 {
+            let key = i.to_be_bytes();
+            s.put(Namespace::Meta, &key, &vec![0xCDu8; 512])
+                .await
+                .unwrap();
+        }
+        for i in 0u32..150 {
+            let key = i.to_be_bytes();
+            s.delete(Namespace::Meta, &key).await.unwrap();
+        }
+
+        let outcome = s.compact().await.unwrap();
+
+        // Surviving keys still readable.
+        let survivor = 175u32.to_be_bytes();
+        assert!(s.get(Namespace::Meta, &survivor).await.unwrap().is_some());
+
+        // Outcome fields are well-formed (u64/u32 — always >= 0); just touch
+        // them so the assertion documents the reported shape.
+        let _ = (
+            outcome.reclaimed_pages,
+            outcome.segments_repacked,
+            outcome.file_bytes_freed,
+        );
     }
 
     /// Keys in namespace N must not appear in a scan of namespace N+1, and

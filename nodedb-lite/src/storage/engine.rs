@@ -18,6 +18,23 @@ use nodedb_types::Namespace;
 /// `StorageEngine` trait's scan interface.
 pub type KvPair = (Vec<u8>, Vec<u8>);
 
+/// Summary of what a [`StorageEngine::compact`] call reclaimed.
+///
+/// Lite-owned (not a pagedb type) so the trait doesn't force pagedb types on
+/// non-pagedb impls. The pagedb-backed engine maps `pagedb::CompactStats` into
+/// this; other engines return the `Default` (all-zero) value from the trait's
+/// default no-op `compact`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompactionOutcome {
+    /// Number of underlying pages reclaimed (moved to free-list or freed by
+    /// repacking). Zero for engines with nothing to compact.
+    pub reclaimed_pages: u64,
+    /// Number of segment files repacked.
+    pub segments_repacked: u32,
+    /// Bytes truncated from the backing file by lowering the high-water mark.
+    pub file_bytes_freed: u64,
+}
+
 /// A write operation for batch writes.
 #[derive(Debug, Clone)]
 pub enum WriteOp {
@@ -71,6 +88,17 @@ pub trait StorageEngine: Send + Sync + 'static {
     ///
     /// Useful for cold-start progress reporting and memory governor decisions.
     async fn count(&self, ns: Namespace) -> Result<u64, LiteError>;
+
+    /// Compact the backing store, reclaiming dead pages and (when possible)
+    /// truncating the file to bound on-disk growth.
+    ///
+    /// The default implementation is a no-op returning a zero
+    /// [`CompactionOutcome`], so engines with nothing to compact (in-memory
+    /// stores, test doubles) need not override it. The pagedb-backed engine
+    /// overrides this to drain the deferred-free list and truncate `main.db`.
+    async fn compact(&self) -> Result<CompactionOutcome, LiteError> {
+        Ok(CompactionOutcome::default())
+    }
 
     /// Range scan: return up to `limit` entries where key >= `start`.
     ///
