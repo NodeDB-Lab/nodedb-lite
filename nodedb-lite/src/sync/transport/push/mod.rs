@@ -8,7 +8,10 @@
 //! send / encode primitives live in `send`.
 
 mod columnar;
-mod control;
+// `control` is visible within the `transport` module so `transport::tests` can
+// drive `push_collection_schemas` / `push_crdt_deltas` directly for the
+// schema-before-delta ordering test; not part of the public API.
+pub(in crate::sync::transport) mod control;
 mod fts;
 mod send;
 mod spatial;
@@ -85,6 +88,12 @@ pub(super) async fn delta_push_loop<S>(
             return;
         }
         if timeseries::push(client, delegate, sink).await.is_break() {
+            return;
+        }
+        if control::push_collection_schemas(client, delegate, sink)
+            .await
+            .is_break()
+        {
             return;
         }
         if control::push_crdt_deltas(client, delegate, sink)

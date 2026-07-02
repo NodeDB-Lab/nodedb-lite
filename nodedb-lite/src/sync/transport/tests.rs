@@ -22,6 +22,10 @@ struct MockDelegate {
     rejected: std::sync::Mutex<Vec<u64>>,
     imported: std::sync::Mutex<Vec<Vec<u8>>>,
     imported_schemas: std::sync::Mutex<Vec<String>>,
+    pending: std::sync::Mutex<Vec<PendingDelta>>,
+    collection_metas: std::sync::Mutex<
+        std::collections::HashMap<String, crate::nodedb::collection::CollectionMeta>,
+    >,
 }
 
 impl MockDelegate {
@@ -31,6 +35,8 @@ impl MockDelegate {
             rejected: std::sync::Mutex::new(Vec::new()),
             imported: std::sync::Mutex::new(Vec::new()),
             imported_schemas: std::sync::Mutex::new(Vec::new()),
+            pending: std::sync::Mutex::new(Vec::new()),
+            collection_metas: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -38,7 +44,7 @@ impl MockDelegate {
 #[async_trait::async_trait]
 impl SyncDelegate for MockDelegate {
     fn pending_deltas(&self) -> Vec<PendingDelta> {
-        Vec::new()
+        self.pending.lock().unwrap().clone()
     }
     fn acknowledge(&self, mutation_id: u64) {
         self.acked_up_to.store(mutation_id, Ordering::Relaxed);
@@ -147,6 +153,13 @@ impl SyncDelegate for MockDelegate {
     }
     async fn record_stream_ack(&self, _stream_id: u64, _applied_seq: u64) {}
 
+    async fn get_collection_meta(
+        &self,
+        name: &str,
+    ) -> Option<crate::nodedb::collection::CollectionMeta> {
+        self.collection_metas.lock().unwrap().get(name).cloned()
+    }
+
     async fn persist_columnar_seq(
         &self,
         _key: &[u8],
@@ -202,6 +215,59 @@ impl SyncDelegate for MockDelegate {
         _delete: &PendingSpatialDelete,
     ) -> Result<(), crate::error::LiteError> {
         Ok(())
+    }
+}
+
+impl MockDelegate {
+    fn set_pending(&self, deltas: Vec<PendingDelta>) {
+        *self.pending.lock().unwrap() = deltas;
+    }
+
+    fn set_collection_meta(&self, name: &str, meta: crate::nodedb::collection::CollectionMeta) {
+        self.collection_metas
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), meta);
+    }
+}
+
+/// A `Sink<Message>` that captures every frame sent through it, for
+/// asserting on wire-frame ordering without a real WebSocket.
+#[derive(Default)]
+struct CapturingSink {
+    frames: std::sync::Mutex<Vec<tokio_tungstenite::tungstenite::Message>>,
+}
+
+impl futures::Sink<tokio_tungstenite::tungstenite::Message> for CapturingSink {
+    type Error = std::convert::Infallible;
+
+    fn poll_ready(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn start_send(
+        self: std::pin::Pin<&mut Self>,
+        item: tokio_tungstenite::tungstenite::Message,
+    ) -> Result<(), Self::Error> {
+        self.frames.lock().unwrap().push(item);
+        Ok(())
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
     }
 }
 
@@ -345,5 +411,87 @@ async fn dispatch_collection_schema() {
     assert_eq!(
         *mock.imported_schemas.lock().unwrap(),
         vec!["users".to_string()]
+    );
+}
+
+/// A `CollectionSchema` (0x13) frame for a collection must be sent before
+/// the first `DeltaPush` frame for that collection, and a second push tick
+/// must NOT re-announce it (per-session dedup via `announced_collections`).
+#[tokio::test]
+async fn collection_schema_announced_before_first_delta_and_deduped() {
+    let client = make_client();
+    let mock = Arc::new(MockDelegate::new());
+    let delegate: Arc<dyn SyncDelegate> = Arc::clone(&mock) as _;
+
+    mock.set_collection_meta(
+        "widgets",
+        crate::nodedb::collection::CollectionMeta {
+            name: "widgets".to_string(),
+            collection_type: "document".to_string(),
+            created_at_ms: 0,
+            fields: Vec::new(),
+            config_json: None,
+            descriptor_json: None,
+            bitemporal: false,
+        },
+    );
+    mock.set_pending(vec![PendingDelta {
+        mutation_id: 1,
+        collection: "widgets".to_string(),
+        document_id: "d1".to_string(),
+        delta_bytes: vec![9, 9, 9],
+        seq: 0,
+    }]);
+
+    let sink = Arc::new(tokio::sync::Mutex::new(CapturingSink::default()));
+
+    assert!(
+        !super::push::control::push_collection_schemas(&client, &delegate, &sink)
+            .await
+            .is_break()
+    );
+    assert!(
+        !super::push::control::push_crdt_deltas(&client, &delegate, &sink)
+            .await
+            .is_break()
+    );
+
+    {
+        let guard = sink.lock().await;
+        let frames = guard.frames.lock().unwrap();
+        assert_eq!(
+            frames.len(),
+            2,
+            "expected one schema frame + one delta frame"
+        );
+        let schema_frame = SyncFrame::from_bytes(frames[0].clone().into_data().as_ref())
+            .expect("schema frame decodes");
+        assert_eq!(schema_frame.msg_type, SyncMessageType::CollectionSchema);
+        let delta_frame = SyncFrame::from_bytes(frames[1].clone().into_data().as_ref())
+            .expect("delta frame decodes");
+        assert_eq!(delta_frame.msg_type, SyncMessageType::DeltaPush);
+    }
+
+    // Second push cycle: same collection still has a pending delta (it
+    // wasn't acked), but must NOT be re-announced this session.
+    assert!(
+        !super::push::control::push_collection_schemas(&client, &delegate, &sink)
+            .await
+            .is_break()
+    );
+
+    let guard = sink.lock().await;
+    let frames = guard.frames.lock().unwrap();
+    let schema_count = frames
+        .iter()
+        .filter(|f| {
+            SyncFrame::from_bytes((*f).clone().into_data().as_ref())
+                .map(|frame| frame.msg_type == SyncMessageType::CollectionSchema)
+                .unwrap_or(false)
+        })
+        .count();
+    assert_eq!(
+        schema_count, 1,
+        "collection must be announced only once per session"
     );
 }

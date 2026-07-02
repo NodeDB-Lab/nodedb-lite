@@ -479,6 +479,31 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         }
     }
 
+    async fn get_collection_meta(
+        &self,
+        name: &str,
+    ) -> Option<crate::nodedb::collection::CollectionMeta> {
+        let key = format!("collection:{name}");
+        match self
+            .storage
+            .get(nodedb_types::Namespace::Meta, key.as_bytes())
+            .await
+        {
+            Ok(Some(bytes)) => match sonic_rs::from_slice(&bytes) {
+                Ok(meta) => Some(meta),
+                Err(e) => {
+                    tracing::warn!(collection = name, error = %e, "get_collection_meta: decode failed");
+                    None
+                }
+            },
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(collection = name, error = %e, "get_collection_meta: storage read failed");
+                None
+            }
+        }
+    }
+
     // ── Stable seq persistence ────────────────────────────────────────────────
 
     async fn persist_columnar_seq(

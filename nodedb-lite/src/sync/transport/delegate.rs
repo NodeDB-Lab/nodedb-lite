@@ -275,4 +275,19 @@ pub trait SyncDelegate: Send + Sync + 'static {
     /// ignored — the last_assigned frontier already prevents re-sending
     /// un-acked seqs, so this is a refinement of the acknowledged frontier.
     async fn record_stream_ack(&self, stream_id: u64, applied_seq: u64);
+
+    // ── Collection schema (outbound announce) ───────────────────────────────
+
+    /// Look up a collection's persisted metadata by name, for building the
+    /// outbound `CollectionSchema` (opcode `0x13`) announce sent before a
+    /// collection's first CRDT delta in a sync session.
+    ///
+    /// Returns `None` if the collection has no explicitly persisted metadata
+    /// (e.g. an implicit CRDT-only collection created without DDL) — the
+    /// caller skips announcing it and lets Origin infer a schemaless
+    /// collection from the first delta, matching pre-announce behavior.
+    async fn get_collection_meta(
+        &self,
+        name: &str,
+    ) -> Option<crate::nodedb::collection::CollectionMeta>;
 }

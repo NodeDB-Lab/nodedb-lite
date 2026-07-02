@@ -1,6 +1,7 @@
 pub mod array;
 pub mod client;
 pub mod clock;
+mod collection_schema_builder;
 pub mod compensation;
 pub mod constants;
 pub mod flow_control;

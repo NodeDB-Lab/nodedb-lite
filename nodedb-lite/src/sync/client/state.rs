@@ -91,6 +91,13 @@ pub struct SyncClient {
     /// the epoch stays the same across reconnects and will still be fenced.
     /// In that case the operator must restart the db process to mint a new epoch.
     pub(crate) fenced: Arc<AtomicBool>,
+    /// Collection names already announced (via `CollectionSchema`, opcode
+    /// `0x13`) to Origin during the current session.
+    ///
+    /// Cleared whenever `session_id` is (re)set on handshake so each new
+    /// session re-announces every collection with pending deltas, mirroring
+    /// Origin's per-session announced set in `session_handler/announce.rs`.
+    pub(super) announced_collections: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl SyncClient {
@@ -131,6 +138,7 @@ impl SyncClient {
             token_refresh_backoff_ms: Arc::new(Mutex::new(
                 crate::sync::client::token::TOKEN_REFRESH_MIN_BACKOFF_MS,
             )),
+            announced_collections: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -245,6 +253,12 @@ impl SyncClient {
     /// re-registration; if Origin still fences it the flag is set again.
     pub fn clear_fenced(&self) {
         self.fenced.store(false, Ordering::Release);
+    }
+
+    /// Access the per-session set of collections already announced via
+    /// `CollectionSchema` (opcode `0x13`).
+    pub(crate) fn announced_collections(&self) -> &Arc<Mutex<std::collections::HashSet<String>>> {
+        &self.announced_collections
     }
 }
 

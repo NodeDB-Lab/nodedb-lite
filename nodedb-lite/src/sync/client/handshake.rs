@@ -40,6 +40,10 @@ impl SyncClient {
         }
 
         *self.session_id.lock().await = Some(ack.session_id.clone());
+        // New session — every collection must be re-announced before its
+        // first delta so Origin materializes it, even if it was already
+        // announced in a prior session.
+        self.announced_collections.lock().await.clear();
 
         let mut clock = self.clock.lock().await;
         for (peer_hex, &counter) in &ack.server_clock {

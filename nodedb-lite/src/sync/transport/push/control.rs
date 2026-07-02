@@ -9,10 +9,14 @@ use futures::SinkExt;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 
-use nodedb_types::sync::wire::{EngineKind, SyncFrame, SyncMessageType, stream_id_for};
+use nodedb_types::hlc::Hlc;
+use nodedb_types::sync::wire::{
+    CollectionSchemaSyncMsg, EngineKind, SyncFrame, SyncMessageType, stream_id_for,
+};
 
 use super::send::{encode_and_send, send_binary};
 use crate::sync::client::SyncClient;
+use crate::sync::collection_schema_builder::descriptor_from_meta;
 use crate::sync::transport::delegate::SyncDelegate;
 
 /// Drain control messages: token refresh (when paused for auth), resync
@@ -73,8 +77,75 @@ where
     ControlFlow::Continue(())
 }
 
+/// Announce collection schemas (`CollectionSchema`, opcode `0x13`) for every
+/// collection with pending CRDT deltas that hasn't already been announced in
+/// this session, so Origin materializes the collection before its data
+/// arrives. Mirrors Origin's announce-before-shape-snapshot ordering in
+/// `session_handler/announce.rs`.
+pub(in crate::sync::transport) async fn push_collection_schemas<S>(
+    client: &Arc<SyncClient>,
+    delegate: &Arc<dyn SyncDelegate>,
+    sink: &Arc<Mutex<S>>,
+) -> ControlFlow<()>
+where
+    S: SinkExt<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    let pending = delegate.pending_deltas();
+    if pending.is_empty() {
+        return ControlFlow::Continue(());
+    }
+
+    let mut names: Vec<String> = pending.into_iter().map(|d| d.collection).collect();
+    names.sort_unstable();
+    names.dedup();
+
+    for name in names {
+        {
+            let announced = client.announced_collections().lock().await;
+            if announced.contains(&name) {
+                continue;
+            }
+        }
+
+        let Some(meta) = delegate.get_collection_meta(&name).await else {
+            tracing::debug!(
+                collection = %name,
+                "no persisted metadata; skipping schema announce (implicit CRDT-only collection)"
+            );
+            continue;
+        };
+        let Some(descriptor) = descriptor_from_meta(&meta) else {
+            // descriptor_from_meta already warned with the specific reason.
+            continue;
+        };
+
+        let msg = CollectionSchemaSyncMsg {
+            descriptor,
+            creation_hlc: Hlc::ZERO,
+        };
+        let Some(frame) = SyncFrame::try_encode(SyncMessageType::CollectionSchema, &msg) else {
+            tracing::error!(collection = %name, "failed to encode CollectionSchema frame; skipping");
+            continue;
+        };
+        if let Err(e) = send_binary(sink, frame).await {
+            tracing::warn!(collection = %name, error = %e, "CollectionSchema send failed");
+            return ControlFlow::Break(());
+        }
+
+        client
+            .announced_collections()
+            .lock()
+            .await
+            .insert(name.clone());
+        tracing::debug!(collection = %name, "announced CollectionSchema to Origin");
+    }
+
+    ControlFlow::Continue(())
+}
+
 /// Push pending CRDT deltas, respecting the flow control window.
-pub(super) async fn push_crdt_deltas<S>(
+pub(in crate::sync::transport) async fn push_crdt_deltas<S>(
     client: &Arc<SyncClient>,
     delegate: &Arc<dyn SyncDelegate>,
     sink: &Arc<Mutex<S>>,
