@@ -30,6 +30,14 @@ where
     let epoch = client.accepted_epoch().await;
 
     for (durable_key, mut batch) in delegate.pending_timeseries_batches().await {
+        // Announce the collection's schema before its first data frame so a
+        // lite-only collection is registered on Origin before its points land.
+        if super::control::ensure_collection_announced(client, delegate, sink, &batch.collection)
+            .await
+            .is_break()
+        {
+            return ControlFlow::Break(());
+        }
         let stream_id = stream_id_for(EngineKind::Timeseries, &batch.collection);
         if batch.seq == 0 {
             batch.seq = delegate.next_stream_seq(stream_id).await;

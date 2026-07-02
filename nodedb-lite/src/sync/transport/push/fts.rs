@@ -27,6 +27,14 @@ where
     let epoch = client.accepted_epoch().await;
 
     for (durable_key, mut entry) in delegate.pending_fts_indexes().await {
+        // Announce the collection's schema before its first data frame so a
+        // lite-only collection is registered on Origin before its FTS docs land.
+        if super::control::ensure_collection_announced(client, delegate, sink, &entry.collection)
+            .await
+            .is_break()
+        {
+            return ControlFlow::Break(());
+        }
         let stream_id = stream_id_for(EngineKind::Fts, &entry.collection);
         if entry.seq == 0 {
             entry.seq = delegate.next_stream_seq(stream_id).await;
@@ -72,6 +80,12 @@ where
     }
 
     for (durable_key, mut entry) in delegate.pending_fts_deletes().await {
+        if super::control::ensure_collection_announced(client, delegate, sink, &entry.collection)
+            .await
+            .is_break()
+        {
+            return ControlFlow::Break(());
+        }
         let stream_id = stream_id_for(EngineKind::Fts, &entry.collection);
         if entry.seq == 0 {
             entry.seq = delegate.next_stream_seq(stream_id).await;

@@ -225,3 +225,94 @@ async fn timeseries_pre_connection_inserts_sync_after_connect() {
 
     pg.execute("DROP COLLECTION ts_sync_test").await;
 }
+
+/// A timeseries collection created ONLY on Lite (no Origin pre-create) must
+/// register on Origin and serve its rows purely via the outbound
+/// `CollectionSchema` announce the timeseries push path now emits before its
+/// first `ColumnarInsert` frame.
+#[tokio::test]
+async fn timeseries_collection_registers_on_origin_via_announce() {
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
+    let pg = OriginPgwire::connect().await;
+
+    // Deliberately NOT creating the collection on Origin.
+    let lite = open_lite().await;
+    lite.execute_sql(CREATE_LITE, &[])
+        .await
+        .expect("Lite CREATE TIMESERIES ts_sync_test");
+
+    let sync_config = SyncConfig::new(common::origin::ORIGIN_WS, "");
+    let sync_client = Arc::new(SyncClient::new(sync_config, 3));
+    let delegate = Arc::clone(&lite) as Arc<dyn nodedb_lite::sync::SyncDelegate>;
+    let client_clone = Arc::clone(&sync_client);
+    tokio::spawn(async move {
+        run_sync_loop(client_clone, delegate).await;
+    });
+    wait_for_connected(&sync_client).await;
+
+    let rows = [
+        ("2024-06-01 12:00:00", "web01", 0.45_f64),
+        ("2024-06-01 12:01:00", "web02", 0.60_f64),
+        ("2024-06-01 12:02:00", "web03", 0.72_f64),
+    ];
+    for (ts, host, cpu) in &rows {
+        let sql =
+            format!("INSERT INTO ts_sync_test (time, host, cpu) VALUES ('{ts}', '{host}', {cpu})");
+        lite.execute_sql(&sql, &[])
+            .await
+            .unwrap_or_else(|e| panic!("Lite INSERT ts_sync_test ({host}): {e}"));
+    }
+
+    // PROOF 1 — registration via the timeseries-push announce.
+    let mut catalog_visible = false;
+    let deadline = tokio::time::sleep(Duration::from_secs(10));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                if let Ok(rows) = pg
+                    .try_query("SELECT relname FROM pg_class WHERE relname = 'ts_sync_test'")
+                    .await
+                    && !rows.is_empty()
+                {
+                    catalog_visible = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        catalog_visible,
+        "ts_sync_test must register in Origin's pg_class via the timeseries-push \
+         CollectionSchema announce (no Origin pre-create) within the deadline"
+    );
+
+    // PROOF 2 — rows served.
+    let mut origin_row_count: usize = 0;
+    let deadline = tokio::time::sleep(Duration::from_secs(8));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                if let Ok(rows) = pg.try_query("SELECT time FROM ts_sync_test").await
+                    && rows.len() >= 3
+                {
+                    origin_row_count = rows.len();
+                    break;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        origin_row_count, 3,
+        "Origin must serve 3 synced timeseries rows after registration via the \
+         timeseries-push announce (no Origin pre-create); got {origin_row_count}"
+    );
+
+    pg.execute("DROP COLLECTION ts_sync_test").await;
+}

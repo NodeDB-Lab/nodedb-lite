@@ -214,3 +214,114 @@ async fn columnar_pre_connection_inserts_sync_after_connect() {
 
     pg.execute("DROP COLLECTION col_sync_test").await;
 }
+
+/// A columnar collection created ONLY on Lite (no Origin pre-create) must
+/// register on Origin and serve its rows purely via the outbound
+/// `CollectionSchema` announce that the columnar push path now emits before
+/// its first `ColumnarInsert` frame.
+///
+/// This is the columnar analogue of the document
+/// `document_collection_registers_on_origin_via_announce` gate test: before
+/// the per-engine announce fix, only the CRDT/document push path announced, so
+/// a lite-only columnar collection reached Origin as inserts for an unknown
+/// collection and never materialized.
+#[tokio::test]
+async fn columnar_collection_registers_on_origin_via_announce() {
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
+    let pg = OriginPgwire::connect().await;
+
+    // Deliberately NOT creating the collection on Origin — it must learn of
+    // `col_sync_test` solely from the columnar push path's schema announce.
+    let lite = open_lite().await;
+    lite.execute_sql(CREATE_LITE, &[])
+        .await
+        .expect("Lite CREATE columnar col_sync_test");
+
+    let sync_config = SyncConfig::new(common::origin::ORIGIN_WS, "");
+    let sync_client = Arc::new(SyncClient::new(sync_config, 3));
+    let delegate = Arc::clone(&lite) as Arc<dyn nodedb_lite::sync::SyncDelegate>;
+    let client_clone = Arc::clone(&sync_client);
+    tokio::spawn(async move {
+        run_sync_loop(client_clone, delegate).await;
+    });
+
+    let deadline = tokio::time::sleep(Duration::from_secs(10));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => panic!("sync connection did not establish within 10 seconds"),
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                if sync_client.state().await == nodedb_lite::sync::SyncState::Connected {
+                    break;
+                }
+            }
+        }
+    }
+
+    for i in 1i64..=3 {
+        let sql = format!(
+            "INSERT INTO col_sync_test (id, label, value) VALUES ({i}, 'reg-{i}', {:.1})",
+            i as f64 * 10.0
+        );
+        lite.execute_sql(&sql, &[])
+            .await
+            .unwrap_or_else(|e| panic!("Lite INSERT row {i}: {e}"));
+    }
+
+    // PROOF 1 — registration via the columnar-push announce: the collection
+    // must become catalog-visible on Origin with NO pre-create. `pg_class`
+    // always exists, so this returns an empty set (not an error) until the
+    // announced `PutCollectionIfAbsent` lands — a tolerant poll target.
+    let mut catalog_visible = false;
+    let deadline = tokio::time::sleep(Duration::from_secs(10));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                if let Ok(rows) = pg
+                    .try_query("SELECT relname FROM pg_class WHERE relname = 'col_sync_test'")
+                    .await
+                    && !rows.is_empty()
+                {
+                    catalog_visible = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        catalog_visible,
+        "col_sync_test must become visible in Origin's pg_class catalog via the \
+         columnar-push CollectionSchema announce (no Origin pre-create) within the deadline"
+    );
+
+    // PROOF 2 — rows served: the columnar scan path must return all 3 synced
+    // rows once both registration and inserts have landed.
+    let mut origin_row_count: usize = 0;
+    let deadline = tokio::time::sleep(Duration::from_secs(8));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                if let Ok(rows) = pg.try_query("SELECT id FROM col_sync_test").await
+                    && rows.len() >= 3
+                {
+                    origin_row_count = rows.len();
+                    break;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        origin_row_count, 3,
+        "Origin must serve 3 synced columnar rows after registration via the \
+         columnar-push announce (no Origin pre-create); got {origin_row_count}"
+    );
+
+    pg.execute("DROP COLLECTION col_sync_test").await;
+}

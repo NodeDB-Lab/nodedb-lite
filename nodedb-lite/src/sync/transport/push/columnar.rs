@@ -33,6 +33,15 @@ where
     let epoch = client.accepted_epoch().await;
 
     for (durable_key, mut batch) in delegate.pending_columnar_batches().await {
+        // Announce the collection's schema before its first data frame so
+        // Origin registers a lite-only collection rather than dropping the
+        // insert for an unknown collection.
+        if super::control::ensure_collection_announced(client, delegate, sink, &batch.collection)
+            .await
+            .is_break()
+        {
+            return ControlFlow::Break(());
+        }
         let rows_msgpack: Vec<Vec<u8>> = batch
             .rows
             .iter()

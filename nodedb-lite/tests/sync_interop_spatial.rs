@@ -285,3 +285,88 @@ async fn spatial_pre_connection_inserts_sync_after_connect() {
 
     pg.execute(&format!("DROP COLLECTION {COLLECTION}")).await;
 }
+
+/// A collection created ONLY on Lite (no Origin pre-create) whose first synced
+/// data is a spatial geometry must register on Origin purely via the outbound
+/// `CollectionSchema` announce the spatial push path now emits before its first
+/// `SpatialInsert` frame.
+///
+/// The base collection is schemaless (spatial is an index overlay); it is
+/// created explicitly on Lite via `create_collection` so a `CollectionMeta` is
+/// persisted for the announce to read (an implicit collection has no meta and
+/// is intentionally not announced).
+#[tokio::test]
+async fn spatial_collection_registers_on_origin_via_announce() {
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
+    let pg = OriginPgwire::connect().await;
+
+    // Deliberately NOT creating the collection on Origin.
+    let lite = open_lite().await;
+    lite.create_collection(COLLECTION, &[])
+        .await
+        .expect("Lite create_collection spatial_sync_test");
+
+    let _sync = start_sync(Arc::clone(&lite), 23).await;
+
+    let points: &[(&str, f64, f64)] = &[
+        ("reg_a", -0.10, 51.50),
+        ("reg_b", -0.15, 51.52),
+        ("reg_c", -0.08, 51.48),
+    ];
+    for (id, lng, lat) in points {
+        let geom = Geometry::point(*lng, *lat);
+        lite.spatial_insert(COLLECTION, FIELD, id, &geom);
+    }
+
+    // PROOF 1 — registration via the spatial-push announce (no Origin pre-create).
+    let mut catalog_visible = false;
+    let deadline = tokio::time::sleep(Duration::from_secs(10));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                if let Ok(rows) = pg
+                    .try_query("SELECT relname FROM pg_class WHERE relname = 'spatial_sync_test'")
+                    .await
+                    && !rows.is_empty()
+                {
+                    catalog_visible = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        catalog_visible,
+        "spatial_sync_test must register in Origin's pg_class via the spatial-push \
+         CollectionSchema announce (no Origin pre-create) within the deadline"
+    );
+
+    // PROOF 2 — geometries served: st_dwithin must return all 3 points.
+    let mut origin_count: usize = 0;
+    let deadline = tokio::time::sleep(Duration::from_secs(8));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                let count = query_dwithin(&pg, -0.11, 51.50, 50_000.0).await;
+                if count >= 3 {
+                    origin_count = count;
+                    break;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        origin_count, 3,
+        "Origin st_dwithin must return 3 results after registration via the \
+         spatial-push announce (no Origin pre-create); got {origin_count}"
+    );
+
+    pg.execute(&format!("DROP COLLECTION {COLLECTION}")).await;
+}

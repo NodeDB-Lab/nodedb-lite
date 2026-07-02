@@ -61,11 +61,33 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 && (u.contains("TRUE") || u.contains("=TRUE") || u.contains("= TRUE"))
         };
 
+        // Derive the exact engine type for the sync descriptor: the spatial
+        // profile registers on Origin as a spatial collection (R-tree), the
+        // plain profile as columnar. Capture the column list before the schema
+        // is moved into the engine.
+        let collection_type = match &profile {
+            nodedb_types::columnar::ColumnarProfile::Spatial {
+                geometry_column, ..
+            } => nodedb_types::collection::CollectionType::spatial(geometry_column.as_str()),
+            _ => nodedb_types::collection::CollectionType::columnar(),
+        };
+        let fields: Vec<(String, String)> = columnar_schema
+            .columns
+            .iter()
+            .map(|c| (c.name.clone(), c.column_type.to_string()))
+            .collect();
+
         self.columnar
             .create_collection(&name, columnar_schema, profile, bitemporal)
             .await?;
 
         self.register_columnar_collection(&name);
+
+        // Persist a CollectionMeta so the sync layer can announce this
+        // lite-only collection to Origin (columnar/spatial creates otherwise
+        // leave no metadata for `get_collection_meta` to read).
+        self.persist_engine_collection_meta(&name, collection_type, fields, bitemporal)
+            .await?;
 
         Ok(QueryResult {
             columns: vec!["result".into()],
@@ -82,6 +104,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         name: &str,
     ) -> Result<QueryResult, LiteError> {
         self.columnar.drop_collection(name).await?;
+        self.remove_engine_collection_meta(name).await?;
 
         Ok(QueryResult {
             columns: vec!["result".into()],

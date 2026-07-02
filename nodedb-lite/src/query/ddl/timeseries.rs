@@ -34,6 +34,20 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 )
             })?;
 
+        // Capture the exact engine type + column list for the sync descriptor
+        // before `schema` is moved into the engine. `CollectionType::timeseries`
+        // carries the real time key and interval so the announce is lossless
+        // (string-tag synthesis would default both).
+        let collection_type = nodedb_types::collection::CollectionType::timeseries(
+            time_key.as_str(),
+            interval.as_str(),
+        );
+        let fields: Vec<(String, String)> = schema
+            .columns
+            .iter()
+            .map(|c| (c.name.clone(), c.column_type.to_string()))
+            .collect();
+
         let profile = ColumnarProfile::Timeseries {
             time_key,
             interval: interval.clone(),
@@ -44,6 +58,11 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             .await?;
 
         self.register_columnar_collection(&name);
+
+        // Persist a CollectionMeta so the sync layer can announce this
+        // lite-only timeseries collection to Origin.
+        self.persist_engine_collection_meta(&name, collection_type, fields, false)
+            .await?;
 
         Ok(QueryResult {
             columns: vec!["result".into()],
