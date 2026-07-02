@@ -496,7 +496,7 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
                     None
                 }
             },
-            Ok(None) => None,
+            Ok(None) => self.implicit_collection_meta(name),
             Err(e) => {
                 tracing::warn!(collection = name, error = %e, "get_collection_meta: storage read failed");
                 None

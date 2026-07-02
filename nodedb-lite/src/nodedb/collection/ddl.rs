@@ -92,6 +92,37 @@ impl<S: StorageEngine> NodeDbLite<S> {
         Ok(())
     }
 
+    /// Synthesize a base document `CollectionMeta` for an implicit CRDT-only
+    /// collection — one that exists in CRDT state (created by a document upsert,
+    /// a vector insert, or an FTS write, with no explicit `create_collection`)
+    /// and therefore has no persisted `collection:` meta. Returns `None` if the
+    /// collection is not present in CRDT state (or is an internal `__` name).
+    ///
+    /// Mirrors the synthetic entry [`list_collections`](Self::list_collections)
+    /// already produces for implicit collections, so the outbound sync announce
+    /// path can register such collections on Origin with a base document
+    /// descriptor before their overlay (vector/FTS) or document data arrives.
+    /// Equivalent to the meta an explicit `create_collection` would persist
+    /// (`collection_type = "document"`, no `descriptor_json`).
+    pub(crate) fn implicit_collection_meta(&self, name: &str) -> Option<CollectionMeta> {
+        if name.starts_with("__") {
+            return None;
+        }
+        let crdt = self.crdt.lock_or_recover();
+        if !crdt.collection_names().iter().any(|n| n == name) {
+            return None;
+        }
+        Some(CollectionMeta {
+            name: name.to_string(),
+            collection_type: "document".to_string(),
+            created_at_ms: 0,
+            fields: Vec::new(),
+            config_json: None,
+            descriptor_json: None,
+            bitemporal: false,
+        })
+    }
+
     /// Drop a collection — deletes all documents and metadata.
     ///
     /// Uses `clear_collection` for single-batch deletion (one Loro delta
