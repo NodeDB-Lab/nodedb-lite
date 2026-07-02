@@ -120,8 +120,16 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         _column_defaults: &[(String, String)],
         if_absent: bool,
         _column_schema: &[(String, String)],
+        primary_key: Option<&str>,
     ) -> Result<LiteFut<'a>, LiteError> {
-        lower_insert(self.engine, collection, engine_type, rows, if_absent)
+        lower_insert(
+            self.engine,
+            collection,
+            engine_type,
+            rows,
+            if_absent,
+            primary_key,
+        )
     }
 
     fn upsert(
@@ -132,8 +140,16 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         _column_defaults: &[(String, String)],
         _on_conflict_updates: &[(String, SqlExpr)],
         _column_schema: &[(String, String)],
+        primary_key: Option<&str>,
     ) -> Result<LiteFut<'a>, LiteError> {
-        lower_insert(self.engine, collection, engine_type, rows, true)
+        lower_insert(
+            self.engine,
+            collection,
+            engine_type,
+            rows,
+            true,
+            primary_key,
+        )
     }
 
     fn update(
@@ -300,7 +316,7 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         on: &[(String, String)],
         join_type: nodedb_sql::types::query::JoinType,
         condition: Option<&SqlExpr>,
-        limit: usize,
+        limit: Option<usize>,
         projection: &[Projection],
         filters: &[Filter],
     ) -> Result<LiteFut<'a>, LiteError> {

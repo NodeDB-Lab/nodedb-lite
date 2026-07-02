@@ -67,6 +67,7 @@ impl<S: StorageEngine> SqlCatalog for LiteCatalog<S> {
                 bitemporal: false,
                 primary: nodedb_types::PrimaryEngine::Document,
                 vector_primary: None,
+                partition_strategy: nodedb_types::PartitionStrategy::default(),
             }));
         }
 
@@ -82,6 +83,7 @@ impl<S: StorageEngine> SqlCatalog for LiteCatalog<S> {
                 bitemporal: false,
                 primary: nodedb_types::PrimaryEngine::Document,
                 vector_primary: None,
+                partition_strategy: nodedb_types::PartitionStrategy::default(),
             }));
         }
 
@@ -106,6 +108,7 @@ impl<S: StorageEngine> SqlCatalog for LiteCatalog<S> {
                 bitemporal: false,
                 primary: nodedb_types::PrimaryEngine::Document,
                 vector_primary: None,
+                partition_strategy: nodedb_types::PartitionStrategy::default(),
             }));
         }
 

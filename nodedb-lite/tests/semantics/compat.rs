@@ -9,12 +9,12 @@ use crate::common::origin::OriginServer;
 use nodedb_types::sync::wire::HandshakeMsg;
 use nodedb_types::wire_version::WIRE_FORMAT_VERSION;
 
-/// §8.2a — WIRE_FORMAT_VERSION == 4 and is accepted by Origin.
+/// §8.2a — WIRE_FORMAT_VERSION == 7 and is accepted by Origin.
 ///
 /// If Origin bumps its constant without updating Lite (or vice versa), this
 /// test fails with a message pointing at the constant.
 #[tokio::test]
-async fn exact_wire_version_4_is_accepted() {
+async fn exact_wire_version_7_is_accepted() {
     let Some(_server) = OriginServer::try_spawn() else {
         eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
         return;
@@ -22,12 +22,12 @@ async fn exact_wire_version_4_is_accepted() {
     let mut ws = raw_connect(_server.ws_url).await;
 
     assert_eq!(
-        WIRE_FORMAT_VERSION, 4,
-        "Lite WIRE_FORMAT_VERSION drifted from 4; update this test and the protocol doc"
+        WIRE_FORMAT_VERSION, 7,
+        "Lite WIRE_FORMAT_VERSION drifted from 7; update this test and the protocol doc"
     );
 
     let hs = HandshakeMsg {
-        wire_version: 4,
+        wire_version: 7,
         ..minimal_hs()
     };
     send_hs(&mut ws, &hs).await;
@@ -35,12 +35,12 @@ async fn exact_wire_version_4_is_accepted() {
 
     assert!(
         ack.success,
-        "wire_version=4 must be accepted; error: {:?}",
+        "wire_version=7 must be accepted; error: {:?}",
         ack.error
     );
     assert_eq!(
-        ack.server_wire_version, 4,
-        "server_wire_version must be 4; if this fails Origin bumped its constant without updating Lite"
+        ack.server_wire_version, 7,
+        "server_wire_version must be 7; if this fails Origin bumped its constant without updating Lite"
     );
 }
 
@@ -73,12 +73,12 @@ async fn wire_version_zero_is_rejected() {
     );
 }
 
-/// §8.2c — Wire version 3 (one below current floor) must be rejected.
+/// §8.2c — Wire version 6 (one below current floor) must be rejected.
 ///
-/// MIN_WIRE_FORMAT_VERSION == WIRE_FORMAT_VERSION == 4.  Any version below 4
+/// MIN_WIRE_FORMAT_VERSION == WIRE_FORMAT_VERSION == 7.  Any version below 7
 /// must fail.
 #[tokio::test]
-async fn wire_version_3_is_rejected() {
+async fn wire_version_6_is_rejected() {
     let Some(_server) = OriginServer::try_spawn() else {
         eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
         return;
@@ -86,7 +86,7 @@ async fn wire_version_3_is_rejected() {
     let mut ws = raw_connect(_server.ws_url).await;
 
     let hs = HandshakeMsg {
-        wire_version: 3,
+        wire_version: 6,
         ..minimal_hs()
     };
     send_hs(&mut ws, &hs).await;
@@ -94,7 +94,7 @@ async fn wire_version_3_is_rejected() {
 
     assert!(
         !ack.success,
-        "wire_version=3 must be rejected (floor is 4); if this passes Origin relaxed MIN_WIRE_FORMAT_VERSION"
+        "wire_version=6 must be rejected (floor is 7); if this passes Origin relaxed MIN_WIRE_FORMAT_VERSION"
     );
 }
 

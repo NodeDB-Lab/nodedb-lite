@@ -36,6 +36,39 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             }))
         }
 
+        CrdtOp::ImportSnapshot { bytes, .. } => {
+            let bytes = bytes.clone();
+            Ok(Box::pin(async move {
+                crdt_ops::write::handle_import_snapshot(engine, &bytes).await
+            }))
+        }
+
+        // Constraint install/read/drop require the `nodedb_crdt::validator`
+        // Constraint-checking subsystem (UNIQUE/FK/NOT NULL validation
+        // against a per-collection constraint set). Lite has no local
+        // validator wiring today — it only uses `nodedb_crdt::validator`'s
+        // `Violation`/`Constraint` *types* to interpret Origin-issued
+        // rejections in `reject_delta_with_policy`, not to validate writes
+        // itself. Building constraint enforcement locally is a real feature,
+        // not a compile fix, so these are unsupported until that lands.
+        CrdtOp::SetConstraints { .. } => Err(LiteError::Unsupported {
+            detail: "SetConstraints requires the CRDT validator constraint subsystem, \
+                     which Lite does not implement locally"
+                .into(),
+        }),
+
+        CrdtOp::DropConstraints { .. } => Err(LiteError::Unsupported {
+            detail: "DropConstraints requires the CRDT validator constraint subsystem, \
+                     which Lite does not implement locally"
+                .into(),
+        }),
+
+        CrdtOp::ReadConstraints { .. } => Err(LiteError::Unsupported {
+            detail: "ReadConstraints requires the CRDT validator constraint subsystem, \
+                     which Lite does not implement locally"
+                .into(),
+        }),
+
         CrdtOp::SetPolicy {
             collection,
             policy_json,
@@ -67,11 +100,13 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             }))
         }
 
-        CrdtOp::GetVersionVector => Ok(Box::pin(async move {
+        CrdtOp::GetVersionVector { .. } => Ok(Box::pin(async move {
             crdt_ops::version::handle_get_version_vector(engine).await
         })),
 
-        CrdtOp::ExportDelta { from_version_json } => {
+        CrdtOp::ExportDelta {
+            from_version_json, ..
+        } => {
             let from_json = from_version_json.clone();
             Ok(Box::pin(async move {
                 crdt_ops::version::handle_export_delta(engine, &from_json).await
@@ -95,6 +130,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
 
         CrdtOp::CompactAtVersion {
             target_version_json,
+            ..
         } => {
             let target_json = target_version_json.clone();
             Ok(Box::pin(async move {

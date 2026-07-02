@@ -335,6 +335,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         engine: &EngineType,
         rows: &[Vec<(String, SqlValue)>],
         if_absent: bool,
+        primary_key: Option<&str>,
     ) -> Result<QueryResult, LiteError> {
         if *engine == EngineType::DocumentStrict {
             return super::strict_dml::insert_strict(&self.strict, collection, rows, if_absent)
@@ -362,7 +363,10 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         for row in rows {
             let id = row
                 .iter()
-                .find(|(k, _)| k == "id")
+                .find(|(k, _)| match primary_key {
+                    Some(pk) => k == pk,
+                    None => k == "id",
+                })
                 .map(|(_, v)| sql_value_to_string(v))
                 .unwrap_or_default();
             if crdt.exists(collection, &id) {

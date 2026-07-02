@@ -84,12 +84,20 @@ pub(super) fn lower_insert<'a, S: StorageEngine + 'a>(
     engine_type: EngineType,
     rows: &[Vec<(String, SqlValue)>],
     if_absent: bool,
+    primary_key: Option<&str>,
 ) -> Result<LiteFut<'a>, LiteError> {
     let collection = collection.to_string();
     let rows = rows.to_vec();
+    let primary_key = primary_key.map(str::to_string);
     Ok(Box::pin(async move {
         engine
-            .execute_insert(&collection, &engine_type, &rows, if_absent)
+            .execute_insert(
+                &collection,
+                &engine_type,
+                &rows,
+                if_absent,
+                primary_key.as_deref(),
+            )
             .await
     }))
 }

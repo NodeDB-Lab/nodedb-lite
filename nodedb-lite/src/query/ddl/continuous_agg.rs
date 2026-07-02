@@ -189,6 +189,7 @@ fn parse_create_sql(sql: &str) -> Result<ContinuousAggregateDef, LiteError> {
     let (refresh_policy, retention_period_ms) = extract_with_options(&upper, sql);
 
     Ok(ContinuousAggregateDef {
+        database_id: nodedb_types::id::DatabaseId::DEFAULT.as_u64(),
         name,
         source,
         bucket_interval,

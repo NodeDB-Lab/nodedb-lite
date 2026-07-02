@@ -105,6 +105,7 @@ where
             dim,
             field_name,
             surrogate,
+            pk_bytes: _,
             provenance: _,
         } => {
             if vector.len() != *dim {
@@ -394,6 +395,7 @@ mod tests {
             dim: 4,
             field_name: String::new(),
             surrogate: Surrogate::new(1u32),
+            pk_bytes: None,
             provenance: None,
         };
         let fut = super::execute_vector_op(&engine, &op)
@@ -415,6 +417,7 @@ mod tests {
             dim: 4,
             field_name: String::new(),
             surrogate: Surrogate::new(42u32),
+            pk_bytes: None,
             provenance: None,
         };
         super::execute_vector_op(&engine, &insert_op)

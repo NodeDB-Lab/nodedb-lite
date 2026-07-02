@@ -2,8 +2,11 @@
 
 //! Graph operation dispatcher for the Lite physical visitor.
 //!
-//! Exhaustively matches all 17 `GraphOp` variants. `RagFusion` and `Match`
-//! are wired to their writer-2 placeholder stubs.
+//! Exhaustively matches all 21 `GraphOp` variants. `RagFusion` and `Match`
+//! are wired to their writer-2 placeholder stubs. `MatchContinuation`,
+//! `MatchVarLenResume`, `BspSuperstep`, and `WccSuperstep` are cross-shard
+//! distributed primitives with no single-node equivalent and return
+//! `LiteError::Unsupported`.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -72,6 +75,7 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             src_id,
             label,
             dst_id,
+            ..
         } => {
             let storage = engine.storage.clone();
             let csr_map = engine.csr.clone();
@@ -419,9 +423,47 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             })
         }
 
+        // Cross-shard MATCH continuation / var-len resume and the BSP
+        // superstep primitives (PageRank/WCC) exist to let a distributed
+        // coordinator round-trip partial state across owning shards. Lite is
+        // single-node — there are no shards to resume on or stitch together
+        // — so these have no local execution path.
+        GraphOp::MatchContinuation { .. } => Box::pin(async move {
+            Err(LiteError::Unsupported {
+                detail: "MatchContinuation is a cross-shard MATCH resume primitive; \
+                         unsupported on the single-node Lite engine"
+                    .into(),
+            })
+        }),
+
+        GraphOp::MatchVarLenResume { .. } => Box::pin(async move {
+            Err(LiteError::Unsupported {
+                detail: "MatchVarLenResume is a cross-shard MATCH resume primitive; \
+                         unsupported on the single-node Lite engine"
+                    .into(),
+            })
+        }),
+
+        GraphOp::BspSuperstep(_) => Box::pin(async move {
+            Err(LiteError::Unsupported {
+                detail: "BspSuperstep is a distributed PageRank BSP primitive; \
+                         unsupported on the single-node Lite engine"
+                    .into(),
+            })
+        }),
+
+        GraphOp::WccSuperstep(_) => Box::pin(async move {
+            Err(LiteError::Unsupported {
+                detail: "WccSuperstep is a distributed WCC contraction primitive; \
+                         unsupported on the single-node Lite engine"
+                    .into(),
+            })
+        }),
+
         GraphOp::Match {
             query,
             frontier_bitmap,
+            ..
         } => {
             let csr_map = Arc::clone(&engine.csr);
             let crdt = Arc::clone(&engine.crdt);

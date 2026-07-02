@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! QueryOp dispatch for the Lite physical visitor.
 //!
-//! Routes all 13 QueryOp variants. 8 are fully implemented; 5 call writer-B
-//! placeholder helpers that return `LiteError::Storage` until writer B lands.
+//! Routes all 15 QueryOp variants. The distributed-only variants (`Exchange`,
+//! `ProviderScan`, `PartialAggregateState`, `ShuffleJoinConsume`,
+//! `ShuffleAggregateConsume`) have no single-node equivalent and can never be
+//! produced by Lite's own planner, so they return `LiteError::Unsupported`
+//! defensively if one ever reaches this dispatcher.
 
 use nodedb_physical::physical_plan::QueryOp;
 
@@ -13,9 +16,8 @@ use crate::query::query_ops::{
     aggregate::{execute_aggregate, execute_partial_aggregate},
     facets::execute_facet_counts,
     joins::{
-        broadcast::execute_broadcast_join, hash::execute_hash_join,
-        inline_hash::execute_inline_hash_join, nested_loop::execute_nested_loop_join,
-        shuffle::execute_shuffle_join, sort_merge::execute_sort_merge_join,
+        hash::execute_hash_join, nested_loop::execute_nested_loop_join,
+        sort_merge::execute_sort_merge_join,
     },
     lateral_loop::execute_lateral_loop,
     lateral_top_k::execute_lateral_top_k,
@@ -39,9 +41,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             having,
             sort_keys,
             grouping_sets,
-            limit: _,
-            sub_group_by: _,
-            sub_aggregates: _,
+            ..
         } => {
             let collection = collection.clone();
             let group_by = group_by.clone();
@@ -80,6 +80,10 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             }))
         }
 
+        QueryOp::PartialAggregateState { .. } => Err(LiteError::Unsupported {
+            detail: "PartialAggregateState is a distributed shuffle-map op; unsupported on the single-node Lite engine".into(),
+        }),
+
         QueryOp::HashJoin {
             left_collection,
             right_collection,
@@ -92,10 +96,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             post_aggregates,
             projection,
             post_filters,
-            inline_left: _,
-            inline_right: _,
-            inline_left_bitmap: _,
-            inline_right_bitmap: _,
+            ..
         } => {
             let lc = left_collection.clone();
             let rc = right_collection.clone();
@@ -127,93 +128,21 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             }))
         }
 
-        QueryOp::InlineHashJoin {
-            left_data,
-            right_data,
-            right_alias,
-            on,
-            join_type,
-            limit,
-            projection,
-            post_filters,
-        } => {
-            let ld = left_data.clone();
-            let rd = right_data.clone();
-            let ra = right_alias.clone();
-            let on = on.clone();
-            let jt = join_type.clone();
-            let lim = *limit;
-            let proj = projection.clone();
-            let pf = post_filters.clone();
-            Ok(Box::pin(async move {
-                execute_inline_hash_join(&ld, &rd, ra.as_deref(), &on, &jt, lim, &proj, &pf)
-            }))
-        }
+        QueryOp::Exchange(_) => Err(LiteError::Unsupported {
+            detail: "Exchange is a coordinator-resolved data-movement wrapper; unsupported on the single-node Lite engine".into(),
+        }),
 
-        QueryOp::BroadcastJoin {
-            large_collection,
-            small_collection,
-            large_alias,
-            small_alias,
-            broadcast_data,
-            on,
-            join_type,
-            limit,
-            post_group_by,
-            post_aggregates,
-            projection,
-            post_filters,
-        } => {
-            let lc = large_collection.clone();
-            let sc = small_collection.clone();
-            let la = large_alias.clone();
-            let sa = small_alias.clone();
-            let bd = broadcast_data.clone();
-            let on = on.clone();
-            let jt = join_type.clone();
-            let lim = *limit;
-            let pg = post_group_by.clone();
-            let pa = post_aggregates.clone();
-            let proj = projection.clone();
-            let pf = post_filters.clone();
-            Ok(Box::pin(async move {
-                execute_broadcast_join(
-                    engine,
-                    &lc,
-                    &sc,
-                    la.as_deref(),
-                    sa.as_deref(),
-                    &bd,
-                    &on,
-                    &jt,
-                    lim,
-                    &pg,
-                    &pa,
-                    &proj,
-                    &pf,
-                )
-                .await
-            }))
-        }
+        QueryOp::ProviderScan { .. } => Err(LiteError::Unsupported {
+            detail: "ProviderScan is coordinator-materialized catalog scan; unsupported on the single-node Lite engine".into(),
+        }),
 
-        QueryOp::ShuffleJoin {
-            left_collection,
-            right_collection,
-            on,
-            join_type,
-            limit,
-            target_core,
-        } => {
-            let lc = left_collection.clone();
-            let rc = right_collection.clone();
-            let on = on.clone();
-            let jt = join_type.clone();
-            let lim = *limit;
-            let tc = *target_core;
-            Ok(Box::pin(async move {
-                execute_shuffle_join(engine, &lc, &rc, &on, &jt, lim, tc).await
-            }))
-        }
+        QueryOp::ShuffleJoinConsume { .. } => Err(LiteError::Unsupported {
+            detail: "ShuffleJoinConsume is a cross-node shuffle-join consumer; unsupported on the single-node Lite engine".into(),
+        }),
+
+        QueryOp::ShuffleAggregateConsume { .. } => Err(LiteError::Unsupported {
+            detail: "ShuffleAggregateConsume is a cross-node shuffle-aggregate consumer; unsupported on the single-node Lite engine".into(),
+        }),
 
         QueryOp::NestedLoopJoin {
             left_collection,

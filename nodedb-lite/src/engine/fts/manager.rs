@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use tracing;
 
 use nodedb_fts::FtsIndex;
+use nodedb_fts::FtsSearchParams;
 use nodedb_fts::backend::memory::MemoryBackend;
 use nodedb_fts::posting::QueryMode as FtsQueryMode;
 use nodedb_types::Surrogate;
@@ -115,8 +116,8 @@ impl FtsCollectionManager {
             .entry(key.clone())
             .or_insert_with(|| FtsIndex::new(MemoryBackend::new()));
         // Remove old entry first (upsert semantics).
-        let _ = idx.remove_document(0, &key, surrogate);
-        let _ = idx.index_document(0, &key, surrogate, text);
+        let _ = idx.remove_document(0, 0, &key, surrogate);
+        let _ = idx.index_document(0, 0, &key, surrogate, text);
     }
 
     /// Remove a document from the whole-document index.
@@ -126,7 +127,7 @@ impl FtsCollectionManager {
         };
         let key = format!("{collection}:_doc");
         if let Some(idx) = self.indices.get_mut(&key) {
-            let _ = idx.remove_document(0, &key, surrogate);
+            let _ = idx.remove_document(0, 0, &key, surrogate);
         }
     }
 
@@ -151,7 +152,18 @@ impl FtsCollectionManager {
             _ => FtsQueryMode::Or,
         };
         let raw = idx
-            .search_with_mode(0, &key, query, top_k, params.fuzzy, mode, None)
+            .search(
+                0,
+                0,
+                &key,
+                FtsSearchParams {
+                    query,
+                    top_k,
+                    fuzzy_enabled: params.fuzzy,
+                    mode,
+                    prefilter: None,
+                },
+            )
             .inspect_err(|e| tracing::warn!(collection, error = %e, "fts search failed"))
             .unwrap_or_default();
         raw.into_iter()
@@ -210,7 +222,18 @@ impl FtsCollectionManager {
         // bound and avoids passing usize::MAX which causes a heap allocation overflow.
         let total_known = self.surrogate_to_id.len().max(1);
         let hits: HashMap<u32, f32> = idx
-            .search_with_mode(0, &key, query, total_known, params.fuzzy, mode, None)
+            .search(
+                0,
+                0,
+                &key,
+                FtsSearchParams {
+                    query,
+                    top_k: total_known,
+                    fuzzy_enabled: params.fuzzy,
+                    mode,
+                    prefilter: None,
+                },
+            )
             .inspect_err(|e| tracing::warn!(collection, error = %e, "bm25 scan failed"))
             .unwrap_or_default()
             .into_iter()
@@ -263,14 +286,17 @@ impl FtsCollectionManager {
         let query = terms.join(" ");
         let candidate_limit = (top_k * 10).max(100).min(self.surrogate_to_id.len().max(1));
         let or_hits = idx
-            .search_with_mode(
+            .search(
+                0,
                 0,
                 &key,
-                &query,
-                candidate_limit,
-                params.fuzzy,
-                FtsQueryMode::Or,
-                None,
+                FtsSearchParams {
+                    query: &query,
+                    top_k: candidate_limit,
+                    fuzzy_enabled: params.fuzzy,
+                    mode: FtsQueryMode::Or,
+                    prefilter: None,
+                },
             )
             .inspect_err(|e| tracing::warn!(collection, error = %e, "phrase search or-pass failed"))
             .unwrap_or_default();
@@ -289,7 +315,9 @@ impl FtsCollectionManager {
                 let term_positions: Vec<Vec<u32>> = terms
                     .iter()
                     .map(|term| {
-                        let scoped = format!("0:{key}:{term}");
+                        // Memtable key scope is `{database_id}:{tenant}:{collection}:{term}`;
+                        // Lite is single-database/single-tenant, so both ids are 0.
+                        let scoped = format!("0:0:{key}:{term}");
                         idx.memtable()
                             .get_postings(&scoped)
                             .into_iter()
@@ -391,8 +419,8 @@ impl FtsCollectionManager {
             .indices
             .entry(key.clone())
             .or_insert_with(|| FtsIndex::new(MemoryBackend::new()));
-        let _ = idx.remove_document(0, &key, surrogate);
-        let _ = idx.index_document(0, &key, surrogate, text);
+        let _ = idx.remove_document(0, 0, &key, surrogate);
+        let _ = idx.index_document(0, 0, &key, surrogate, text);
     }
 
     /// Remove all field entries for a document across all fields in a collection.
@@ -402,7 +430,7 @@ impl FtsCollectionManager {
         };
         let key = format!("{collection}:{field}");
         if let Some(idx) = self.indices.get_mut(&key) {
-            let _ = idx.remove_document(0, &key, surrogate);
+            let _ = idx.remove_document(0, 0, &key, surrogate);
         }
     }
 

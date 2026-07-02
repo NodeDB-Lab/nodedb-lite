@@ -123,6 +123,7 @@ pub(super) fn handle_reject_with_policy_impl<S: StorageEngine>(
         Some(nodedb_crdt::PolicyResolution::Deferred {
             retry_after_ms,
             attempt,
+            ..
         }) => {
             tracing::info!(
                 mutation_id,
@@ -131,7 +132,7 @@ pub(super) fn handle_reject_with_policy_impl<S: StorageEngine>(
                 "SyncDelegate: delta deferred for retry"
             );
         }
-        Some(nodedb_crdt::PolicyResolution::Escalate) => {
+        Some(nodedb_crdt::PolicyResolution::Escalate { .. }) => {
             tracing::warn!(mutation_id, "SyncDelegate: delta escalated to DLQ (policy)");
         }
         Some(nodedb_crdt::PolicyResolution::WebhookRequired { webhook_url, .. }) => {

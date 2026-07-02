@@ -47,6 +47,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             tenant_id,
             old_collection,
             new_collection,
+            ..
         } => {
             let tid = *tenant_id;
             let old = old_collection.clone();
@@ -264,9 +265,6 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             }))
         }
         // ── Origin-only ops that Lite's plan converter never emits ───────────
-        MetaOp::RawResponse { .. } => {
-            meta_ops::handle_raw_response();
-        }
         MetaOp::CreateTenantSnapshot { tenant_id } => {
             let tid = *tenant_id;
             let storage = engine.storage.clone();
@@ -277,6 +275,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
         MetaOp::RestoreTenantSnapshot {
             tenant_id,
             snapshot,
+            ..
         } => {
             let tid = *tenant_id;
             let snap = snapshot.clone();

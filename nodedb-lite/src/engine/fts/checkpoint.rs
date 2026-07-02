@@ -114,6 +114,7 @@ fn metadata_ops_for_index(
     ops: &mut Vec<WriteOp>,
 ) -> NodeDbResult<()> {
     const TID: u64 = 0;
+    const DB: u64 = 0;
     let mt = idx.memtable();
 
     // ── Doc lengths (per-doc lengths needed by BM25 scoring) ─────────────────
@@ -129,7 +130,7 @@ fn metadata_ops_for_index(
     for &s in &surrogates {
         if let Some(len) = idx
             .backend()
-            .read_doc_length(TID, index_key, Surrogate(s))
+            .read_doc_length(DB, TID, index_key, Surrogate(s))
             .map_err(|e| NodeDbError::storage(format!("fts doc_len: {e}")))?
         {
             doclens.push((s, len));
@@ -150,7 +151,7 @@ fn metadata_ops_for_index(
     for &subkey in META_SUBKEYS {
         if let Some(data) = idx
             .backend()
-            .read_meta(TID, index_key, subkey)
+            .read_meta(DB, TID, index_key, subkey)
             .map_err(|e| NodeDbError::storage(format!("fts meta read: {e}")))?
         {
             let meta_key = format!("fts:{index_key}:meta:{subkey}");
@@ -296,6 +297,7 @@ where
     S: StorageEngine,
 {
     const TID: u64 = 0;
+    const DB: u64 = 0;
 
     // ── Read collection list ──────────────────────────────────────────────────
     let Some(keys_bytes) = storage.get(Namespace::Fts, b"fts:_collections").await? else {
@@ -406,8 +408,8 @@ where
             for (s, len) in pairs {
                 let _ = idx
                     .backend()
-                    .write_doc_length(TID, index_key, Surrogate(s), len);
-                let _ = idx.backend().increment_stats(TID, index_key, len);
+                    .write_doc_length(DB, TID, index_key, Surrogate(s), len);
+                let _ = idx.backend().increment_stats(DB, TID, index_key, len);
             }
         }
 
@@ -415,7 +417,7 @@ where
         for &subkey in META_SUBKEYS {
             let meta_key = format!("fts:{index_key}:meta:{subkey}");
             if let Some(data) = storage.get(Namespace::Fts, meta_key.as_bytes()).await? {
-                let _ = idx.backend().write_meta(TID, index_key, subkey, &data);
+                let _ = idx.backend().write_meta(DB, TID, index_key, subkey, &data);
             }
         }
 

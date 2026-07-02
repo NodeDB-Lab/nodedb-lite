@@ -39,6 +39,27 @@ pub async fn handle_apply<S: StorageEngine>(
     }
 }
 
+/// Import a per-collection Loro snapshot (durable RESTORE re-issue path).
+///
+/// A snapshot is just a Loro-encoded update set scoped to one collection's
+/// container; `CrdtState::import` (aka `import_remote`) is a monotonic,
+/// idempotent, commutative merge that resolves the target container by name
+/// from the encoded bytes themselves (see `CrdtState`'s container-naming
+/// doc comment), so re-using the same import path used for remote deltas is
+/// correct here too — no per-collection document split is needed on Lite.
+pub async fn handle_import_snapshot<S: StorageEngine>(
+    engine: &LiteQueryEngine<S>,
+    bytes: &[u8],
+) -> Result<QueryResult, LiteError> {
+    let crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
+    crdt.import_remote(bytes)?;
+    Ok(QueryResult {
+        columns: vec![],
+        rows: vec![],
+        rows_affected: 1,
+    })
+}
+
 /// Set the conflict resolution policy for a CRDT collection.
 pub async fn handle_set_policy<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,

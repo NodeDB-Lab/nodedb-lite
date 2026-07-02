@@ -76,7 +76,7 @@ fn assert_deferred(resolution: Option<PolicyResolution>) {
 /// Assert that `resolution` is `Escalate`.
 fn assert_escalate(resolution: Option<PolicyResolution>) {
     match resolution {
-        Some(PolicyResolution::Escalate) => {}
+        Some(PolicyResolution::Escalate { .. }) => {}
         other => panic!("expected Escalate, got {other:?}"),
     }
 }
@@ -379,7 +379,7 @@ fn policy_resolution_matrix() {
         let actual = match &resolution {
             Some(PolicyResolution::AutoResolved(_)) => "AutoResolved",
             Some(PolicyResolution::Deferred { .. }) => "Deferred",
-            Some(PolicyResolution::Escalate) => "Escalate",
+            Some(PolicyResolution::Escalate { .. }) => "Escalate",
             Some(PolicyResolution::WebhookRequired { .. }) => "WebhookRequired",
             None => "(none)",
         };
@@ -450,7 +450,7 @@ fn auto_resolved_unique_renames_field_in_local_state() {
                 "renamed value must start with original: {new_value}"
             );
         }
-        Some(PolicyResolution::Escalate) => {
+        Some(PolicyResolution::Escalate { .. }) => {
             // read_row returned None (document might not exist in CRDT state
             // before the delta is applied). Escalate is the documented fallback.
         }

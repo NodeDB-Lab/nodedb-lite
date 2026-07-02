@@ -172,13 +172,14 @@ pub(super) fn lower_join<'a, S: StorageEngine + 'a>(
     on: &[(String, String)],
     join_type: JoinType,
     _condition: Option<&SqlExpr>,
-    limit: usize,
+    limit: Option<usize>,
     projection: &[Projection],
     filters: &[Filter],
 ) -> Result<LiteFut<'a>, LiteError> {
     let left = left.clone();
     let right = right.clone();
     let on = on.to_vec();
+    let limit = limit.unwrap_or(usize::MAX);
     // JoinType debug output: Inner, Left, Right, Full — lower to string for hash join.
     let join_type_str = format!("{join_type:?}").to_lowercase();
     let proj: Vec<JoinProjection> = projection
