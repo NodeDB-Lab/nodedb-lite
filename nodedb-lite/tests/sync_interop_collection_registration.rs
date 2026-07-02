@@ -174,10 +174,12 @@ async fn document_collection_registers_on_origin_via_announce() {
          CollectionSchema announce (no Origin pre-create) within the deadline"
     );
 
-    // PROOF 2 — data served: the synced documents must be queryable on Origin.
-    // Synced schemaless documents are read via the always-on BM25 index
-    // (`text_match`), the same read path the FTS interop test exercises; each
-    // body contains the term "registration".
+    // PROOF 2 — shape-servable: a plain document scan (`SELECT id`, the same
+    // `DocumentScan` path a `ShapeSnapshot` uses) must return all 3 synced
+    // documents. This is the literal #146 symptom: before the Origin-side
+    // CRDT-delta materialization fix, the synced deltas were acked but never
+    // written to the sparse document store, so this scan returned 0 rows
+    // (ShapeSnapshot doc_count=0). It must now return 3.
     let mut origin_row_count: usize = 0;
     let deadline = tokio::time::sleep(Duration::from_secs(8));
     tokio::pin!(deadline);
@@ -185,12 +187,7 @@ async fn document_collection_registers_on_origin_via_announce() {
         tokio::select! {
             _ = &mut deadline => break,
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                if let Ok(rows) = pg
-                    .try_query(
-                        "SELECT id FROM doc_reg_test \
-                         WHERE text_match(body, 'registration') LIMIT 10",
-                    )
-                    .await
+                if let Ok(rows) = pg.try_query("SELECT id FROM doc_reg_test").await
                     && rows.len() >= 3
                 {
                     origin_row_count = rows.len();
@@ -201,8 +198,37 @@ async fn document_collection_registers_on_origin_via_announce() {
     }
     assert_eq!(
         origin_row_count, 3,
-        "Origin must serve 3 synced documents for doc_reg_test after registration \
-         via the CollectionSchema announce (no Origin pre-create); got {origin_row_count}"
+        "Origin must serve 3 synced documents via a plain document scan for \
+         doc_reg_test after registration via the CollectionSchema announce \
+         (no Origin pre-create); got {origin_row_count}"
+    );
+
+    // PROOF 3 — shape-servable materialization (the exact #146 symptom): a
+    // plain document scan (`SELECT id`, no text_match) must also return the 3
+    // synced rows. This is the path `DocumentScan` / `ShapeSnapshot` read, so a
+    // non-zero count here means the CRDT deltas materialized into the sparse
+    // document store — i.e. the collection is shape-servable, not just
+    // FTS-searchable.
+    let mut scan_row_count: usize = 0;
+    let deadline = tokio::time::sleep(Duration::from_secs(8));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                if let Ok(rows) = pg.try_query("SELECT id FROM doc_reg_test").await
+                    && rows.len() >= 3
+                {
+                    scan_row_count = rows.len();
+                    break;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        scan_row_count, 3,
+        "Origin plain document scan must return 3 synced rows (shape-servable) \
+         after CRDT deltas materialize into the document store; got {scan_row_count}"
     );
 
     // Cleanup.
