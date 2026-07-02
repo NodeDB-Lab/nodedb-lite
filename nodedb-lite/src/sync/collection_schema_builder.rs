@@ -47,8 +47,13 @@ pub(crate) fn descriptor_from_meta(meta: &CollectionMeta) -> Option<CollectionDe
     let partition_strategy = PartitionStrategy::default_for_collection_type(&collection_type);
 
     Some(CollectionDescriptor {
+        // Lite is single-tenant (tenant 1, matching the sync session identity)
+        // and single-database. The announced descriptor MUST carry the same
+        // (tenant, database) the synced data lands under on Origin — deltas
+        // apply under `DatabaseId::DEFAULT` (0), so registering the collection
+        // under any other database would make it invisible to queries.
         tenant_id: 1,
-        database_id: DatabaseId::new(1),
+        database_id: DatabaseId::DEFAULT,
         name: meta.name.clone(),
         collection_type,
         bitemporal: meta.bitemporal,

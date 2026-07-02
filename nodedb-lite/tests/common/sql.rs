@@ -64,6 +64,13 @@ impl OriginPgwire {
             .unwrap_or_else(|e| panic!("Origin query failed: {e}\nSQL: {sql}"))
     }
 
+    /// Execute a query, returning the raw `tokio_postgres` error instead of
+    /// panicking. Useful for bounded-retry polling where "relation does not
+    /// exist yet" is an expected transient state to be retried, not a failure.
+    pub async fn try_query(&self, sql: &str) -> Result<Vec<Row>, tokio_postgres::Error> {
+        self.client.query(sql, &[]).await
+    }
+
     /// Execute a SQL statement that returns no rows (DDL/DML).
     pub async fn execute(&self, sql: &str) {
         self.client.execute(sql, &[]).await.unwrap_or_else(|e| {
