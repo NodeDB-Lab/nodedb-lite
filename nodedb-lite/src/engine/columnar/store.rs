@@ -24,7 +24,67 @@ use nodedb_types::columnar::{ColumnarProfile, ColumnarSchema};
 use nodedb_types::value::Value;
 
 use crate::error::LiteError;
+use crate::runtime::now_millis_i64;
 use crate::storage::engine::{StorageEngine, WriteOp};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::sync::outbound::columnar::ColumnarOutbound;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::sync::outbound::timeseries::TimeseriesOutbound;
+
+/// Helper: write large segment bytes via the segment ext if available, or fall
+/// back to the KV blob path.
+async fn store_segment_bytes<S: StorageEngine>(
+    storage: &S,
+    collection: &str,
+    segment_id: u32,
+    bytes: &[u8],
+) -> Result<(), LiteError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(ext) = storage.as_columnar_segment_ext() {
+        return ext
+            .write_columnar_segment(collection, segment_id, bytes)
+            .await;
+    }
+    let seg_key = format!("{collection}:seg:{segment_id}");
+    storage
+        .put(Namespace::Columnar, seg_key.as_bytes(), bytes)
+        .await
+}
+
+/// Helper: read large segment bytes via the segment ext if available, or fall
+/// back to the KV blob path.
+async fn load_segment_bytes<S: StorageEngine>(
+    storage: &S,
+    collection: &str,
+    segment_id: u32,
+) -> Result<Option<Vec<u8>>, LiteError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(ext) = storage.as_columnar_segment_ext() {
+        return ext
+            .open_columnar_segment(collection, segment_id)
+            .await
+            .map(|opt| opt.map(|b| b.into_vec()));
+    }
+    let seg_key = format!("{collection}:seg:{segment_id}");
+    storage.get(Namespace::Columnar, seg_key.as_bytes()).await
+}
+
+/// Helper: delete large segment bytes via the segment ext if available, or
+/// fall back to the KV blob path.
+async fn remove_segment_bytes<S: StorageEngine>(
+    storage: &S,
+    collection: &str,
+    segment_id: u32,
+) -> Result<(), LiteError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(ext) = storage.as_columnar_segment_ext() {
+        return ext.delete_columnar_segment(collection, segment_id).await;
+    }
+    let seg_key = format!("{collection}:seg:{segment_id}");
+    storage
+        .delete(Namespace::Columnar, seg_key.as_bytes())
+        .await
+}
 
 /// Meta key prefix for columnar schemas.
 const META_COLUMNAR_SCHEMA_PREFIX: &str = "columnar_schema:";
@@ -43,13 +103,27 @@ const META_COLUMNAR_COLLECTIONS: &[u8] = b"meta:columnar_collections";
 struct SegmentMeta {
     segment_id: u32,
     row_count: u64,
+    /// Milliseconds since Unix epoch when this segment was first written.
+    /// Used by bitemporal purge to determine which superseded segments are
+    /// eligible for deletion.
+    #[serde(default)]
+    system_time_from_ms: i64,
+    /// For bitemporal collections: the millisecond timestamp when the last
+    /// live row in this segment was deleted (compacted away). `None` means
+    /// the segment still has live rows. Segments with `Some(t)` where
+    /// `t < cutoff_ms` are eligible for physical deletion by `purge_bitemporal_before`.
+    #[serde(default)]
+    fully_deleted_at_ms: Option<i64>,
 }
 
 /// Per-collection state. Wrapped in `Mutex` inside `ColumnarEngine`.
 struct CollectionState {
     mutation: MutationEngine,
     profile: ColumnarProfile,
-    /// Ordered list of flushed segments.
+    /// Whether this collection has bitemporal system-time tracking.
+    bitemporal: bool,
+    /// Ordered list of flushed segments (including fully-deleted tombstones for
+    /// bitemporal collections — they persist until `purge_bitemporal_before` clears them).
     segments: Vec<SegmentMeta>,
     /// Next segment ID to assign.
     next_segment_id: u32,
@@ -61,6 +135,19 @@ type CollectionMap = HashMap<String, Arc<Mutex<CollectionState>>>;
 pub struct ColumnarEngine<S: StorageEngine> {
     storage: Arc<S>,
     collections: RwLock<CollectionMap>,
+    /// Optional outbound queue for plain columnar insert sync.
+    /// `None` when sync is disabled or not yet configured.
+    #[cfg(not(target_arch = "wasm32"))]
+    outbound: Option<Arc<ColumnarOutbound<S>>>,
+    /// Optional outbound queue for timeseries-profile insert sync.
+    ///
+    /// Timeseries collections must use `TimeseriesPush` frames on Origin
+    /// (the columnar `MutationEngine` and the timeseries engine are separate
+    /// storage paths on Origin).  When this queue is present, inserts into
+    /// collections with `ColumnarProfile::Timeseries` are enqueued here
+    /// instead of `outbound`.
+    #[cfg(not(target_arch = "wasm32"))]
+    timeseries_outbound: Option<Arc<TimeseriesOutbound<S>>>,
 }
 
 impl<S: StorageEngine> ColumnarEngine<S> {
@@ -69,7 +156,29 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         Self {
             storage,
             collections: RwLock::new(HashMap::new()),
+            #[cfg(not(target_arch = "wasm32"))]
+            outbound: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            timeseries_outbound: None,
         }
+    }
+
+    /// Attach a sync outbound queue for plain columnar collections.
+    ///
+    /// Must be called before any inserts if columnar sync is desired.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_outbound(&mut self, outbound: Arc<ColumnarOutbound<S>>) {
+        self.outbound = Some(outbound);
+    }
+
+    /// Attach a sync outbound queue for timeseries-profile collections.
+    ///
+    /// When set, inserts into collections with `ColumnarProfile::Timeseries`
+    /// are routed here instead of `outbound`, so the transport can send them
+    /// as `TimeseriesPush` frames to Origin's timeseries engine.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_timeseries_outbound(&mut self, outbound: Arc<TimeseriesOutbound<S>>) {
+        self.timeseries_outbound = Some(outbound);
     }
 
     /// Restore columnar collections from storage on startup.
@@ -93,6 +202,8 @@ impl<S: StorageEngine> ColumnarEngine<S> {
             struct StoredSchema {
                 schema: ColumnarSchema,
                 profile: ColumnarProfile,
+                #[serde(default)]
+                bitemporal: bool,
             }
             if let Some(schema_bytes) = storage.get(Namespace::Meta, meta_key.as_bytes()).await?
                 && let Ok(stored) = zerompk::from_msgpack::<StoredSchema>(&schema_bytes)
@@ -109,9 +220,13 @@ impl<S: StorageEngine> ColumnarEngine<S> {
                 let mut mutation = MutationEngine::new(name.clone(), stored.schema.clone());
 
                 for seg_meta in &segments {
-                    let seg_key = format!("{name}:seg:{}", seg_meta.segment_id);
+                    // Skip fully-deleted segments — they have no physical segment file.
+                    if seg_meta.fully_deleted_at_ms.is_some() {
+                        continue;
+                    }
+
                     if let Some(seg_bytes) =
-                        storage.get(Namespace::Columnar, seg_key.as_bytes()).await?
+                        load_segment_bytes(&*storage, &name, seg_meta.segment_id).await?
                         && let Ok(reader) = SegmentReader::open(&seg_bytes)
                         && let Ok(pk_col) = reader.read_column(0)
                     {
@@ -134,6 +249,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
                     Arc::new(Mutex::new(CollectionState {
                         mutation,
                         profile: stored.profile,
+                        bitemporal: stored.bitemporal,
                         segments,
                         next_segment_id: next_id,
                     })),
@@ -146,6 +262,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
             .write()
             .map_err(|_| LiteError::LockPoisoned)? = loaded;
 
+        // outbound is wired after restore by the caller (NodeDbLite::open_inner).
         Ok(engine)
     }
 
@@ -175,6 +292,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         name: &str,
         schema: ColumnarSchema,
         profile: ColumnarProfile,
+        bitemporal: bool,
     ) -> Result<(), LiteError> {
         // Snapshot existing names + dup check under read lock.
         let mut names: Vec<String> = {
@@ -196,11 +314,13 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         struct StoredSchema<'a> {
             schema: &'a ColumnarSchema,
             profile: &'a ColumnarProfile,
+            bitemporal: bool,
         }
         let meta_key = format!("{META_COLUMNAR_SCHEMA_PREFIX}{name}");
         let schema_bytes = zerompk::to_msgpack_vec(&StoredSchema {
             schema: &schema,
             profile: &profile,
+            bitemporal,
         })
         .map_err(|e| LiteError::Serialization {
             detail: e.to_string(),
@@ -230,6 +350,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         let state = CollectionState {
             mutation,
             profile,
+            bitemporal,
             segments: Vec::new(),
             next_segment_id: 1,
         };
@@ -269,12 +390,16 @@ impl<S: StorageEngine> ColumnarEngine<S> {
             (segments, names)
         };
 
+        // Delete large segment bytes via the segment ext (or KV fallback).
+        for seg in &segments {
+            if seg.fully_deleted_at_ms.is_none() {
+                remove_segment_bytes(&*self.storage, name, seg.segment_id).await?;
+            }
+        }
+
+        // Remove small B+ tree entries (delete bitmaps, metadata, schema).
         let mut ops = Vec::new();
         for seg in &segments {
-            ops.push(WriteOp::Delete {
-                ns: Namespace::Columnar,
-                key: format!("{name}:seg:{}", seg.segment_id).into_bytes(),
-            });
             ops.push(WriteOp::Delete {
                 ns: Namespace::Columnar,
                 key: format!("{name}:del:{}", seg.segment_id).into_bytes(),
@@ -392,10 +517,106 @@ impl<S: StorageEngine> ColumnarEngine<S> {
     // -- Write path --
 
     /// Insert a row into a columnar collection's memtable.
+    ///
+    /// This is a pure in-memory operation. Call [`enqueue_outbound`] from
+    /// an async context after inserting to durably enqueue the row for
+    /// replication to Origin.
     pub fn insert(&self, collection: &str, values: &[Value]) -> Result<(), LiteError> {
         let state_arc = self.lookup(collection)?;
         let mut s = Self::lock_state(&state_arc)?;
         s.mutation.insert(values).map_err(columnar_err_to_lite)?;
+        Ok(())
+    }
+
+    /// Durably enqueue a batch of inserted rows for replication to Origin.
+    ///
+    /// Must be called from an async context after one or more successful
+    /// [`insert`] calls. Timeseries-profile collections are routed to the
+    /// `timeseries_outbound` queue; all other columnar collections use the
+    /// plain `outbound` queue.
+    ///
+    /// Returns [`LiteError::Backpressure`] when the queue is at cap so the
+    /// caller can propagate back-pressure. Other enqueue errors are logged as
+    /// warnings (the local insert already succeeded) and `Ok(())` is returned.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn enqueue_outbound(
+        &self,
+        collection: &str,
+        rows: &[Vec<Value>],
+    ) -> Result<(), LiteError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        // Read the profile and schema metadata under the lock, then drop it
+        // before any await point to satisfy the no-lock-across-await rule.
+        enum OutboundRoute {
+            Timeseries { column_names: Vec<String> },
+            Columnar { schema_bytes: Vec<u8> },
+            None,
+        }
+
+        let route: OutboundRoute = {
+            let state_arc = self.lookup(collection)?;
+            let s = Self::lock_state(&state_arc)?;
+            if matches!(s.profile, ColumnarProfile::Timeseries { .. }) {
+                if self.timeseries_outbound.is_some() {
+                    let column_names: Vec<String> = s
+                        .mutation
+                        .schema()
+                        .columns
+                        .iter()
+                        .map(|c| c.name.clone())
+                        .collect();
+                    OutboundRoute::Timeseries { column_names }
+                } else {
+                    OutboundRoute::None
+                }
+            } else if self.outbound.is_some() {
+                let schema_bytes = zerompk::to_msgpack_vec(s.mutation.schema()).unwrap_or_default();
+                OutboundRoute::Columnar { schema_bytes }
+            } else {
+                OutboundRoute::None
+            }
+            // lock `s` is dropped here at end of block
+        };
+
+        match route {
+            OutboundRoute::Timeseries { column_names } => {
+                let queue = match &self.timeseries_outbound {
+                    Some(q) => Arc::clone(q),
+                    None => return Ok(()),
+                };
+                for row in rows {
+                    crate::sync::reconcile_outbound_enqueue(
+                        queue
+                            .enqueue_row(collection, column_names.clone(), row.clone())
+                            .await,
+                        "timeseries insert",
+                        collection,
+                        "",
+                    )?;
+                }
+            }
+            OutboundRoute::Columnar { schema_bytes } => {
+                let queue = match &self.outbound {
+                    Some(q) => Arc::clone(q),
+                    None => return Ok(()),
+                };
+                for row in rows {
+                    crate::sync::reconcile_outbound_enqueue(
+                        queue
+                            .enqueue_row(collection, row.clone(), schema_bytes.clone())
+                            .await,
+                        "columnar insert",
+                        collection,
+                        "",
+                    )?;
+                }
+            }
+            OutboundRoute::None => {}
+        }
+
         Ok(())
     }
 
@@ -451,7 +672,6 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         // Drain memtable + collect everything we need under the inner lock.
         struct FlushPayload {
             segment_id: u32,
-            seg_key: String,
             segment_bytes: Vec<u8>,
             meta_key: String,
             meta_bytes: Vec<u8>,
@@ -477,13 +697,15 @@ impl<S: StorageEngine> ColumnarEngine<S> {
 
             let writer = SegmentWriter::new(profile_tag);
             let segment_bytes = writer
-                .write_segment(&schema, &columns, row_count)
+                .write_segment(&schema, &columns, row_count, None)
                 .map_err(columnar_err_to_lite)?;
 
-            let seg_key = format!("{collection}:seg:{segment_id}");
+            let system_time_from_ms = if s.bitemporal { now_millis_i64() } else { 0 };
             s.segments.push(SegmentMeta {
                 segment_id,
                 row_count: row_count as u64,
+                system_time_from_ms,
+                fully_deleted_at_ms: None,
             });
             let meta_key = format!("{collection}:meta");
             let meta_bytes =
@@ -491,7 +713,11 @@ impl<S: StorageEngine> ColumnarEngine<S> {
                     detail: e.to_string(),
                 })?;
 
-            s.mutation.on_memtable_flushed(segment_id);
+            s.mutation
+                .on_memtable_flushed(segment_id as u64)
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("on_memtable_flushed: {e}"),
+                })?;
 
             let mut del_ops: Vec<(String, Vec<u8>)> = Vec::new();
             for (&seg_id, bitmap) in s.mutation.delete_bitmaps() {
@@ -504,7 +730,6 @@ impl<S: StorageEngine> ColumnarEngine<S> {
 
             FlushPayload {
                 segment_id,
-                seg_key,
                 segment_bytes,
                 meta_key,
                 meta_bytes,
@@ -512,16 +737,17 @@ impl<S: StorageEngine> ColumnarEngine<S> {
             }
         };
 
-        let _ = payload.segment_id;
-
         // Storage I/O with lock dropped.
-        self.storage
-            .put(
-                Namespace::Columnar,
-                payload.seg_key.as_bytes(),
-                &payload.segment_bytes,
-            )
-            .await?;
+        // Large segment bytes go through the segment ext (or KV fallback).
+        store_segment_bytes(
+            &*self.storage,
+            collection,
+            payload.segment_id,
+            &payload.segment_bytes,
+        )
+        .await?;
+
+        // Small B+ tree entries: segment metadata list and delete bitmaps.
         self.storage
             .put(
                 Namespace::Columnar,
@@ -571,7 +797,11 @@ impl<S: StorageEngine> ColumnarEngine<S> {
             let s = Self::lock_state(&state_arc)?;
             let mut to_compact = Vec::new();
             for seg_meta in &s.segments {
-                if let Some(bitmap) = s.mutation.delete_bitmap(seg_meta.segment_id)
+                // Skip tombstoned segments — their physical file is already gone.
+                if seg_meta.fully_deleted_at_ms.is_some() {
+                    continue;
+                }
+                if let Some(bitmap) = s.mutation.delete_bitmap(seg_meta.segment_id as u64)
                     && bitmap.should_compact(seg_meta.row_count, 0.2)
                 {
                     to_compact.push(seg_meta.segment_id);
@@ -588,7 +818,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
             };
             let mut bitmaps = HashMap::new();
             for &seg_id in &to_compact {
-                if let Some(b) = s.mutation.delete_bitmap(seg_id) {
+                if let Some(b) = s.mutation.delete_bitmap(seg_id as u64) {
                     bitmaps.insert(seg_id, b.clone());
                 }
             }
@@ -601,12 +831,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         };
 
         for seg_id in &snap.to_compact {
-            let seg_key = format!("{collection}:seg:{seg_id}");
-            let seg_bytes = match self
-                .storage
-                .get(Namespace::Columnar, seg_key.as_bytes())
-                .await?
-            {
+            let seg_bytes = match load_segment_bytes(&*self.storage, collection, *seg_id).await? {
                 Some(b) => b,
                 None => continue,
             };
@@ -619,16 +844,16 @@ impl<S: StorageEngine> ColumnarEngine<S> {
                 bitmap,
                 &snap.schema,
                 snap.profile_tag,
+                None,
+                None,
             )
             .map_err(columnar_err_to_lite)?;
 
             if let Some(new_seg_bytes) = result.segment {
-                self.storage
-                    .put(Namespace::Columnar, seg_key.as_bytes(), &new_seg_bytes)
-                    .await?;
+                store_segment_bytes(&*self.storage, collection, *seg_id, &new_seg_bytes).await?;
 
                 // Update row count under the inner lock (scoped so the guard
-                // never crosses the `.delete` await below — clippy is strict).
+                // never crosses the await below — clippy is strict).
                 {
                     let mut s = Self::lock_state(&state_arc)?;
                     if let Some(meta) = s.segments.iter_mut().find(|m| m.segment_id == *seg_id) {
@@ -641,10 +866,16 @@ impl<S: StorageEngine> ColumnarEngine<S> {
                     .delete(Namespace::Columnar, del_key.as_bytes())
                     .await?;
             } else {
-                // All rows deleted — remove segment entirely.
-                self.storage
-                    .delete(Namespace::Columnar, seg_key.as_bytes())
-                    .await?;
+                // All rows deleted. For bitemporal collections, tombstone the
+                // segment meta (retain the entry with fully_deleted_at_ms set)
+                // so `purge_bitemporal_before` can physically remove it later.
+                // For non-bitemporal collections, remove immediately.
+                let is_bitemporal = {
+                    let s = Self::lock_state(&state_arc)?;
+                    s.bitemporal
+                };
+
+                remove_segment_bytes(&*self.storage, collection, *seg_id).await?;
                 let del_key = format!("{collection}:del:{seg_id}");
                 self.storage
                     .delete(Namespace::Columnar, del_key.as_bytes())
@@ -652,7 +883,16 @@ impl<S: StorageEngine> ColumnarEngine<S> {
 
                 {
                     let mut s = Self::lock_state(&state_arc)?;
-                    s.segments.retain(|m| m.segment_id != *seg_id);
+                    if is_bitemporal {
+                        // Mark as fully deleted instead of removing from the list.
+                        if let Some(meta) = s.segments.iter_mut().find(|m| m.segment_id == *seg_id)
+                        {
+                            meta.row_count = 0;
+                            meta.fully_deleted_at_ms = Some(now_millis_i64());
+                        }
+                    } else {
+                        s.segments.retain(|m| m.segment_id != *seg_id);
+                    }
                 }
             }
         }
@@ -674,6 +914,84 @@ impl<S: StorageEngine> ColumnarEngine<S> {
 
     // -- Read path --
 
+    /// Scan all rows in a columnar collection, returning them in schema column order.
+    ///
+    /// Reads memtable rows first, then flushed segments. Each row is a
+    /// `Vec<Value>` whose entries correspond 1-to-1 with `schema().columns`.
+    pub async fn list_rows(&self, collection: &str) -> Result<Vec<Vec<Value>>, LiteError> {
+        let state_arc = self.lookup(collection)?;
+
+        // Collect memtable rows and segment metadata under the inner lock (briefly).
+        struct Snapshot {
+            memtable_rows: Vec<Vec<Value>>,
+            seg_metas: Vec<SegmentMeta>,
+            col_count: usize,
+        }
+        let snap = {
+            let s = Self::lock_state(&state_arc)?;
+            let memtable_rows: Vec<Vec<Value>> = s.mutation.memtable().iter_rows().collect();
+            Snapshot {
+                memtable_rows,
+                seg_metas: s.segments.clone(),
+                col_count: s.mutation.schema().columns.len(),
+            }
+        };
+
+        let mut all_rows: Vec<Vec<Value>> = Vec::new();
+        all_rows.extend(snap.memtable_rows);
+
+        // Read each flushed segment from storage (lock dropped) and transpose
+        // the columnar layout back to row-major Values. Skip fully-deleted
+        // tombstones (their physical segment file has already been removed).
+        for seg_meta in &snap.seg_metas {
+            if seg_meta.fully_deleted_at_ms.is_some() {
+                continue;
+            }
+            let seg_bytes =
+                match load_segment_bytes(&*self.storage, collection, seg_meta.segment_id).await? {
+                    Some(b) => b,
+                    None => continue,
+                };
+
+            let reader = nodedb_columnar::reader::SegmentReader::open(&seg_bytes).map_err(|e| {
+                LiteError::Storage {
+                    detail: format!("open segment {}: {e}", seg_meta.segment_id),
+                }
+            })?;
+
+            let row_count = reader.row_count() as usize;
+            if row_count == 0 {
+                continue;
+            }
+
+            // Decode all columns.
+            let mut decoded: Vec<nodedb_columnar::reader::DecodedColumn> =
+                Vec::with_capacity(snap.col_count);
+            for col_idx in 0..snap.col_count {
+                let col = reader
+                    .read_column(col_idx)
+                    .map_err(|e| LiteError::Storage {
+                        detail: format!(
+                            "read column {col_idx} of segment {}: {e}",
+                            seg_meta.segment_id
+                        ),
+                    })?;
+                decoded.push(col);
+            }
+
+            // Transpose: iterate row indices, extract one Value per column.
+            for row_idx in 0..row_count {
+                let row: Vec<Value> = decoded
+                    .iter()
+                    .map(|col| decoded_column_value(col, row_idx))
+                    .collect();
+                all_rows.push(row);
+            }
+        }
+
+        Ok(all_rows)
+    }
+
     /// Read all segment bytes for a collection (for the table provider).
     pub async fn read_segments(&self, collection: &str) -> Result<Vec<(u32, Vec<u8>)>, LiteError> {
         let state_arc = self.lookup(collection)?;
@@ -684,11 +1002,11 @@ impl<S: StorageEngine> ColumnarEngine<S> {
 
         let mut segments = Vec::with_capacity(seg_metas.len());
         for seg_meta in &seg_metas {
-            let seg_key = format!("{collection}:seg:{}", seg_meta.segment_id);
-            if let Some(bytes) = self
-                .storage
-                .get(Namespace::Columnar, seg_key.as_bytes())
-                .await?
+            if seg_meta.fully_deleted_at_ms.is_some() {
+                continue;
+            }
+            if let Some(bytes) =
+                load_segment_bytes(&*self.storage, collection, seg_meta.segment_id).await?
             {
                 segments.push((seg_meta.segment_id, bytes));
             }
@@ -702,7 +1020,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         let guard = self.collections.read().ok()?;
         let state_arc = guard.get(collection)?;
         let s = state_arc.lock().ok()?;
-        s.mutation.delete_bitmap(segment_id).cloned()
+        s.mutation.delete_bitmap(segment_id as u64).cloned()
     }
 
     /// Row count across all segments + memtable for a collection.
@@ -716,8 +1034,153 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         let Ok(s) = state_arc.lock() else {
             return 0;
         };
-        let seg_rows: u64 = s.segments.iter().map(|m| m.row_count).sum();
+        let seg_rows: u64 = s
+            .segments
+            .iter()
+            .filter(|m| m.fully_deleted_at_ms.is_none())
+            .map(|m| m.row_count)
+            .sum();
         seg_rows as usize + s.mutation.memtable().row_count()
+    }
+
+    /// Whether a collection has bitemporal tracking enabled.
+    pub fn is_bitemporal(&self, collection: &str) -> bool {
+        let Ok(guard) = self.collections.read() else {
+            return false;
+        };
+        let Some(state_arc) = guard.get(collection) else {
+            return false;
+        };
+        let Ok(s) = state_arc.lock() else {
+            return false;
+        };
+        s.bitemporal
+    }
+
+    /// Purge fully-deleted segment tombstones for a bitemporal collection where
+    /// `fully_deleted_at_ms < cutoff_ms`. Non-bitemporal collections always
+    /// return `rows_affected: 0` — they have no tombstones.
+    ///
+    /// Returns the number of tombstoned segment entries removed.
+    pub async fn purge_bitemporal_before(
+        &self,
+        collection: &str,
+        cutoff_ms: i64,
+    ) -> Result<u64, LiteError> {
+        let state_arc = self.lookup(collection)?;
+
+        let (is_bitemporal, to_purge): (bool, Vec<u32>) = {
+            let s = Self::lock_state(&state_arc)?;
+            let purge: Vec<u32> = s
+                .segments
+                .iter()
+                .filter(|m| {
+                    m.fully_deleted_at_ms
+                        .map(|t| t < cutoff_ms)
+                        .unwrap_or(false)
+                })
+                .map(|m| m.segment_id)
+                .collect();
+            (s.bitemporal, purge)
+        };
+
+        if !is_bitemporal {
+            return Ok(0);
+        }
+
+        if to_purge.is_empty() {
+            return Ok(0);
+        }
+
+        // Remove purged segment IDs from the in-memory list.
+        {
+            let mut s = Self::lock_state(&state_arc)?;
+            s.segments.retain(|m| !to_purge.contains(&m.segment_id));
+        }
+
+        // Persist the updated segment metadata list.
+        let meta_bytes = {
+            let s = Self::lock_state(&state_arc)?;
+            zerompk::to_msgpack_vec(&s.segments).map_err(|e| LiteError::Serialization {
+                detail: e.to_string(),
+            })?
+        };
+        let meta_key = format!("{collection}:meta");
+        self.storage
+            .put(Namespace::Columnar, meta_key.as_bytes(), &meta_bytes)
+            .await?;
+
+        Ok(to_purge.len() as u64)
+    }
+}
+
+/// Extract a single `Value` from a `DecodedColumn` at the given row index.
+///
+/// Returns `Value::Null` for rows whose validity bit is false.
+fn decoded_column_value(col: &nodedb_columnar::reader::DecodedColumn, row_idx: usize) -> Value {
+    use nodedb_columnar::reader::DecodedColumn;
+    match col {
+        DecodedColumn::Int64 { values, valid } => {
+            if *valid.get(row_idx).unwrap_or(&false) {
+                Value::Integer(*values.get(row_idx).unwrap_or(&0))
+            } else {
+                Value::Null
+            }
+        }
+        DecodedColumn::Float64 { values, valid } => {
+            if *valid.get(row_idx).unwrap_or(&false) {
+                Value::Float(*values.get(row_idx).unwrap_or(&0.0))
+            } else {
+                Value::Null
+            }
+        }
+        DecodedColumn::Timestamp { values, valid } => {
+            if *valid.get(row_idx).unwrap_or(&false) {
+                Value::Integer(*values.get(row_idx).unwrap_or(&0))
+            } else {
+                Value::Null
+            }
+        }
+        DecodedColumn::Bool { values, valid } => {
+            if *valid.get(row_idx).unwrap_or(&false) {
+                Value::Bool(*values.get(row_idx).unwrap_or(&false))
+            } else {
+                Value::Null
+            }
+        }
+        DecodedColumn::Binary {
+            data,
+            offsets,
+            valid,
+        } => {
+            if *valid.get(row_idx).unwrap_or(&false) && row_idx + 1 < offsets.len() {
+                let start = offsets[row_idx] as usize;
+                let end = offsets[row_idx + 1] as usize;
+                if let Ok(s) = std::str::from_utf8(&data[start..end]) {
+                    Value::String(s.to_string())
+                } else {
+                    Value::Bytes(data[start..end].to_vec())
+                }
+            } else {
+                Value::Null
+            }
+        }
+        DecodedColumn::DictEncoded {
+            ids,
+            dictionary,
+            valid,
+        } => {
+            if *valid.get(row_idx).unwrap_or(&false) {
+                let id = *ids.get(row_idx).unwrap_or(&0) as usize;
+                dictionary
+                    .get(id)
+                    .map(|s| Value::String(s.clone()))
+                    .unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            }
+        }
+        _ => Value::Null,
     }
 }
 
@@ -738,7 +1201,7 @@ fn rebuild_pk_from_column(
                     mutation.pk_index_mut().upsert(
                         pk_bytes,
                         RowLocation {
-                            segment_id,
+                            segment_id: segment_id as u64,
                             row_index: row_idx as u32,
                         },
                     );
@@ -758,7 +1221,7 @@ fn rebuild_pk_from_column(
                     mutation.pk_index_mut().upsert(
                         pk_bytes,
                         RowLocation {
-                            segment_id,
+                            segment_id: segment_id as u64,
                             row_index: row_idx as u32,
                         },
                     );

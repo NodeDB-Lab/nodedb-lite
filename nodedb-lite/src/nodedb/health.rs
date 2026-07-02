@@ -1,7 +1,7 @@
 //! Health API — structured status report for NodeDB-Lite.
 //!
 //! `db.health()` returns a `HealthStatus` covering:
-//! - **Storage**: redb accessible, approximate size
+//! - **Storage**: accessible, approximate size
 //! - **Memory**: governor pressure per engine
 //! - **Engines**: HNSW collection count, CSR node/edge count, CRDT doc count, text indices
 //! - **Sync**: connection state, pending delta count/bytes (if sync client available)
@@ -11,7 +11,7 @@
 use serde::Serialize;
 
 use crate::memory::{EngineId, PressureLevel};
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::core::NodeDbLite;
 use super::lock_ext::LockExt;
@@ -44,7 +44,7 @@ pub struct HealthStatus {
 /// Storage subsystem health.
 #[derive(Debug, Serialize)]
 pub struct StorageHealth {
-    /// Whether redb is accessible (can read/write).
+    /// Whether the storage backend is accessible (can read/write).
     pub accessible: bool,
 }
 
@@ -115,11 +115,11 @@ fn engine_memory(gov: &crate::memory::MemoryGovernor, id: EngineId) -> EngineMem
     }
 }
 
-impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
+impl<S: StorageEngine> NodeDbLite<S> {
     /// Borrow the underlying storage engine.
     ///
     /// Public so benchmark code can call backend-specific methods like
-    /// `RedbStorage::db_size_bytes()` for compression-ratio measurement.
+    /// backend-specific methods (e.g. size reporting) for compression-ratio measurement.
     pub fn storage(&self) -> &S {
         &self.storage
     }
@@ -148,15 +148,17 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         };
 
         let (hnsw_count, hnsw_vectors) = {
-            let indices = self.hnsw_indices.lock_or_recover();
+            let indices = self.vector_state.hnsw_indices.lock_or_recover();
             let count = indices.len();
             let vectors: usize = indices.values().map(|idx| idx.len()).sum();
             (count, vectors)
         };
 
         let (csr_nodes, csr_edges) = {
-            let csr = self.csr.lock_or_recover();
-            (csr.node_count(), csr.edge_count())
+            let csr_map = self.csr.lock_or_recover();
+            let nodes: usize = csr_map.values().map(|c| c.node_count()).sum();
+            let edges: usize = csr_map.values().map(|c| c.edge_count()).sum();
+            (nodes, edges)
         };
 
         let (crdt_collections, pending_deltas) = {
@@ -165,7 +167,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         };
 
         let text_count = {
-            let fts = self.fts.lock_or_recover();
+            let fts = self.fts_state.manager.lock_or_recover();
             fts.collection_count()
         };
 
@@ -198,10 +200,10 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RedbStorage;
+    use crate::PagedbStorageMem;
 
-    async fn make_db() -> NodeDbLite<RedbStorage> {
-        let storage = RedbStorage::open_in_memory().unwrap();
+    async fn make_db() -> NodeDbLite<PagedbStorageMem> {
+        let storage = PagedbStorageMem::open_in_memory().await.unwrap();
         NodeDbLite::open(storage, 1).await.unwrap()
     }
 
@@ -225,8 +227,9 @@ mod tests {
             .await
             .unwrap();
         db.graph_insert_edge(
-            &nodedb_types::id::NodeId::new("a"),
-            &nodedb_types::id::NodeId::new("b"),
+            "test",
+            &nodedb_types::id::NodeId::from_validated("a".to_string()),
+            &nodedb_types::id::NodeId::from_validated("b".to_string()),
             "REL",
             None,
         )

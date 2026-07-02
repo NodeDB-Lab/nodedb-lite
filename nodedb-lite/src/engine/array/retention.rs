@@ -1,4 +1,4 @@
-//! Synchronous retention compaction for the Lite array engine.
+//! Retention compaction for the Lite array engine.
 //!
 //! Delegates to `nodedb_array::query::retention::merge_for_retention` for the
 //! per-`hilbert_prefix` merge logic. Because Lite has no background TPC, this
@@ -15,7 +15,7 @@ use nodedb_array::{SegmentReader, SparseTile, TilePayload};
 use crate::engine::array::manifest::{ArrayManifest, SegmentRef, save_manifest};
 use crate::engine::array::segments::{delete_segment, write_segment};
 use crate::error::LiteError;
-use crate::storage::engine::StorageEngineSync;
+use crate::storage::engine::StorageEngine;
 
 /// Run idle retention compaction for one array.
 ///
@@ -25,7 +25,7 @@ use crate::storage::engine::StorageEngineSync;
 /// rewrites succeed.
 ///
 /// Returns the number of segments rewritten.
-pub fn run_retention<S: StorageEngineSync>(
+pub async fn run_retention<S: StorageEngine>(
     storage: &Arc<S>,
     name: &str,
     manifest: &mut ArrayManifest,
@@ -42,7 +42,7 @@ pub fn run_retention<S: StorageEngineSync>(
     let old_segs: Vec<SegmentRef> = manifest.segments.clone();
 
     for seg_ref in &old_segs {
-        let bytes = crate::engine::array::segments::load_segment(storage, name, seg_ref.id)?;
+        let bytes = crate::engine::array::segments::load_segment(storage, name, seg_ref.id).await?;
         let reader = SegmentReader::open(&bytes).map_err(|e| LiteError::Storage {
             detail: format!("open reader seg {}: {e}", seg_ref.id),
         })?;
@@ -106,7 +106,7 @@ pub fn run_retention<S: StorageEngineSync>(
         keep_tiles.dedup_by_key(|(id, _)| *id);
 
         // Delete old segment.
-        delete_segment(storage, name, seg_ref.id)?;
+        delete_segment(storage, name, seg_ref.id).await?;
 
         if keep_tiles.is_empty() {
             // Nothing survived — segment fully purged.
@@ -118,7 +118,7 @@ pub fn run_retention<S: StorageEngineSync>(
         manifest.next_id += 1;
 
         let refs: Vec<_> = keep_tiles.iter().map(|(id, tile)| (*id, tile)).collect();
-        let new_bytes = write_segment(storage, name, new_id, schema_hash, &refs)?;
+        let new_bytes = write_segment(storage, name, new_id, schema_hash, &refs).await?;
         new_segments.push(SegmentRef {
             id: new_id,
             byte_len: new_bytes.len() as u64,
@@ -127,7 +127,7 @@ pub fn run_retention<S: StorageEngineSync>(
     }
 
     manifest.segments = new_segments;
-    save_manifest(storage, name, manifest)?;
+    save_manifest(storage, name, manifest).await?;
 
     Ok(rewritten)
 }
@@ -137,7 +137,7 @@ mod tests {
     use super::*;
     use crate::engine::array::manifest::{ArrayManifest, save_manifest};
     use crate::engine::array::segments::write_segment;
-    use crate::storage::redb_storage::RedbStorage;
+    use crate::storage::pagedb_storage::PagedbStorageMem;
     use nodedb_array::schema::ArraySchemaBuilder;
     use nodedb_array::schema::attr_spec::{AttrSpec, AttrType};
     use nodedb_array::schema::dim_spec::{DimSpec, DimType};
@@ -168,34 +168,37 @@ mod tests {
         b.build()
     }
 
-    #[test]
-    fn empty_segment_passes_through() {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
+    #[tokio::test]
+    async fn empty_segment_passes_through() {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
         let s = schema();
         let hash = crate::engine::array::catalog::hash_schema(&s).unwrap();
         let mut manifest = ArrayManifest::new();
 
         // Empty segment.
         let writer = nodedb_array::SegmentWriter::new(hash);
-        let seg_bytes = writer.finish().unwrap();
+        let seg_bytes = writer.finish(None).unwrap();
         let seg_id = manifest.push_segment(seg_bytes.len() as u64);
         storage
-            .put_sync(
+            .put(
                 nodedb_types::Namespace::Array,
                 &crate::engine::array::manifest::segment_key("r", seg_id),
                 &seg_bytes,
             )
+            .await
             .unwrap();
-        save_manifest(&storage, "r", &manifest).unwrap();
+        save_manifest(&storage, "r", &manifest).await.unwrap();
 
-        let n = run_retention(&storage, "r", &mut manifest, &s, hash, 60_000, 100_000).unwrap();
+        let n = run_retention(&storage, "r", &mut manifest, &s, hash, 60_000, 100_000)
+            .await
+            .unwrap();
         assert_eq!(n, 0);
         assert_eq!(manifest.segments.len(), 1);
     }
 
-    #[test]
-    fn in_horizon_segment_not_rewritten() {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
+    #[tokio::test]
+    async fn in_horizon_segment_not_rewritten() {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
         let s = schema();
         let hash = crate::engine::array::catalog::hash_schema(&s).unwrap();
         let mut manifest = ArrayManifest::new();
@@ -210,16 +213,19 @@ mod tests {
             hash,
             &[(TileId::new(0, 90_000), &tile)],
         )
+        .await
         .unwrap();
-        save_manifest(&storage, "r", &manifest).unwrap();
+        save_manifest(&storage, "r", &manifest).await.unwrap();
 
-        let n = run_retention(&storage, "r", &mut manifest, &s, hash, 60_000, 100_000).unwrap();
+        let n = run_retention(&storage, "r", &mut manifest, &s, hash, 60_000, 100_000)
+            .await
+            .unwrap();
         assert_eq!(n, 0);
     }
 
-    #[test]
-    fn out_of_horizon_segment_gets_rewritten() {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
+    #[tokio::test]
+    async fn out_of_horizon_segment_gets_rewritten() {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
         let s = schema();
         let hash = crate::engine::array::catalog::hash_schema(&s).unwrap();
         let mut manifest = ArrayManifest::new();
@@ -239,10 +245,13 @@ mod tests {
                 (TileId::new(0, 90_000), &tile2),
             ],
         )
+        .await
         .unwrap();
-        save_manifest(&storage, "r", &manifest).unwrap();
+        save_manifest(&storage, "r", &manifest).await.unwrap();
 
-        let n = run_retention(&storage, "r", &mut manifest, &s, hash, 60_000, 100_000).unwrap();
+        let n = run_retention(&storage, "r", &mut manifest, &s, hash, 60_000, 100_000)
+            .await
+            .unwrap();
         assert_eq!(n, 1);
     }
 }

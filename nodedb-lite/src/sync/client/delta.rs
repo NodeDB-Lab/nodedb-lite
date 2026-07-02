@@ -34,6 +34,10 @@ impl SyncClient {
                 peer_id: self.peer_id,
                 mutation_id: delta.mutation_id,
                 device_valid_time_ms: Some(device_valid_time_ms),
+                // producer_id, epoch, and seq are overwritten with real producer/epoch/stable-seq in push_crdt_deltas.
+                producer_id: 0,
+                epoch: 0,
+                seq: 0,
             })
             .collect()
     }
@@ -133,12 +137,14 @@ mod tests {
                 collection: "orders".into(),
                 document_id: "o1".into(),
                 delta_bytes: vec![1, 2, 3],
+                seq: 0,
             },
             PendingDelta {
                 mutation_id: 2,
                 collection: "users".into(),
                 document_id: "u1".into(),
                 delta_bytes: vec![4, 5, 6],
+                seq: 0,
             },
         ];
 
@@ -159,6 +165,8 @@ mod tests {
                 mutation_id: 1,
                 lsn: 42,
                 clock_skew_warning_ms: None,
+                applied_seq: 0,
+                status: nodedb_types::sync::wire::AckStatus::Applied,
             })
             .await;
 
@@ -202,6 +210,7 @@ mod tests {
             collection: "test".into(),
             document_id: "d1".into(),
             delta_bytes,
+            seq: 0,
         }];
         let msgs = client.build_delta_pushes(&pending).await;
         assert_eq!(msgs[0].checksum, expected_crc);
@@ -225,18 +234,21 @@ mod tests {
                 collection: "a".into(),
                 document_id: "d1".into(),
                 delta_bytes: vec![1],
+                seq: 0,
             },
             PendingDelta {
                 mutation_id: 2,
                 collection: "a".into(),
                 document_id: "d2".into(),
                 delta_bytes: vec![2],
+                seq: 0,
             },
             PendingDelta {
                 mutation_id: 3,
                 collection: "a".into(),
                 document_id: "d3".into(),
                 delta_bytes: vec![3],
+                seq: 0,
             },
         ];
 
@@ -253,6 +265,8 @@ mod tests {
                 mutation_id: 1,
                 lsn: 10,
                 clock_skew_warning_ms: None,
+                applied_seq: 0,
+                status: nodedb_types::sync::wire::AckStatus::Applied,
             })
             .await;
         let msgs = client.build_delta_pushes(&pending).await;

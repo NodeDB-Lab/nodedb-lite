@@ -16,7 +16,7 @@ use nodedb_types::Namespace;
 use nodedb_types::sync::wire::array::ArrayCatchupRequestMsg;
 
 use crate::error::LiteError;
-use crate::storage::engine::StorageEngineSync;
+use crate::storage::engine::StorageEngine;
 
 /// Storage key prefix for per-array last-seen HLC entries.
 const LAST_SEEN_PREFIX: &str = "array.last_seen_hlc:";
@@ -40,7 +40,7 @@ fn catchup_needed_key(array: &str) -> Vec<u8> {
 /// reconnect or when Origin's log GC horizon advances past the local log.
 ///
 /// Thread-safe via an internal [`Mutex`].
-pub struct CatchupTracker<S: StorageEngineSync> {
+pub struct CatchupTracker<S: StorageEngine> {
     storage: Arc<S>,
     state: Mutex<HashMap<String, Hlc>>,
     /// Arrays that need a full catchup on next connect.
@@ -48,15 +48,17 @@ pub struct CatchupTracker<S: StorageEngineSync> {
     catchup_needed: Mutex<std::collections::HashSet<String>>,
 }
 
-impl<S: StorageEngineSync> CatchupTracker<S> {
+impl<S: StorageEngine> CatchupTracker<S> {
     /// Load all persisted `last_seen_hlc` entries from `Namespace::Meta`.
     ///
     /// Scans keys starting with `b"array.last_seen_hlc:"` and parses each
     /// 18-byte value as an [`Hlc`]. Returns an empty tracker if no entries
     /// are stored yet (first run or after a full wipe).
-    pub fn load(storage: Arc<S>) -> Result<Self, LiteError> {
+    pub async fn load(storage: Arc<S>) -> Result<Self, LiteError> {
         let prefix = LAST_SEEN_PREFIX.as_bytes();
-        let pairs = storage.scan_range_sync(Namespace::Meta, prefix, usize::MAX)?;
+        let pairs = storage
+            .scan_range(Namespace::Meta, prefix, usize::MAX)
+            .await?;
 
         let mut state = HashMap::new();
         for (key, value) in pairs {
@@ -79,7 +81,9 @@ impl<S: StorageEngineSync> CatchupTracker<S> {
 
         // Load catchup-needed flags.
         let needed_prefix = CATCHUP_NEEDED_PREFIX.as_bytes();
-        let needed_pairs = storage.scan_range_sync(Namespace::Meta, needed_prefix, usize::MAX)?;
+        let needed_pairs = storage
+            .scan_range(Namespace::Meta, needed_prefix, usize::MAX)
+            .await?;
         let mut catchup_needed = std::collections::HashSet::new();
         for (key, _) in needed_pairs {
             if !key.starts_with(needed_prefix) {
@@ -103,7 +107,8 @@ impl<S: StorageEngineSync> CatchupTracker<S> {
     /// Updates both the in-memory map and the durable storage entry.
     /// Only persists if `hlc` is strictly greater than the current last-seen
     /// value (monotonic advancement).
-    pub fn record(&self, array: &str, hlc: Hlc) -> Result<(), LiteError> {
+    #[allow(clippy::await_holding_lock)]
+    pub async fn record(&self, array: &str, hlc: Hlc) -> Result<(), LiteError> {
         let mut state = self.state.lock().map_err(|_| LiteError::LockPoisoned)?;
         let current = state.get(array).copied().unwrap_or(Hlc::ZERO);
         if hlc <= current {
@@ -112,7 +117,8 @@ impl<S: StorageEngineSync> CatchupTracker<S> {
         state.insert(array.to_owned(), hlc);
         drop(state);
         self.storage
-            .put_sync(Namespace::Meta, &last_seen_key(array), &hlc.to_bytes())
+            .put(Namespace::Meta, &last_seen_key(array), &hlc.to_bytes())
+            .await
     }
 
     /// Return the last-seen HLC for `array`, or [`Hlc::ZERO`] if unknown.
@@ -160,25 +166,27 @@ impl<S: StorageEngineSync> CatchupTracker<S> {
     ///
     /// Called when Origin sends `ArrayRejectMsg::RetentionFloor`.
     /// Persisted under `Namespace::Meta` `"array.catchup_needed:{array}"`.
-    pub fn record_reject_retention_floor(&self, array: &str) -> Result<(), LiteError> {
+    pub async fn record_reject_retention_floor(&self, array: &str) -> Result<(), LiteError> {
         if let Ok(mut needed) = self.catchup_needed.lock() {
             needed.insert(array.to_owned());
         }
         // Persist flag (value = 1 byte sentinel).
         self.storage
-            .put_sync(Namespace::Meta, &catchup_needed_key(array), &[1u8])
+            .put(Namespace::Meta, &catchup_needed_key(array), &[1u8])
+            .await
     }
 
     /// Clear the catchup-needed flag for `array` after a successful catch-up.
     ///
     /// Called after the snapshot stream has been fully applied.
-    pub fn clear_catchup_needed(&self, array: &str) -> Result<(), LiteError> {
+    pub async fn clear_catchup_needed(&self, array: &str) -> Result<(), LiteError> {
         if let Ok(mut needed) = self.catchup_needed.lock() {
             needed.remove(array);
         }
         // Remove the persisted flag.
         self.storage
-            .delete_sync(Namespace::Meta, &catchup_needed_key(array))
+            .delete(Namespace::Meta, &catchup_needed_key(array))
+            .await
     }
 
     /// Return all arrays that are marked as needing catch-up.
@@ -196,7 +204,7 @@ impl<S: StorageEngineSync> CatchupTracker<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::redb_storage::RedbStorage;
+    use crate::storage::pagedb_storage::{PagedbStorageDefault, PagedbStorageMem};
     use nodedb_array::sync::replica_id::ReplicaId;
 
     fn rep() -> ReplicaId {
@@ -207,34 +215,48 @@ mod tests {
         Hlc::new(ms, 0, rep()).unwrap()
     }
 
-    fn make_tracker() -> CatchupTracker<RedbStorage> {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
-        CatchupTracker::load(storage).unwrap()
+    async fn make_tracker() -> CatchupTracker<PagedbStorageMem> {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+        CatchupTracker::load(storage).await.unwrap()
     }
 
-    #[test]
-    fn load_returns_zero_when_empty() {
-        let tracker = make_tracker();
+    #[tokio::test]
+    async fn load_returns_zero_when_empty() {
+        let tracker = make_tracker().await;
         assert_eq!(tracker.last_seen("any_array"), Hlc::ZERO);
     }
 
-    #[test]
-    fn record_persists_across_load() {
+    #[tokio::test]
+    async fn record_persists_across_load() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("catchup_test.redb");
+        let path = dir.path().join("catchup_test.pagedb");
 
         let target_hlc = hlc(42_000);
 
         {
-            let storage = Arc::new(RedbStorage::open(&path).unwrap());
-            let tracker = CatchupTracker::load(Arc::clone(&storage)).unwrap();
-            tracker.record("arr", target_hlc).unwrap();
+            let storage = Arc::new(
+                PagedbStorageDefault::open(
+                    &path,
+                    crate::storage::encryption::Encryption::Plaintext,
+                )
+                .await
+                .unwrap(),
+            );
+            let tracker = CatchupTracker::load(Arc::clone(&storage)).await.unwrap();
+            tracker.record("arr", target_hlc).await.unwrap();
             assert_eq!(tracker.last_seen("arr"), target_hlc);
         }
 
         {
-            let storage = Arc::new(RedbStorage::open(&path).unwrap());
-            let tracker = CatchupTracker::load(storage).unwrap();
+            let storage = Arc::new(
+                PagedbStorageDefault::open(
+                    &path,
+                    crate::storage::encryption::Encryption::Plaintext,
+                )
+                .await
+                .unwrap(),
+            );
+            let tracker = CatchupTracker::load(storage).await.unwrap();
             assert_eq!(
                 tracker.last_seen("arr"),
                 target_hlc,
@@ -243,32 +265,32 @@ mod tests {
         }
     }
 
-    #[test]
-    fn record_is_monotonic_only() {
-        let tracker = make_tracker();
+    #[tokio::test]
+    async fn record_is_monotonic_only() {
+        let tracker = make_tracker().await;
         let h1 = hlc(100);
         let h2 = hlc(200);
 
-        tracker.record("x", h2).unwrap();
+        tracker.record("x", h2).await.unwrap();
         // Recording a smaller HLC must not regress the stored value.
-        tracker.record("x", h1).unwrap();
+        tracker.record("x", h1).await.unwrap();
         assert_eq!(tracker.last_seen("x"), h2);
     }
 
-    #[test]
-    fn build_request_carries_last_seen() {
-        let tracker = make_tracker();
+    #[tokio::test]
+    async fn build_request_carries_last_seen() {
+        let tracker = make_tracker().await;
         let h = hlc(9_999);
-        tracker.record("feed", h).unwrap();
+        tracker.record("feed", h).await.unwrap();
 
         let req = tracker.build_request("feed");
         assert_eq!(req.array, "feed");
         assert_eq!(req.from_hlc_bytes, h.to_bytes());
     }
 
-    #[test]
-    fn build_request_zero_when_unknown() {
-        let tracker = make_tracker();
+    #[tokio::test]
+    async fn build_request_zero_when_unknown() {
+        let tracker = make_tracker().await;
         let req = tracker.build_request("unknown");
         assert_eq!(req.from_hlc_bytes, Hlc::ZERO.to_bytes());
     }

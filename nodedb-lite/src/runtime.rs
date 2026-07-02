@@ -4,8 +4,9 @@
 //! This module provides a thin abstraction over the differences so engine
 //! code doesn't need `#[cfg]` everywhere.
 //!
-//! **Native (iOS/Android/Desktop):** Tokio — `spawn`, `spawn_blocking`, `sleep`.
-//! **WASM (Browser):** `wasm-bindgen-futures` — `spawn_local`, no blocking threads.
+//! **Native (iOS/Android/Desktop):** Tokio — `spawn`, `spawn_blocking`, `sleep`, `interval`.
+//! **WASM (Browser):** `wasm-bindgen-futures` + `gloo-timers` — `spawn_local`, no blocking
+//! threads, timer-backed sleep and interval.
 
 use std::future::Future;
 use std::time::Duration;
@@ -13,7 +14,8 @@ use std::time::Duration;
 /// Spawn a future on the runtime.
 ///
 /// - Native: `tokio::spawn` (runs on Tokio thread pool, requires `Send`).
-/// - WASM: `wasm_bindgen_futures::spawn_local` (runs on the microtask queue).
+/// - WASM: `wasm_bindgen_futures::spawn_local` (runs on the microtask queue,
+///   no `Send` requirement).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn spawn<F>(future: F)
 where
@@ -27,11 +29,7 @@ pub fn spawn<F>(future: F)
 where
     F: Future<Output = ()> + 'static,
 {
-    // wasm_bindgen_futures::spawn_local(future);
-    // For now, this is a compile-gate placeholder. The actual
-    // wasm-bindgen-futures dependency is added when WASM support
-    // is fully wired.
-    let _ = future;
+    wasm_bindgen_futures::spawn_local(future);
 }
 
 /// Run a blocking closure off the async runtime.
@@ -67,7 +65,7 @@ where
 /// Sleep for a duration.
 ///
 /// - Native: `tokio::time::sleep`.
-/// - WASM: placeholder (will use `gloo_timers` or JS `setTimeout` via wasm-bindgen).
+/// - WASM: `gloo_timers::future::sleep` (backed by JS `setTimeout`).
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn sleep(duration: Duration) {
     tokio::time::sleep(duration).await;
@@ -75,21 +73,52 @@ pub async fn sleep(duration: Duration) {
 
 #[cfg(target_arch = "wasm32")]
 pub async fn sleep(duration: Duration) {
-    // Placeholder for WASM sleep. In production, this would use:
-    // gloo_timers::future::sleep(duration).await
-    let _ = duration;
+    gloo_timers::future::sleep(duration).await;
 }
 
-/// Create a recurring interval timer.
+/// A recurring interval timer.
 ///
-/// Returns a stream-like async function that yields at each tick.
-/// Used by the sync client for periodic keepalive and vector clock exchange.
+/// Obtain one via [`interval`]. Call `.tick().await` to wait for each period.
 ///
-/// - Native: `tokio::time::interval`.
-/// - WASM: placeholder (will use `gloo_timers::future::IntervalStream`).
-#[cfg(not(target_arch = "wasm32"))]
-pub fn interval(period: Duration) -> tokio::time::Interval {
-    tokio::time::interval(period)
+/// On native the first `tick()` returns immediately (matches Tokio semantics).
+/// On WASM the first `tick()` waits one full period. The primary consumer
+/// (sync keepalive) tolerates either behaviour.
+pub struct Interval {
+    #[cfg(not(target_arch = "wasm32"))]
+    inner: tokio::time::Interval,
+    #[cfg(target_arch = "wasm32")]
+    period: Duration,
+}
+
+impl Interval {
+    /// Wait until the next tick.
+    pub async fn tick(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.inner.tick().await;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            gloo_timers::future::sleep(self.period).await;
+        }
+    }
+}
+
+/// Create a recurring interval timer that ticks every `period`.
+///
+/// - Native: wraps `tokio::time::interval`; first tick is immediate.
+/// - WASM: backed by `gloo_timers`; first tick waits one period.
+pub fn interval(period: Duration) -> Interval {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Interval {
+            inner: tokio::time::interval(period),
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        Interval { period }
+    }
 }
 
 /// Get the current timestamp in milliseconds since Unix epoch.
@@ -105,10 +134,18 @@ pub fn now_millis() -> u64 {
     }
     #[cfg(target_arch = "wasm32")]
     {
-        // js_sys::Date::now() returns milliseconds as f64.
-        // For now, return 0 — wired when wasm-bindgen is added.
-        0
+        // js_sys::Date::now() returns milliseconds since epoch as f64.
+        js_sys::Date::now() as u64
     }
+}
+
+/// Get the current timestamp in milliseconds since Unix epoch, as `i64`.
+///
+/// Same clock as [`now_millis`] but signed, for the system/valid-time fields
+/// used by the bitemporal engines. Platform-independent — works on native and
+/// WASM.
+pub fn now_millis_i64() -> i64 {
+    now_millis() as i64
 }
 
 /// Get the current timestamp in seconds since Unix epoch.
@@ -152,9 +189,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn interval_creation() {
-        let _iv = interval(Duration::from_secs(1));
-        // Just verify it compiles and doesn't panic.
+    async fn interval_ticks_twice() {
+        let mut iv = interval(Duration::from_millis(1));
+        // First tick is immediate on native (Tokio semantics).
+        iv.tick().await;
+        // Second tick waits one period — should still resolve promptly.
+        iv.tick().await;
     }
 
     #[tokio::test]

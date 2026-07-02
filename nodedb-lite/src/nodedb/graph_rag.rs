@@ -13,7 +13,7 @@ use nodedb_types::id::NodeId;
 use nodedb_types::result::SearchResult;
 
 use super::{LockExt, NodeDbLite};
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 /// GraphRAG fusion parameters.
 pub struct GraphRagParams<'a> {
@@ -47,7 +47,7 @@ impl Default for GraphRagParams<'_> {
     }
 }
 
-impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
+impl<S: StorageEngine> NodeDbLite<S> {
     /// GraphRAG fusion: vector search → graph expansion → RRF merge.
     ///
     /// 1. Vector search returns `vector_k` candidates by embedding similarity.
@@ -67,6 +67,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
                 params.query,
                 params.vector_k,
                 params.filter,
+                None,
             )
             .await?;
 
@@ -80,8 +81,11 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         // Expand graph from vector results and build a graph-ranked list.
         let mut graph_nodes: Vec<(String, usize)> = Vec::new(); // (node_id, depth)
         for result in &vector_results {
-            let start = NodeId::new(result.id.clone());
-            if let Ok(subgraph) = self.graph_traverse(&start, params.graph_depth, None).await {
+            let start = NodeId::from_validated(result.id.clone());
+            if let Ok(subgraph) = self
+                .graph_traverse(params.collection, &start, params.graph_depth, None)
+                .await
+            {
                 for node in &subgraph.nodes {
                     if node.depth == 0 {
                         continue;
@@ -122,7 +126,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
                 if let Some(vr) = vector_map.get(f.document_id.as_str()) {
                     SearchResult {
                         id: f.document_id.clone(),
-                        node_id: Some(NodeId::new(f.document_id)),
+                        node_id: Some(NodeId::from_validated(f.document_id.clone())),
                         distance: vr.distance,
                         metadata: vr.metadata.clone(),
                     }
@@ -142,7 +146,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
                     };
                     SearchResult {
                         id: f.document_id.clone(),
-                        node_id: Some(NodeId::new(f.document_id)),
+                        node_id: Some(NodeId::from_validated(f.document_id.clone())),
                         distance: f.rrf_score as f32,
                         metadata,
                     }
@@ -189,7 +193,7 @@ fn search_results_to_ranked(
         .collect()
 }
 
-impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
+impl<S: StorageEngine> NodeDbLite<S> {
     /// Hybrid search: vector similarity + BM25 text relevance fused via RRF.
     ///
     /// 1. Vector search returns `vector_k` candidates by embedding similarity.
@@ -208,15 +212,18 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
                 params.query_embedding,
                 params.vector_k,
                 params.filter,
+                None,
             )
             .await?;
 
         let text_results = self
             .text_search(
                 params.collection,
+                "",
                 params.query_text,
                 params.text_k,
                 nodedb_types::TextSearchParams::default(),
+                None,
             )
             .await?;
 

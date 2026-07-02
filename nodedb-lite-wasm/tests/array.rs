@@ -25,8 +25,10 @@ use js_sys::Uint8Array;
 use nodedb_array::schema::ArraySchemaBuilder;
 use nodedb_array::schema::attr_spec::{AttrSpec, AttrType};
 use nodedb_array::schema::dim_spec::{DimSpec, DimType};
+use nodedb_array::types::Domain;
 use nodedb_array::types::cell_value::value::CellValue;
 use nodedb_array::types::coord::value::CoordValue;
+use nodedb_array::types::domain::DomainBound;
 use nodedb_lite_wasm::NodeDbLiteWasm;
 use wasm_bindgen_test::*;
 
@@ -39,9 +41,17 @@ fn encode<T: zerompk::ToMessagePack>(v: &T) -> Uint8Array {
 
 fn two_d_schema() -> nodedb_array::schema::ArraySchema {
     ArraySchemaBuilder::new("a")
-        .dim(DimSpec::new("x", DimType::Int64, 0, 1024))
-        .dim(DimSpec::new("y", DimType::Int64, 0, 1024))
-        .attr(AttrSpec::new("v", AttrType::Float64))
+        .dim(DimSpec::new(
+            "x",
+            DimType::Int64,
+            Domain::new(DomainBound::Int64(0), DomainBound::Int64(1024)),
+        ))
+        .dim(DimSpec::new(
+            "y",
+            DimType::Int64,
+            Domain::new(DomainBound::Int64(0), DomainBound::Int64(1024)),
+        ))
+        .attr(AttrSpec::new("v", AttrType::Float64, false))
         .tile_extents(vec![64, 64])
         .build()
         .expect("schema build")
@@ -57,7 +67,7 @@ fn float_attrs(v: f64) -> Vec<CellValue> {
 
 #[wasm_bindgen_test]
 async fn create_put_slice_roundtrip() {
-    let db = NodeDbLiteWasm::open(":memory:").await.expect("open");
+    let db = NodeDbLiteWasm::open(1u64).await.expect("open");
     let schema = encode(&two_d_schema());
     db.array_create("a", &schema).await.expect("create");
 

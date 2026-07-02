@@ -13,8 +13,8 @@ use nodedb_array::schema::dim_spec::{DimSpec, DimType};
 use nodedb_array::types::cell_value::value::CellValue;
 use nodedb_array::types::coord::value::CoordValue;
 use nodedb_array::types::domain::{Domain, DomainBound};
+use nodedb_lite::PagedbStorageMem;
 use nodedb_lite::engine::array::ArrayEngineState;
-use nodedb_lite::storage::redb_storage::RedbStorage;
 use nodedb_types::OPEN_UPPER;
 use std::sync::Arc;
 
@@ -31,18 +31,21 @@ fn schema() -> nodedb_array::schema::ArraySchema {
         .unwrap()
 }
 
-fn open_engine(storage: &Arc<RedbStorage>) -> ArrayEngineState {
-    ArrayEngineState::open(storage).unwrap()
+async fn open_engine(storage: &Arc<PagedbStorageMem>) -> ArrayEngineState {
+    ArrayEngineState::open(storage).await.unwrap()
 }
 
 // ── Test 1: create + put + slice round-trip ───────────────────────────────────
 
-#[test]
-fn create_put_slice_roundtrip() {
-    let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
-    let mut engine = open_engine(&storage);
+#[tokio::test]
+async fn create_put_slice_roundtrip() {
+    let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+    let mut engine = open_engine(&storage).await;
 
-    engine.create_array(&storage, "grid", schema()).unwrap();
+    engine
+        .create_array(&storage, "grid", schema())
+        .await
+        .unwrap();
     engine
         .put_cell(
             &storage,
@@ -53,6 +56,7 @@ fn create_put_slice_roundtrip() {
             0,
             OPEN_UPPER,
         )
+        .await
         .unwrap();
     engine
         .put_cell(
@@ -64,8 +68,9 @@ fn create_put_slice_roundtrip() {
             0,
             OPEN_UPPER,
         )
+        .await
         .unwrap();
-    engine.flush(&storage, "grid").unwrap();
+    engine.flush(&storage, "grid").await.unwrap();
 
     let cells = engine
         .slice(
@@ -74,6 +79,7 @@ fn create_put_slice_roundtrip() {
             vec![None], // unconstrained
             i64::MAX,
         )
+        .await
         .unwrap();
 
     assert_eq!(cells.len(), 2, "expected 2 live cells from slice");
@@ -92,12 +98,12 @@ fn create_put_slice_roundtrip() {
 
 // ── Test 2: bitemporal AS-OF system-time correctness ─────────────────────────
 
-#[test]
-fn bitemporal_as_of_system_time() {
-    let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
-    let mut engine = open_engine(&storage);
+#[tokio::test]
+async fn bitemporal_as_of_system_time() {
+    let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+    let mut engine = open_engine(&storage).await;
 
-    engine.create_array(&storage, "bt", schema()).unwrap();
+    engine.create_array(&storage, "bt", schema()).await.unwrap();
 
     // v1 written at system_time=100.
     engine
@@ -110,6 +116,7 @@ fn bitemporal_as_of_system_time() {
             0,
             OPEN_UPPER,
         )
+        .await
         .unwrap();
 
     // v2 written at system_time=200 (same coord, newer value).
@@ -123,13 +130,15 @@ fn bitemporal_as_of_system_time() {
             0,
             OPEN_UPPER,
         )
+        .await
         .unwrap();
 
-    engine.flush(&storage, "bt").unwrap();
+    engine.flush(&storage, "bt").await.unwrap();
 
     // AS-OF 150 → should see v1 (sys=100) not v2 (sys=200).
     let result_150 = engine
         .read_coord(&storage, "bt", &[CoordValue::Int64(1)], 150)
+        .await
         .unwrap();
     assert!(result_150.is_some(), "expected a result AS-OF 150");
     let val_150 = match result_150.unwrap().attrs[0] {
@@ -141,6 +150,7 @@ fn bitemporal_as_of_system_time() {
     // AS-OF 300 → should see v2 (sys=200).
     let result_300 = engine
         .read_coord(&storage, "bt", &[CoordValue::Int64(1)], 300)
+        .await
         .unwrap();
     assert!(result_300.is_some(), "expected a result AS-OF 300");
     let val_300 = match result_300.unwrap().attrs[0] {
@@ -152,14 +162,17 @@ fn bitemporal_as_of_system_time() {
 
 // ── Test 3: restart durability ────────────────────────────────────────────────
 
-#[test]
-fn restart_durability() {
-    let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
+#[tokio::test]
+async fn restart_durability() {
+    let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
 
     // Write and flush.
     {
-        let mut engine = open_engine(&storage);
-        engine.create_array(&storage, "durable", schema()).unwrap();
+        let mut engine = open_engine(&storage).await;
+        engine
+            .create_array(&storage, "durable", schema())
+            .await
+            .unwrap();
         engine
             .put_cell(
                 &storage,
@@ -170,17 +183,19 @@ fn restart_durability() {
                 0,
                 OPEN_UPPER,
             )
+            .await
             .unwrap();
-        engine.flush(&storage, "durable").unwrap();
+        engine.flush(&storage, "durable").await.unwrap();
         // Engine dropped here — no more references.
     }
 
     // Reopen from the same storage.
-    let mut engine2 = open_engine(&storage);
+    let mut engine2 = open_engine(&storage).await;
 
     // Array should be restored from catalog.
     let result = engine2
         .read_coord(&storage, "durable", &[CoordValue::Int64(3)], i64::MAX)
+        .await
         .unwrap();
     assert!(result.is_some(), "data must survive engine restart");
     assert_eq!(
@@ -192,18 +207,22 @@ fn restart_durability() {
     // Slice should also work.
     let cells = engine2
         .slice(&storage, "durable", vec![None], i64::MAX)
+        .await
         .unwrap();
     assert_eq!(cells.len(), 1);
 }
 
 // ── Test 4: tombstone → coord NotFound after delete ──────────────────────────
 
-#[test]
-fn tombstone_coord_not_found() {
-    let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
-    let mut engine = open_engine(&storage);
+#[tokio::test]
+async fn tombstone_coord_not_found() {
+    let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+    let mut engine = open_engine(&storage).await;
 
-    engine.create_array(&storage, "del", schema()).unwrap();
+    engine
+        .create_array(&storage, "del", schema())
+        .await
+        .unwrap();
     engine
         .put_cell(
             &storage,
@@ -214,16 +233,18 @@ fn tombstone_coord_not_found() {
             0,
             OPEN_UPPER,
         )
+        .await
         .unwrap();
     // Delete at a later system time.
     engine
         .delete_cell("del", vec![CoordValue::Int64(7)], 20)
         .unwrap();
-    engine.flush(&storage, "del").unwrap();
+    engine.flush(&storage, "del").await.unwrap();
 
     // AS-OF the current system (tombstone visible) → None.
     let result = engine
         .read_coord(&storage, "del", &[CoordValue::Int64(7)], i64::MAX)
+        .await
         .unwrap();
     assert!(
         result.is_none(),
@@ -233,6 +254,7 @@ fn tombstone_coord_not_found() {
     // AS-OF before the delete → the original cell is still visible.
     let before = engine
         .read_coord(&storage, "del", &[CoordValue::Int64(7)], 15)
+        .await
         .unwrap();
     assert!(
         before.is_some(),
@@ -242,12 +264,15 @@ fn tombstone_coord_not_found() {
 
 // ── Test 5: GDPR erasure ─────────────────────────────────────────────────────
 
-#[test]
-fn gdpr_erasure() {
-    let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
-    let mut engine = open_engine(&storage);
+#[tokio::test]
+async fn gdpr_erasure() {
+    let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+    let mut engine = open_engine(&storage).await;
 
-    engine.create_array(&storage, "gdpr", schema()).unwrap();
+    engine
+        .create_array(&storage, "gdpr", schema())
+        .await
+        .unwrap();
     engine
         .put_cell(
             &storage,
@@ -258,18 +283,21 @@ fn gdpr_erasure() {
             0,
             OPEN_UPPER,
         )
+        .await
         .unwrap();
-    engine.flush(&storage, "gdpr").unwrap();
+    engine.flush(&storage, "gdpr").await.unwrap();
 
     // Erase at a later system time.
     engine
         .gdpr_erase_cell(&storage, "gdpr", vec![CoordValue::Int64(2)], 200)
+        .await
         .unwrap();
     // gdpr_erase_cell flushes automatically.
 
     // coord must return None.
     let result = engine
         .read_coord(&storage, "gdpr", &[CoordValue::Int64(2)], i64::MAX)
+        .await
         .unwrap();
     assert!(
         result.is_none(),
@@ -279,9 +307,10 @@ fn gdpr_erasure() {
     // Additionally check that the erasure is durable across restart.
     drop(engine);
 
-    let mut engine2 = open_engine(&storage);
+    let mut engine2 = open_engine(&storage).await;
     let result2 = engine2
         .read_coord(&storage, "gdpr", &[CoordValue::Int64(2)], i64::MAX)
+        .await
         .unwrap();
     assert!(
         result2.is_none(),
@@ -291,6 +320,7 @@ fn gdpr_erasure() {
     // Verify the original pre-erasure value is gone via slice as well.
     let cells = engine2
         .slice(&storage, "gdpr", vec![None], i64::MAX)
+        .await
         .unwrap();
     assert!(
         cells.is_empty(),

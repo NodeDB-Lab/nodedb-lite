@@ -7,7 +7,7 @@ use nodedb_lite_ffi::*;
 fn open_close_in_memory() {
     let path = CString::new(":memory:").unwrap();
     unsafe {
-        let handle = nodedb_open(path.as_ptr(), 1);
+        let handle = nodedb_open(path.as_ptr(), 1, std::ptr::null());
         assert!(!handle.is_null());
         nodedb_close(handle);
     }
@@ -31,7 +31,7 @@ fn close_null_is_noop() {
 fn vector_insert_and_search() {
     let path = CString::new(":memory:").unwrap();
     unsafe {
-        let handle = nodedb_open(path.as_ptr(), 1);
+        let handle = nodedb_open(path.as_ptr(), 1, std::ptr::null());
         assert!(!handle.is_null());
 
         let coll = CString::new("vecs").unwrap();
@@ -59,17 +59,24 @@ fn vector_insert_and_search() {
 fn graph_insert_and_traverse() {
     let path = CString::new(":memory:").unwrap();
     unsafe {
-        let handle = nodedb_open(path.as_ptr(), 1);
+        let handle = nodedb_open(path.as_ptr(), 1, std::ptr::null());
 
+        let collection = CString::new("social").unwrap();
         let from = CString::new("alice").unwrap();
         let to = CString::new("bob").unwrap();
         let label = CString::new("KNOWS").unwrap();
 
-        let rc = nodedb_graph_insert_edge(handle, from.as_ptr(), to.as_ptr(), label.as_ptr());
+        let rc = nodedb_graph_insert_edge(
+            handle,
+            collection.as_ptr(),
+            from.as_ptr(),
+            to.as_ptr(),
+            label.as_ptr(),
+        );
         assert_eq!(rc, NODEDB_OK);
 
         let mut out: *mut c_char = std::ptr::null_mut();
-        let rc = nodedb_graph_traverse(handle, from.as_ptr(), 2, &mut out);
+        let rc = nodedb_graph_traverse(handle, collection.as_ptr(), from.as_ptr(), 2, &mut out);
         assert_eq!(rc, NODEDB_OK);
         assert!(!out.is_null());
 
@@ -86,7 +93,7 @@ fn graph_insert_and_traverse() {
 fn document_crud_via_ffi() {
     let path = CString::new(":memory:").unwrap();
     unsafe {
-        let handle = nodedb_open(path.as_ptr(), 1);
+        let handle = nodedb_open(path.as_ptr(), 1, std::ptr::null());
 
         let coll = CString::new("notes").unwrap();
         let body = CString::new(r#"{"id":"n1","fields":{"title":{"String":"Hello"}}}"#).unwrap();
@@ -109,6 +116,28 @@ fn document_crud_via_ffi() {
 
         let rc = nodedb_document_get(handle, coll.as_ptr(), id.as_ptr(), &mut out);
         assert_eq!(rc, NODEDB_ERR_NOT_FOUND);
+
+        nodedb_close(handle);
+    }
+}
+
+#[test]
+fn sql_execute_returns_json() {
+    let path = CString::new(":memory:").unwrap();
+    unsafe {
+        let handle = nodedb_open(path.as_ptr(), 1, std::ptr::null());
+        assert!(!handle.is_null());
+
+        // A constant-expression query is always supported.
+        let sql = CString::new("SELECT 1 + 1 AS result").unwrap();
+        let mut out: *mut c_char = std::ptr::null_mut();
+        let rc = nodedb_lite_ffi::nodedb_execute_sql(handle, sql.as_ptr(), &mut out);
+        assert_eq!(rc, NODEDB_OK);
+        assert!(!out.is_null());
+
+        let json = CStr::from_ptr(out).to_str().unwrap();
+        assert!(json.contains("columns") || json.contains("rows"));
+        nodedb_free_string(out);
 
         nodedb_close(handle);
     }

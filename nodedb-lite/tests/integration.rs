@@ -6,13 +6,13 @@
 use std::sync::Arc;
 
 use nodedb_client::NodeDb;
-use nodedb_lite::{NodeDbLite, RedbStorage};
+use nodedb_lite::{Encryption, NodeDbLite, PagedbStorageDefault, PagedbStorageMem};
 use nodedb_types::document::Document;
 use nodedb_types::id::NodeId;
 use nodedb_types::value::Value;
 
-async fn open_test_db() -> NodeDbLite<RedbStorage> {
-    let storage = RedbStorage::open_in_memory().unwrap();
+async fn open_test_db() -> NodeDbLite<PagedbStorageMem> {
+    let storage = PagedbStorageMem::open_in_memory().await.unwrap();
     NodeDbLite::open(storage, 1).await.unwrap()
 }
 
@@ -41,7 +41,10 @@ async fn vector_batch_insert_and_search_correctness() {
     db.batch_vector_insert("vecs", &refs).unwrap();
 
     let query: Vec<f32> = (0..dim).map(|d| ((25 * dim + d) as f32) * 0.001).collect();
-    let results = db.vector_search("vecs", &query, 10, None).await.unwrap();
+    let results = db
+        .vector_search("vecs", &query, 10, None, None)
+        .await
+        .unwrap();
 
     assert_eq!(results.len(), 10);
     for w in results.windows(2) {
@@ -78,11 +81,11 @@ async fn graph_batch_and_traverse_correctness() {
         .map(|(s, d, l)| (s.as_str(), d.as_str(), *l))
         .collect();
 
-    db.batch_graph_insert_edges(&refs).unwrap();
+    db.batch_graph_insert_edges("graph", &refs).unwrap();
     db.compact_graph().unwrap();
 
     let subgraph = db
-        .graph_traverse(&NodeId::new("n0"), 2, None)
+        .graph_traverse("graph", &NodeId::from_validated("n0".to_string()), 2, None)
         .await
         .unwrap();
 
@@ -136,10 +139,13 @@ async fn multi_modal_vector_graph_document() {
     )
     .unwrap();
 
-    db.batch_graph_insert_edges(&[
-        ("concept-ai", "concept-ml", "RELATES_TO"),
-        ("concept-ml", "concept-db", "USES"),
-    ])
+    db.batch_graph_insert_edges(
+        "kb",
+        &[
+            ("concept-ai", "concept-ml", "RELATES_TO"),
+            ("concept-ml", "concept-db", "USES"),
+        ],
+    )
     .unwrap();
 
     let mut doc = Document::new("note-1");
@@ -148,13 +154,13 @@ async fn multi_modal_vector_graph_document() {
 
     // Vector search → graph traverse → document read.
     let results = db
-        .vector_search("kb", &[1.0, 0.0, 0.0], 2, None)
+        .vector_search("kb", &[1.0, 0.0, 0.0], 2, None, None)
         .await
         .unwrap();
     assert!(!results.is_empty());
 
-    let start = NodeId::new(results[0].id.clone());
-    let subgraph = db.graph_traverse(&start, 2, None).await.unwrap();
+    let start = NodeId::from_validated(results[0].id.clone());
+    let subgraph = db.graph_traverse("kb", &start, 2, None).await.unwrap();
     assert!(subgraph.node_count() >= 1);
 
     let note = db.document_get("notes", "note-1").await.unwrap().unwrap();
@@ -169,12 +175,15 @@ async fn flush_and_reopen_persists_all() {
     let path = dir.path().join("persist.db");
 
     {
-        let storage = RedbStorage::open(&path).unwrap();
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+            .await
+            .unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
 
         db.batch_vector_insert("vecs", &[("v1", &[1.0, 2.0, 3.0][..])])
             .unwrap();
-        db.batch_graph_insert_edges(&[("a", "b", "KNOWS")]).unwrap();
+        db.batch_graph_insert_edges("vecs", &[("a", "b", "KNOWS")])
+            .unwrap();
         let mut doc = Document::new("d1");
         doc.set("key", Value::String("persistent".into()));
         db.document_put("docs", doc).await.unwrap();
@@ -183,19 +192,24 @@ async fn flush_and_reopen_persists_all() {
     }
 
     {
-        let storage = RedbStorage::open(&path).unwrap();
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+            .await
+            .unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
 
         let doc = db.document_get("docs", "d1").await.unwrap();
         assert!(doc.is_some(), "document should persist across restart");
 
         let results = db
-            .vector_search("vecs", &[1.0, 2.0, 3.0], 1, None)
+            .vector_search("vecs", &[1.0, 2.0, 3.0], 1, None, None)
             .await
             .unwrap();
         assert!(!results.is_empty(), "vector should persist across restart");
 
-        let sg = db.graph_traverse(&NodeId::new("a"), 1, None).await.unwrap();
+        let sg = db
+            .graph_traverse("vecs", &NodeId::from_validated("a".to_string()), 1, None)
+            .await
+            .unwrap();
         assert!(sg.node_count() >= 2, "graph should persist across restart");
     }
 }
@@ -207,9 +221,15 @@ async fn all_operations_generate_deltas() {
     let db = open_test_db().await;
 
     db.vector_insert("v", "v1", &[1.0], None).await.unwrap();
-    db.graph_insert_edge(&NodeId::new("a"), &NodeId::new("b"), "L", None)
-        .await
-        .unwrap();
+    db.graph_insert_edge(
+        "test",
+        &NodeId::from_validated("a".to_string()),
+        &NodeId::from_validated("b".to_string()),
+        "L",
+        None,
+    )
+    .await
+    .unwrap();
     db.document_put("d", Document::new("d1")).await.unwrap();
     db.document_delete("d", "d1").await.unwrap();
 
@@ -225,14 +245,14 @@ async fn all_operations_generate_deltas() {
 
 #[tokio::test]
 async fn arc_dyn_nodedb_pattern() {
-    let storage = RedbStorage::open_in_memory().unwrap();
+    let storage = PagedbStorageMem::open_in_memory().await.unwrap();
     let db: Arc<dyn NodeDb> = Arc::new(NodeDbLite::open(storage, 1).await.unwrap());
 
     db.vector_insert("coll", "v1", &[1.0, 0.0], None)
         .await
         .unwrap();
     let results = db
-        .vector_search("coll", &[1.0, 0.0], 1, None)
+        .vector_search("coll", &[1.0, 0.0], 1, None, None)
         .await
         .unwrap();
     assert_eq!(results.len(), 1);

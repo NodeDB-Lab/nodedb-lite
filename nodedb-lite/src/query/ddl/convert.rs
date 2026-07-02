@@ -106,7 +106,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
 
         // Create columnar collection.
         self.columnar
-            .create_collection(&source_name, columnar_schema, ColumnarProfile::Plain)
+            .create_collection(&source_name, columnar_schema, ColumnarProfile::Plain, false)
             .await?;
 
         // Insert rows.

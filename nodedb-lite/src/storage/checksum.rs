@@ -1,7 +1,7 @@
 //! CRC32C integrity verification for persisted checkpoints.
 //!
-//! All large blobs persisted to redb (Loro snapshots, HNSW checkpoints,
-//! CSR checkpoints) are wrapped in a checksummed envelope:
+//! All large blobs persisted by the storage engine (Loro snapshots, HNSW
+//! checkpoints, CSR checkpoints) are wrapped in a checksummed envelope:
 //!
 //! ```text
 //! [payload: N bytes][crc32c: 4 bytes LE]

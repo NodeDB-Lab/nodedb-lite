@@ -148,7 +148,7 @@ impl TimeseriesShapeManager {
         self.shapes.is_empty()
     }
 
-    /// Export for persistence (redb serialization).
+    /// Export for persistence (KV serialization).
     pub fn export(&self) -> Vec<(String, CachedShapeData)> {
         self.shapes
             .iter()

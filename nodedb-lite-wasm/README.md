@@ -2,19 +2,17 @@
 
 WebAssembly bindings for **NodeDB-Lite**, the embedded variant of NodeDB. Runs in browsers and Node.js. Exposes all eight Lite engines (Vector, Graph, Document schemaless, Document strict, Columnar/Timeseries/Spatial, KV, FTS, Array) through a single `NodeDb` API.
 
-> **Lite only.** This crate is *not* a WASM build of the Origin server. The distributed Origin engine (Tokio Control Plane, io_uring Data Plane, QUIC cluster transport) does not target WebAssembly. To talk to an Origin cluster from the browser, run Lite-WASM locally and sync via WebSocket. See the [WASM deployment guide](../../nodedb/docs/wasm.md) for the full picture.
+> **Lite only.** This crate is _not_ a WASM build of the Origin server. The distributed Origin engine (Tokio Control Plane, io_uring Data Plane, QUIC cluster transport) does not target WebAssembly. To talk to an Origin cluster from the browser, run Lite-WASM locally and sync via WebSocket. See the [WASM deployment guide](https://nodedb.dev/docs/wasm) for the full picture.
 
 ## Status
 
-**Experimental / preview.** Build and basic engine usage work end-to-end. A WASM CI lane runs `cargo check --workspace --target wasm32-unknown-unknown`, a release build via `wasm-pack build`, and the `wasm-pack test --node` suite on every PR.
-
-Outstanding items before this is considered stable:
-
-- Published `npm` package
-
-Until that lands, treat the WASM target as preview. File issues for anything that breaks.
+Ships as part of NodeDB Lite `0.1.0`. The WASM CI lane runs `cargo check --workspace --target wasm32-unknown-unknown`, `wasm-pack build`, `wasm-pack test --node`, and `wasm-pack test --headless --chrome` on every PR. The npm package is published as `@nodedb/lite` on tag release (see `release.yml`).
 
 ## Install
+
+```bash
+npm install @nodedb/lite
+```
 
 Local development build:
 
@@ -35,35 +33,70 @@ A published npm package will be available once the project reaches stable status
 ## Quick Start
 
 ```javascript
-import init, { NodeDbLite } from "nodedb-lite-wasm";
+import init, { NodeDbLiteWasm } from "nodedb-lite-wasm";
 
 await init();
-const db = new NodeDbLite();
 
-await db.sql("CREATE COLLECTION users");
-await db.sql("INSERT INTO users { name: 'Alice', age: 30 }");
+// In-memory (no persistence across page reloads):
+const db = await NodeDbLiteWasm.open(1n);
 
-const rows = await db.sql("SELECT * FROM users WHERE age > 25");
-console.log(rows);
+// Insert a document (fields as a JSON string of nodedb_types::Value):
+await db.documentPut(
+  "notes",
+  "n1",
+  JSON.stringify({ title: { String: "Hello" } }),
+);
+
+// Retrieve it:
+const doc = await db.documentGet("notes", "n1");
+console.log(doc);
+
+// Vector search:
+await db.vectorInsert("kb", "v1", new Float32Array([1.0, 0.0, 0.0]));
+const results = await db.vectorSearch(
+  "kb",
+  new Float32Array([1.0, 0.0, 0.0]),
+  5,
+);
+console.log(results); // [{ id: "v1", distance: 0.0 }, ...]
+
+// Graph:
+const edgeId = await db.graphInsertEdge("social", "alice", "bob", "KNOWS");
+const subgraph = await db.graphTraverse("social", "alice", 2);
+
+// Full-text search (field name is required):
+const hits = await db.textSearch("posts", "body", "hello world", 10);
+
+// SQL escape hatch:
+const result = await db.executeSql("SELECT 1");
+console.log(result); // { columns: [...], rows: [...], rows_affected: 0 }
 ```
 
 ## Engines
 
-All eight engines work in WASM with the same SQL surface as native Lite:
+The WASM build exposes the same engines as native Lite via the typed
+`NodeDb` methods (`document_put`, `vector_insert`, `vector_search`,
+`graph_insert_edge`, `graph_traverse`, `text_search`, `kv_put`, etc.).
+SQL DDL coverage is bounded; see
+[`docs/lite-support-matrix.md`](../docs/lite-support-matrix.md) for the
+exact list of executed plan variants. Examples below show the syntax
+each engine accepts when the corresponding DDL/DML variant is in scope —
+several are valid against Origin and return `LiteError::Unsupported`
+when executed against Lite (e.g. `CREATE ARRAY`).
 
-| Engine             | DDL example                                                          |
-| ------------------ | -------------------------------------------------------------------- |
-| Document           | `CREATE COLLECTION docs`                                             |
-| Key-Value          | `CREATE KV cache`                                                    |
-| Vector             | `CREATE VECTOR INDEX idx ON docs METRIC cosine DIM 384`              |
-| Full-text          | `CREATE FTS INDEX idx ON docs FIELD body`                            |
-| Graph              | `CREATE COLLECTION edges` + `GRAPH INSERT EDGE ...`                  |
-| Columnar           | `CREATE COLLECTION events WITH (storage = 'columnar')`               |
-| Timeseries         | `CREATE COLLECTION metrics WITH (profile = 'timeseries', ...)`       |
-| Spatial            | `CREATE COLLECTION places WITH (profile = 'spatial', ...)`           |
-| Array (NDArray)    | `CREATE ARRAY grid DIMS (...) ATTRS (...) TILE_EXTENTS (...)`        |
+| Engine          | DDL example                                                    |
+| --------------- | -------------------------------------------------------------- |
+| Document        | `CREATE COLLECTION docs`                                       |
+| Key-Value       | `CREATE KV cache`                                              |
+| Vector          | `CREATE VECTOR INDEX idx ON docs METRIC cosine DIM 384`        |
+| Full-text       | `CREATE FTS INDEX idx ON docs FIELD body`                      |
+| Graph           | `CREATE COLLECTION edges` + `GRAPH INSERT EDGE ...`            |
+| Columnar        | `CREATE COLLECTION events WITH (storage = 'columnar')`         |
+| Timeseries      | `CREATE COLLECTION metrics WITH (profile = 'timeseries', ...)` |
+| Spatial         | `CREATE COLLECTION places WITH (profile = 'spatial', ...)`     |
+| Array (NDArray) | `CREATE ARRAY grid DIMS (...) ATTRS (...) TILE_EXTENTS (...)`  |
 
-See the [query language reference](../../nodedb/docs/query-language.md).
+See the [query language reference](https://nodedb.dev/docs/query-language).
 
 ## CRDT Sync to Origin
 
@@ -78,7 +111,7 @@ await db.sync_config({
 });
 ```
 
-Origin validates constraints and returns compensation hints on conflict. See [offline sync patterns](../../nodedb/docs/offline-sync-patterns.md).
+Origin validates constraints and returns compensation hints on conflict. See [offline sync patterns](https://nodedb.dev/docs/offline-sync-patterns).
 
 ## Build Targets
 
@@ -136,6 +169,6 @@ Apache-2.0. See the workspace root `LICENSE` file.
 
 ## See Also
 
-- [WASM deployment guide](../../nodedb/docs/wasm.md)
+- [WASM deployment guide](https://nodedb.dev/docs/wasm)
 - [NodeDB-Lite](../nodedb-lite/) — native embedded crate
-- [NodeDB-Lite FFI](../nodedb-lite-ffi/) — C/iOS/Android bindings
+- [NodeDB-Lite FFI](../nodedb-lite-ffi/) — C / Android bindings (iOS lands before 1.0)

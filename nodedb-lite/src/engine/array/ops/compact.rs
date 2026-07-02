@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! `ArrayOp::Compact` handler for NodeDB-Lite.
+//!
+//! Delegates to `crate::engine::array::retention::run_retention` to merge
+//! out-of-horizon tile-versions per segment and rewrite the manifest.
+//! When `audit_retain_ms` is `None` the array has no retention policy and
+//! compact is a no-op (returns `rows_affected = 0`).
+
+use std::sync::Arc;
+
+use nodedb_types::result::QueryResult;
+
+use crate::engine::array::engine::ArrayEngineState;
+use crate::error::LiteError;
+use crate::runtime::now_millis_i64;
+use crate::storage::engine::StorageEngine;
+
+/// Execute `ArrayOp::Compact` for the Lite engine.
+///
+/// If `audit_retain_ms` is `Some`, runs retention merge across every segment
+/// in the manifest and updates the manifest. `rows_affected` is set to the
+/// number of segments rewritten.
+///
+/// If `audit_retain_ms` is `None`, no merge is needed and the call returns
+/// immediately with `rows_affected = 0`.
+pub async fn compact<S: StorageEngine>(
+    array_state: &Arc<tokio::sync::Mutex<ArrayEngineState>>,
+    storage: &Arc<S>,
+    name: &str,
+    audit_retain_ms: Option<i64>,
+) -> Result<QueryResult, LiteError> {
+    let retain_ms = match audit_retain_ms {
+        Some(r) => r,
+        None => {
+            return Ok(QueryResult {
+                columns: vec!["segments_rewritten".to_string()],
+                rows: vec![vec![nodedb_types::value::Value::Integer(0)]],
+                rows_affected: 0,
+            });
+        }
+    };
+
+    let now_ms = now_millis_i64();
+
+    let rewritten = {
+        let mut state = array_state.lock().await;
+        let arr = state
+            .arrays
+            .get_mut(name)
+            .ok_or_else(|| LiteError::BadRequest {
+                detail: format!("array '{name}' not found"),
+            })?;
+        let schema = arr.schema.clone();
+        let schema_hash = arr.schema_hash;
+        // Drop the lock before the async call.
+        let (schema, schema_hash, manifest_snapshot) = (schema, schema_hash, arr.manifest.clone());
+        drop(state);
+        let mut manifest = manifest_snapshot;
+        let n = crate::engine::array::retention::run_retention(
+            storage,
+            name,
+            &mut manifest,
+            &schema,
+            schema_hash,
+            retain_ms,
+            now_ms,
+        )
+        .await?;
+        // Write the updated manifest back.
+        let mut state = array_state.lock().await;
+        if let Some(arr) = state.arrays.get_mut(name) {
+            arr.manifest = manifest;
+        }
+        n
+    };
+
+    Ok(QueryResult {
+        columns: vec!["segments_rewritten".to_string()],
+        rows: vec![vec![nodedb_types::value::Value::Integer(rewritten as i64)]],
+        rows_affected: rewritten as u64,
+    })
+}

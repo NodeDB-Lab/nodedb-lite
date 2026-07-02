@@ -2,10 +2,10 @@
 //! data survives in storage, lazy reload on next access.
 
 use nodedb_client::NodeDb;
-use nodedb_lite::{NodeDbLite, RedbStorage};
+use nodedb_lite::{Encryption, NodeDbLite, PagedbStorageDefault, PagedbStorageMem};
 
-async fn open_db_with_budget(budget: usize) -> NodeDbLite<RedbStorage> {
-    let storage = RedbStorage::open_in_memory().unwrap();
+async fn open_db_with_budget(budget: usize) -> NodeDbLite<PagedbStorageMem> {
+    let storage = PagedbStorageMem::open_in_memory().await.unwrap();
     NodeDbLite::open_with_budget(storage, 1, budget)
         .await
         .unwrap()
@@ -80,7 +80,7 @@ async fn evicted_collection_lazily_reloads_on_search() {
     // Search — should lazily reload from storage.
     let query: Vec<f32> = (0..8).map(|d| (d as f32) * 0.01).collect();
     let results = db
-        .vector_search("lazy_coll", &query, 5, None)
+        .vector_search("lazy_coll", &query, 5, None, None)
         .await
         .unwrap();
     assert!(!results.is_empty(), "search should work after lazy reload");
@@ -123,11 +123,13 @@ async fn check_and_evict_responds_to_pressure() {
 #[tokio::test]
 async fn startup_loads_only_persisted_collections() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("lazy_start.redb");
+    let path = dir.path().join("lazy_start.pagedb");
 
     // Write data, flush, close.
     {
-        let storage = RedbStorage::open(&path).unwrap();
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+            .await
+            .unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
 
         db.batch_vector_insert("active", &[("v1", &[1.0f32, 0.0][..])])
@@ -139,7 +141,9 @@ async fn startup_loads_only_persisted_collections() {
 
     // Reopen — both should be loaded from storage.
     {
-        let storage = RedbStorage::open(&path).unwrap();
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+            .await
+            .unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
 
         let loaded = db.loaded_collections().unwrap();

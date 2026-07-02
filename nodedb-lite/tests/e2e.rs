@@ -3,13 +3,13 @@
 //! CRDT convergence works across instances, and the compensation flow is correct.
 
 use nodedb_client::NodeDb;
-use nodedb_lite::{NodeDbLite, RedbStorage};
+use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 use nodedb_types::document::Document;
 use nodedb_types::id::NodeId;
 use nodedb_types::value::Value;
 
-async fn open_db() -> NodeDbLite<RedbStorage> {
-    let storage = RedbStorage::open_in_memory().unwrap();
+async fn open_db() -> NodeDbLite<PagedbStorageMem> {
+    let storage = PagedbStorageMem::open_in_memory().await.unwrap();
     NodeDbLite::open(storage, 1).await.unwrap()
 }
 
@@ -57,11 +57,11 @@ async fn e2e_memory_stays_within_budget() {
 async fn e2e_two_lite_instances_crdt_convergence() {
     // Simulate two Lite devices making independent edits, then merging.
     let db1 = {
-        let s = RedbStorage::open_in_memory().unwrap();
+        let s = PagedbStorageMem::open_in_memory().await.unwrap();
         NodeDbLite::open(s, 1).await.unwrap()
     };
     let db2 = {
-        let s = RedbStorage::open_in_memory().unwrap();
+        let s = PagedbStorageMem::open_in_memory().await.unwrap();
         NodeDbLite::open(s, 2).await.unwrap()
     };
 
@@ -164,15 +164,24 @@ async fn e2e_native_full_suite_passes() {
         .await
         .unwrap();
     let r = db
-        .vector_search("test", &[1.0, 0.0], 1, None)
+        .vector_search("test", &[1.0, 0.0], 1, None, None)
         .await
         .unwrap();
     assert_eq!(r.len(), 1);
 
-    db.graph_insert_edge(&NodeId::new("a"), &NodeId::new("b"), "L", None)
+    db.graph_insert_edge(
+        "test",
+        &NodeId::from_validated("a".to_string()),
+        &NodeId::from_validated("b".to_string()),
+        "L",
+        None,
+    )
+    .await
+    .unwrap();
+    let sg = db
+        .graph_traverse("test", &NodeId::from_validated("a".to_string()), 1, None)
         .await
         .unwrap();
-    let sg = db.graph_traverse(&NodeId::new("a"), 1, None).await.unwrap();
     assert!(sg.node_count() >= 2);
 
     db.document_put("d", Document::new("d1")).await.unwrap();

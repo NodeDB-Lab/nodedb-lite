@@ -12,7 +12,7 @@ use nodedb_array::sync::replica_id::ReplicaId;
 use nodedb_types::Namespace;
 
 use crate::error::LiteError;
-use crate::storage::engine::StorageEngineSync;
+use crate::storage::engine::StorageEngine;
 
 /// Storage key for the persistent replica id.
 const REPLICA_ID_KEY: &[u8] = b"array.replica_id";
@@ -32,8 +32,8 @@ impl ReplicaState {
     /// If no stored id is found, generates a fresh UUID-v7-derived [`ReplicaId`]
     /// and persists it before returning. On subsequent opens the same id is
     /// returned.
-    pub fn load_or_init<S: StorageEngineSync>(storage: &S) -> Result<Self, LiteError> {
-        let existing = storage.get_sync(Namespace::Meta, REPLICA_ID_KEY)?;
+    pub async fn load_or_init<S: StorageEngine>(storage: &S) -> Result<Self, LiteError> {
+        let existing = storage.get(Namespace::Meta, REPLICA_ID_KEY).await?;
 
         let replica_id = if let Some(bytes) = existing {
             if bytes.len() != 8 {
@@ -47,7 +47,9 @@ impl ReplicaState {
             ReplicaId::new(u64::from_be_bytes(arr))
         } else {
             let id = ReplicaId::generate();
-            storage.put_sync(Namespace::Meta, REPLICA_ID_KEY, &id.as_u64().to_be_bytes())?;
+            storage
+                .put(Namespace::Meta, REPLICA_ID_KEY, &id.as_u64().to_be_bytes())
+                .await?;
             id
         };
 
@@ -96,20 +98,23 @@ impl ReplicaState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::redb_storage::RedbStorage;
+    use crate::storage::pagedb_storage::PagedbStorageMem;
 
-    fn open_storage() -> Arc<RedbStorage> {
-        Arc::new(RedbStorage::open_in_memory().unwrap())
+    async fn open_storage() -> Arc<PagedbStorageMem> {
+        Arc::new(PagedbStorageMem::open_in_memory().await.unwrap())
     }
 
-    #[test]
-    fn load_or_init_generates_new_on_empty() {
-        let storage = open_storage();
-        let state = ReplicaState::load_or_init(&*storage).unwrap();
+    use crate::storage::engine::StorageEngine;
+
+    #[tokio::test]
+    async fn load_or_init_generates_new_on_empty() {
+        let storage = open_storage().await;
+        let state = ReplicaState::load_or_init(&*storage).await.unwrap();
         // ReplicaId must be non-zero (UUID-v7 low 64 bits is never 0 in practice).
         // More importantly, it must be persisted.
         let bytes = storage
-            .get_sync(Namespace::Meta, REPLICA_ID_KEY)
+            .get(Namespace::Meta, REPLICA_ID_KEY)
+            .await
             .unwrap()
             .expect("replica_id must be persisted");
         assert_eq!(bytes.len(), 8);
@@ -117,18 +122,24 @@ mod tests {
         assert_eq!(stored, state.replica_id().as_u64());
     }
 
-    #[test]
-    fn load_or_init_returns_same_on_reload() {
-        let storage = open_storage();
-        let id1 = ReplicaState::load_or_init(&*storage).unwrap().replica_id();
-        let id2 = ReplicaState::load_or_init(&*storage).unwrap().replica_id();
+    #[tokio::test]
+    async fn load_or_init_returns_same_on_reload() {
+        let storage = open_storage().await;
+        let id1 = ReplicaState::load_or_init(&*storage)
+            .await
+            .unwrap()
+            .replica_id();
+        let id2 = ReplicaState::load_or_init(&*storage)
+            .await
+            .unwrap()
+            .replica_id();
         assert_eq!(id1, id2, "reload must return the same replica_id");
     }
 
-    #[test]
-    fn next_hlc_monotonic() {
-        let storage = open_storage();
-        let state = ReplicaState::load_or_init(&*storage).unwrap();
+    #[tokio::test]
+    async fn next_hlc_monotonic() {
+        let storage = open_storage().await;
+        let state = ReplicaState::load_or_init(&*storage).await.unwrap();
         let mut prev = state.next_hlc().unwrap();
         for _ in 0..99 {
             let curr = state.next_hlc().unwrap();
@@ -140,10 +151,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn observe_advances_clock() {
-        let storage = open_storage();
-        let state = ReplicaState::load_or_init(&*storage).unwrap();
+    #[tokio::test]
+    async fn observe_advances_clock() {
+        let storage = open_storage().await;
+        let state = ReplicaState::load_or_init(&*storage).await.unwrap();
 
         let baseline = state.next_hlc().unwrap();
         // Synthesise a remote HLC far in the future.

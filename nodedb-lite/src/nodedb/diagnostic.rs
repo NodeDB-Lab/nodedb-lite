@@ -2,7 +2,7 @@
 //!
 //! `db.diagnostic_dump()` produces a structured report containing:
 //! - Redacted sync config (tokens masked)
-//! - Storage stats (redb namespace counts)
+//! - Storage stats (namespace counts)
 //! - Engine stats (from health API)
 //! - Pending delta summary (count + oldest timestamp, not actual data)
 //! - Flow control state
@@ -13,7 +13,7 @@
 
 use serde::Serialize;
 
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
 use super::core::NodeDbLite;
 use super::health::HealthStatus;
@@ -67,7 +67,7 @@ pub struct BuildInfo {
     pub profile: &'static str,
 }
 
-impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
+impl<S: StorageEngine> NodeDbLite<S> {
     /// Generate a diagnostic dump suitable for bug reports.
     ///
     /// Contains NO user data, NO document contents, NO embeddings.
@@ -149,10 +149,10 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RedbStorage;
+    use crate::PagedbStorageMem;
 
-    async fn make_db() -> NodeDbLite<RedbStorage> {
-        let storage = RedbStorage::open_in_memory().unwrap();
+    async fn make_db() -> NodeDbLite<PagedbStorageMem> {
+        let storage = PagedbStorageMem::open_in_memory().await.unwrap();
         NodeDbLite::open(storage, 1).await.unwrap()
     }
 

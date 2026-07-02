@@ -34,7 +34,7 @@ impl TimeseriesEngine {
         &self.sync_watermarks
     }
 
-    /// Import watermarks from redb (cold start restore).
+    /// Import watermarks from the KV store (cold start restore).
     pub fn import_watermarks(&mut self, watermarks: HashMap<SeriesId, u64>) {
         self.sync_watermarks = watermarks;
     }
@@ -128,6 +128,9 @@ impl TimeseriesEngine {
             min_ts,
             max_ts,
             watermarks,
+            producer_id: 0,
+            epoch: 0,
+            seq: 0,
         })
     }
 

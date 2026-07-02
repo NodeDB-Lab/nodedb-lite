@@ -6,11 +6,11 @@
 use std::sync::Arc;
 
 use nodedb_client::NodeDb;
-use nodedb_lite::{NodeDbLite, RedbStorage};
+use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 use nodedb_types::value::Value;
 
-async fn open_db() -> Arc<NodeDbLite<RedbStorage>> {
-    let storage = RedbStorage::open_in_memory().unwrap();
+async fn open_db() -> Arc<NodeDbLite<PagedbStorageMem>> {
+    let storage = PagedbStorageMem::open_in_memory().await.unwrap();
     Arc::new(NodeDbLite::open(storage, 1).await.unwrap())
 }
 
@@ -249,7 +249,7 @@ async fn concurrent_strict_reads_and_writes() {
                 .strict_engine()
                 .get("accounts", &Value::Integer(i))
                 .await;
-            // Row should always exist — redb MVCC ensures consistent reads.
+            // Row should always exist — the KV store ensures consistent reads under snapshot isolation.
             assert!(row.is_ok());
             if let Ok(Some(vals)) = row {
                 assert_eq!(vals[0], Value::Integer(i));

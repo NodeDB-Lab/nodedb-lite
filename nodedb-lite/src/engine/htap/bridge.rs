@@ -1,9 +1,9 @@
-//! HTAP bridge: CDC from strict document collections to columnar materialized views.
+//! HTAP brige: CDC from strict document collections to columnar materialized views.
 //!
 //! When a materialized view is created, every INSERT/UPDATE/DELETE on the source
 //! strict collection is replicated to the target columnar collection. In Lite,
 //! this happens synchronously at the API level (no background WAL reader needed,
-//! since redb handles durability).
+//! since the KV store handles durability).
 //!
 //! The bridge tracks:
 //! - Source → target collection mapping
@@ -17,7 +17,6 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use nodedb_types::value::Value;
 
@@ -64,7 +63,7 @@ impl HtapBridge {
         let view = MaterializedView {
             source: source.to_string(),
             target: target.to_string(),
-            last_replicated_ms: now_ms(),
+            last_replicated_ms: crate::runtime::now_millis(),
             rows_replicated: 0,
         };
         self.lock_views()
@@ -120,7 +119,7 @@ impl HtapBridge {
         for view in views.iter_mut() {
             if columnar.insert(&view.target, values).is_ok() {
                 view.rows_replicated += 1;
-                view.last_replicated_ms = now_ms();
+                view.last_replicated_ms = crate::runtime::now_millis();
             }
         }
     }
@@ -139,7 +138,7 @@ impl HtapBridge {
         };
         for view in views.iter_mut() {
             if columnar.delete(&view.target, pk).unwrap_or(false) {
-                view.last_replicated_ms = now_ms();
+                view.last_replicated_ms = crate::runtime::now_millis();
             }
         }
     }
@@ -147,7 +146,7 @@ impl HtapBridge {
     /// Get the replication lag in milliseconds for a materialized view.
     pub fn lag_ms(&self, target: &str) -> u64 {
         self.view_by_target(target)
-            .map(|v| now_ms().saturating_sub(v.last_replicated_ms))
+            .map(|v| crate::runtime::now_millis().saturating_sub(v.last_replicated_ms))
             .unwrap_or(0)
     }
 
@@ -161,13 +160,6 @@ impl Default for HtapBridge {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

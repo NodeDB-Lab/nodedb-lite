@@ -4,7 +4,7 @@
 //! months, hundreds of tiny partitions accumulate. Compaction merges them
 //! into larger ones, reducing partition count and improving query performance.
 //!
-//! Also provides redb B-tree compaction to reclaim fragmented space from
+//! Also provides B+ tree compaction to reclaim fragmented space from
 //! insert/delete cycles.
 
 use super::core::{FlushedPartition, TimeseriesEngine};
@@ -57,9 +57,9 @@ impl TimeseriesEngine {
         merge_indices.sort_by_key(|&i| coll.partitions[i].meta.min_ts);
 
         // Merge all selected partitions into one.
-        // In a real implementation, this would re-read segment data from redb,
+        // In a real implementation, this would re-read segment data from the KV store,
         // concatenate, sort by timestamp, and re-encode. Since Lite stores
-        // partition metadata in-memory and data in redb, we merge the metadata
+        // partition metadata in-memory and data in the KV store, we merge the metadata
         // and produce a combined partition descriptor.
         let mut total_rows = 0u64;
         let mut total_size = 0u64;
@@ -144,7 +144,7 @@ impl TimeseriesEngine {
         }
     }
 
-    /// Run all maintenance tasks for a collection: compaction + redb compact.
+    /// Run all maintenance tasks for a collection: compaction + KV store compaction.
     ///
     /// Call this during idle periods (no active queries, no active ingestion).
     pub fn run_maintenance(&mut self, collection: &str) -> MaintenanceResult {

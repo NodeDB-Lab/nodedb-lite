@@ -19,12 +19,12 @@
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 
+use crate::NodeDbLiteWasm;
+use crate::dispatch;
 use nodedb_array::query::slice::DimRange;
 use nodedb_array::schema::ArraySchema;
 use nodedb_array::tile::cell_payload::CellPayload;
 use nodedb_array::types::coord::value::CoordValue;
-
-use crate::NodeDbLiteWasm;
 
 /// Decode msgpack bytes from a JS `Uint8Array` into `T`.
 fn decode_msgpack<T: for<'a> zerompk::FromMessagePack<'a>>(
@@ -57,9 +57,11 @@ impl NodeDbLiteWasm {
     #[wasm_bindgen(js_name = "arrayCreate")]
     pub async fn array_create(&self, name: &str, schema: &Uint8Array) -> Result<(), JsError> {
         let array_schema: ArraySchema = decode_msgpack(schema, "schema")?;
-        self.db
-            .create_array(name, array_schema)
-            .map_err(|e| JsError::new(&e.to_string()))
+        dispatch!(self, db, {
+            db.create_array(name, array_schema)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))
+        })
     }
 
     /// Write a cell into array `name` at `coord`.
@@ -85,8 +87,8 @@ impl NodeDbLiteWasm {
 
         let system_from_ms = js_sys::Date::now() as i64;
 
-        self.db
-            .array_put_cell(
+        dispatch!(self, db, {
+            db.array_put_cell(
                 name,
                 coord_vec,
                 attrs,
@@ -94,7 +96,9 @@ impl NodeDbLiteWasm {
                 valid_from_ms,
                 valid_until_ms,
             )
+            .await
             .map_err(|e| JsError::new(&e.to_string()))
+        })
     }
 
     /// Slice query: return all live cells whose coordinates fall within `ranges`.
@@ -114,10 +118,11 @@ impl NodeDbLiteWasm {
     ) -> Result<Uint8Array, JsError> {
         let ranges_vec: Vec<Option<DimRange>> = decode_msgpack(ranges, "ranges")?;
 
-        let cells: Vec<CellPayload> = self
-            .db
-            .array_slice(name, ranges_vec, as_of_system_ms)
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        let cells: Vec<CellPayload> = dispatch!(self, db, {
+            db.array_slice(name, ranges_vec, as_of_system_ms)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))
+        })?;
 
         encode_msgpack(&cells, "cells")
     }
@@ -139,10 +144,11 @@ impl NodeDbLiteWasm {
     ) -> Result<Option<Uint8Array>, JsError> {
         let coord_vec: Vec<CoordValue> = decode_msgpack(coord, "coord")?;
 
-        let result: Option<CellPayload> = self
-            .db
-            .array_read_coord(name, &coord_vec, as_of_system_ms)
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        let result: Option<CellPayload> = dispatch!(self, db, {
+            db.array_read_coord(name, &coord_vec, as_of_system_ms)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))
+        })?;
 
         match result {
             Some(cell) => encode_msgpack(&cell, "cell").map(Some),
@@ -160,9 +166,11 @@ impl NodeDbLiteWasm {
         let coord_vec: Vec<CoordValue> = decode_msgpack(coord, "coord")?;
         let system_from_ms = js_sys::Date::now() as i64;
 
-        self.db
-            .array_delete_cell(name, coord_vec, system_from_ms)
-            .map_err(|e| JsError::new(&e.to_string()))
+        dispatch!(self, db, {
+            db.array_delete_cell(name, coord_vec, system_from_ms)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))
+        })
     }
 
     /// GDPR erasure: overwrite the cell with the `0xFE` sentinel and flush.
@@ -183,8 +191,10 @@ impl NodeDbLiteWasm {
         let coord_vec: Vec<CoordValue> = decode_msgpack(coord, "coord")?;
         let system_from_ms = js_sys::Date::now() as i64;
 
-        self.db
-            .array_gdpr_erase_cell(name, coord_vec, system_from_ms)
-            .map_err(|e| JsError::new(&e.to_string()))
+        dispatch!(self, db, {
+            db.array_gdpr_erase_cell(name, coord_vec, system_from_ms)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))
+        })
     }
 }

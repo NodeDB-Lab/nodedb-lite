@@ -3,9 +3,9 @@
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 
 use super::super::{LockExt, NodeDbLite};
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
-impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
+impl<S: StorageEngine> NodeDbLite<S> {
     /// Import documents from NDJSON (newline-delimited JSON) text.
     ///
     /// Each line is a JSON object. The "id" field is used as document ID;

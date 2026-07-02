@@ -2,11 +2,14 @@
 
 use nodedb_types::Namespace;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
+use nodedb_types::vector_dtype::VectorStorageDtype;
+
+use crate::engine::vector::state::ensure_hnsw;
 
 use super::{LockExt, NodeDbLite};
-use crate::storage::engine::{StorageEngine, StorageEngineSync};
+use crate::storage::engine::StorageEngine;
 
-impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
+impl<S: StorageEngine> NodeDbLite<S> {
     /// Batch insert vectors — O(1) CRDT delta export instead of O(N).
     ///
     /// Use this for bulk loading (cold-start hydration, benchmark setup, imports).
@@ -21,12 +24,28 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             return Ok(());
         }
 
+        if self.governor.pressure() == crate::memory::PressureLevel::Critical {
+            return Err(NodeDbError::storage(
+                crate::error::LiteError::Backpressure {
+                    detail: "batch vector insert rejected: memory governor is at Critical pressure"
+                        .into(),
+                },
+            ));
+        }
+
         let dim = vectors[0].1.len();
 
         {
-            let mut indices = self.hnsw_indices.lock_or_recover();
-            let index = Self::ensure_hnsw(&mut indices, collection, dim);
-            let mut id_map = self.vector_id_map.lock_or_recover();
+            let dtype = {
+                let configs = self.vector_state.per_index_config.lock_or_recover();
+                configs
+                    .get(collection)
+                    .map(|cfg| cfg.storage_dtype)
+                    .unwrap_or(VectorStorageDtype::F32)
+            };
+            let mut indices = self.vector_state.hnsw_indices.lock_or_recover();
+            let index = ensure_hnsw(&mut indices, collection, dim, dtype);
+            let mut id_map = self.vector_state.vector_id_map.lock_or_recover();
 
             for &(id, embedding) in vectors {
                 let internal_id = index.len() as u32;
@@ -63,14 +82,22 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         Ok(())
     }
 
-    /// Batch insert graph edges — O(1) CRDT delta export instead of O(N).
-    pub fn batch_graph_insert_edges(&self, edges: &[(&str, &str, &str)]) -> NodeDbResult<()> {
+    /// Batch insert graph edges into a named collection — O(1) CRDT delta
+    /// export instead of O(N). Edges are isolated to `collection`.
+    pub fn batch_graph_insert_edges(
+        &self,
+        collection: &str,
+        edges: &[(&str, &str, &str)],
+    ) -> NodeDbResult<()> {
         if edges.is_empty() {
             return Ok(());
         }
 
         {
-            let mut csr = self.csr.lock_or_recover();
+            let mut csr_map = self.csr.lock_or_recover();
+            let csr = csr_map
+                .entry(collection.to_string())
+                .or_insert_with(crate::engine::graph::index::CsrIndex::new);
             for &(src, dst, label) in edges {
                 let _ = csr.add_edge(src, label, dst);
             }
@@ -80,6 +107,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             let mut crdt = self.crdt.lock_or_recover();
 
             use crate::engine::crdt::engine::{CrdtBatchOp, CrdtField};
+            let edge_coll = format!("__edges__{collection}");
 
             let ops: Vec<(String, Vec<CrdtField<'_>>)> = edges
                 .iter()
@@ -96,7 +124,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
 
             let refs: Vec<CrdtBatchOp<'_>> = ops
                 .iter()
-                .map(|(id, fields)| ("__edges", id.as_str(), fields.as_slice()))
+                .map(|(id, fields)| (edge_coll.as_str(), id.as_str(), fields.as_slice()))
                 .collect();
 
             crdt.batch_upsert(&refs).map_err(NodeDbError::storage)?;
@@ -106,10 +134,14 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         Ok(())
     }
 
-    /// Compact the CSR graph index (merge buffer into dense arrays).
+    /// Compact all per-collection CSR graph indices (merge buffer into dense arrays).
     pub fn compact_graph(&self) -> NodeDbResult<()> {
-        let mut csr = self.csr.lock_or_recover();
-        csr.compact();
+        let mut csr_map = self.csr.lock_or_recover();
+        for (name, csr) in csr_map.iter_mut() {
+            csr.compact().map_err(|e| {
+                NodeDbError::storage(format!("graph csr compact failed for '{name}': {e}"))
+            })?;
+        }
         Ok(())
     }
 
@@ -121,7 +153,7 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
         let mut evicted = 0;
 
         let candidates: Vec<(String, usize)> = {
-            let indices = self.hnsw_indices.lock_or_recover();
+            let indices = self.vector_state.hnsw_indices.lock_or_recover();
             let mut sorted: Vec<(String, usize)> = indices
                 .iter()
                 .map(|(name, idx)| (name.clone(), idx.len()))
@@ -130,9 +162,34 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
             sorted
         };
 
+        // Check once whether the pagedb segment path is available.
+        #[cfg(not(target_arch = "wasm32"))]
+        let seg_ext = self.storage.as_vector_segment_ext();
+
         for (name, _) in candidates.into_iter().take(max_to_evict) {
-            let checkpoint = {
-                let indices = self.hnsw_indices.lock_or_recover();
+            // Snapshot checkpoint while holding the lock.
+            // On native with segment support: graph-only bytes + extract vectors.
+            // Otherwise: full checkpoint blob (WASM and non-pagedb native backends).
+            #[cfg(not(target_arch = "wasm32"))]
+            let (blob, segment_data) = {
+                let indices = self.vector_state.hnsw_indices.lock_or_recover();
+                match indices.get(&name) {
+                    Some(idx) => {
+                        if seg_ext.is_some() {
+                            let graph_bytes = idx.graph_checkpoint_to_bytes();
+                            let (vectors, surrogates) = idx.extract_vectors_and_surrogates();
+                            let dim = idx.dim();
+                            (graph_bytes, Some((dim, vectors, surrogates)))
+                        } else {
+                            (idx.checkpoint_to_bytes(), None)
+                        }
+                    }
+                    None => continue,
+                }
+            };
+            #[cfg(target_arch = "wasm32")]
+            let blob = {
+                let indices = self.vector_state.hnsw_indices.lock_or_recover();
                 match indices.get(&name) {
                     Some(idx) => idx.checkpoint_to_bytes(),
                     None => continue,
@@ -141,12 +198,31 @@ impl<S: StorageEngine + StorageEngineSync> NodeDbLite<S> {
 
             let key = format!("hnsw:{name}");
             self.storage
-                .put(Namespace::Vector, key.as_bytes(), &checkpoint)
+                .put(
+                    Namespace::Vector,
+                    key.as_bytes(),
+                    &crate::storage::checksum::wrap(&blob),
+                )
                 .await
                 .map_err(NodeDbError::storage)?;
 
+            // Write vector segment on native targets when segment ext is available.
+            #[cfg(not(target_arch = "wasm32"))]
+            if let (Some((dim, vectors, surrogates)), Some(ext)) = (segment_data, seg_ext)
+                && let Err(e) = ext
+                    .write_vector_segment(&name, dim, &vectors, &surrogates)
+                    .await
             {
-                let mut indices = self.hnsw_indices.lock_or_recover();
+                tracing::error!(
+                    collection = %name,
+                    error = %e,
+                    "HNSW vector segment write failed during eviction; \
+                     graph blob is persisted but vectors may be lost on cold restart"
+                );
+            }
+
+            {
+                let mut indices = self.vector_state.hnsw_indices.lock_or_recover();
                 indices.remove(&name);
             }
 

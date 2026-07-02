@@ -12,6 +12,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use nodedb_lite::engine::crdt::CrdtEngine;
 use nodedb_types::sync::wire::*;
+use nodedb_types::wire_version::WIRE_FORMAT_VERSION;
 
 const ORIGIN_WS: &str = "ws://127.0.0.1:9090";
 const NUM_CLIENTS: u32 = 100;
@@ -115,11 +116,12 @@ async fn run_client(
         client_version: format!("load-test-{id}"),
         lite_id: String::new(),
         epoch: 0,
-        wire_version: 1,
+        wire_version: WIRE_FORMAT_VERSION,
     };
     if ws
         .send(Message::Binary(
-            SyncFrame::encode_or_empty(SyncMessageType::Handshake, &hs)
+            SyncFrame::try_encode(SyncMessageType::Handshake, &hs)
+                .expect("frame encode")
                 .to_bytes()
                 .into(),
         ))
@@ -173,10 +175,14 @@ async fn run_client(
             mutation_id: 1,
             checksum: 0,
             device_valid_time_ms: None,
+            producer_id: 0,
+            epoch: 0,
+            seq: 0,
         };
         if ws
             .send(Message::Binary(
-                SyncFrame::encode_or_empty(SyncMessageType::DeltaPush, &msg)
+                SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)
+                    .expect("frame encode")
                     .to_bytes()
                     .into(),
             ))

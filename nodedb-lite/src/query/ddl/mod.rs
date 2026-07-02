@@ -4,6 +4,7 @@ pub mod alter;
 pub mod columnar;
 pub mod continuous_agg;
 pub mod convert;
+pub mod document;
 pub mod htap;
 pub mod kv;
 pub mod parser;
@@ -83,6 +84,17 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             && kv::is_kv_storage_mode(&upper)
         {
             return Some(self.handle_create_kv(sql).await);
+        }
+
+        // CREATE COLLECTION <name> WITH (bitemporal=true) — schemaless document
+        // collection with bitemporal history enabled. Must be intercepted here
+        // before DataFusion sees it so the flag is persisted to Namespace::Meta.
+        if upper.starts_with("CREATE COLLECTION ")
+            && upper.contains("BITEMPORAL")
+            && (upper.contains("TRUE") || upper.contains("= TRUE") || upper.contains("=TRUE"))
+            && !upper.contains("STORAGE")
+        {
+            return Some(self.handle_create_bitemporal_document(sql).await);
         }
 
         // DROP COLLECTION <name> — check if it's strict, handle accordingly.

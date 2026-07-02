@@ -8,9 +8,11 @@ use nodedb_types::columnar::SchemaOps;
 use nodedb_types::value::Value;
 
 use crate::error::LiteError;
+use crate::runtime::now_millis_i64;
 use crate::storage::engine::{StorageEngine, WriteOp};
 
 use super::engine::{StrictEngine, strict_err_to_lite};
+use super::history::{history_key, history_value};
 
 impl<S: StorageEngine> StrictEngine<S> {
     // -- Write path --
@@ -19,6 +21,9 @@ impl<S: StorageEngine> StrictEngine<S> {
     ///
     /// Validates schema, encodes as Binary Tuple, writes to storage keyed by PK.
     /// Returns an error if the PK already exists.
+    ///
+    /// For bitemporal collections, also writes an initial history entry so that
+    /// the row's birth time is recorded in `Namespace::StrictHistory`.
     pub async fn insert(&self, collection: &str, values: &[Value]) -> Result<(), LiteError> {
         let state = self.get_state(collection)?;
 
@@ -35,7 +40,22 @@ impl<S: StorageEngine> StrictEngine<S> {
             });
         }
 
-        self.storage.put(Namespace::Strict, &key, &tuple).await
+        self.storage.put(Namespace::Strict, &key, &tuple).await?;
+
+        // For bitemporal collections, write the birth history entry.
+        // The current row's system_from_ms is stored at slot 0 of the tuple;
+        // we read it back from `values[0]` (the `__system_from_ms` column).
+        if state.schema.bitemporal {
+            let system_from_ms = extract_system_from_values(values);
+            // u64::MAX encodes "no system_to yet" (row is still current).
+            let hist_key = history_key(collection, system_from_ms, &key[collection.len() + 1..]);
+            let hist_value = history_value(&tuple, i64::MAX);
+            self.storage
+                .put(Namespace::StrictHistory, &hist_key, &hist_value)
+                .await?;
+        }
+
+        Ok(())
     }
 
     /// Insert multiple rows atomically.
@@ -114,6 +134,19 @@ impl<S: StorageEngine> StrictEngine<S> {
         // Re-encode and write.
         let new_tuple = state.encoder.encode(&values).map_err(strict_err_to_lite)?;
 
+        // For bitemporal collections, record the old version's supersession before
+        // overwriting. The system_to of the old version is now().
+        if state.schema.bitemporal {
+            let system_to_ms = now_millis_i64();
+            self.record_history_supersession(
+                collection,
+                &key[collection.len() + 1..],
+                &existing,
+                system_to_ms,
+            )
+            .await?;
+        }
+
         // If PK columns were updated, we need to delete the old key and insert the new one.
         let new_key = state.storage_key(collection, &values);
         if new_key != key {
@@ -126,13 +159,28 @@ impl<S: StorageEngine> StrictEngine<S> {
                     WriteOp::Put {
                         ns: Namespace::Strict,
                         key: new_key,
-                        value: new_tuple,
+                        value: new_tuple.clone(),
                     },
                 ])
                 .await?;
         } else {
             self.storage
                 .put(Namespace::Strict, &key, &new_tuple)
+                .await?;
+        }
+
+        // For bitemporal collections, write the new version's birth history entry.
+        if state.schema.bitemporal {
+            let new_system_from_ms = now_millis_i64();
+            let final_key = state.storage_key(collection, &values);
+            let hist_key = history_key(
+                collection,
+                new_system_from_ms,
+                &final_key[collection.len() + 1..],
+            );
+            let hist_value = history_value(&new_tuple, i64::MAX);
+            self.storage
+                .put(Namespace::StrictHistory, &hist_key, &hist_value)
                 .await?;
         }
 
@@ -164,15 +212,32 @@ impl<S: StorageEngine> StrictEngine<S> {
     }
 
     /// Delete a row by PK. Returns true if the row existed.
+    ///
+    /// For bitemporal collections, the old row's history entry is finalized
+    /// with `system_to_ms = now()` before the current row is removed.
+    /// History rows are retained for audit until an explicit `TemporalPurge`.
     pub async fn delete(&self, collection: &str, pk: &Value) -> Result<bool, LiteError> {
         let state = self.get_state(collection)?;
         let key = state.storage_key_from_pk(collection, pk);
 
-        let existed = self.storage.get(Namespace::Strict, &key).await?.is_some();
-        if existed {
-            self.storage.delete(Namespace::Strict, &key).await?;
+        let existing = self.storage.get(Namespace::Strict, &key).await?;
+        match existing {
+            None => return Ok(false),
+            Some(old_tuple) => {
+                if state.schema.bitemporal {
+                    let system_to_ms = now_millis_i64();
+                    self.record_history_supersession(
+                        collection,
+                        &key[collection.len() + 1..],
+                        &old_tuple,
+                        system_to_ms,
+                    )
+                    .await?;
+                }
+                self.storage.delete(Namespace::Strict, &key).await?;
+            }
         }
-        Ok(existed)
+        Ok(true)
     }
 
     // -- Read path --
@@ -197,7 +262,7 @@ impl<S: StorageEngine> StrictEngine<S> {
                     // pad with Null for columns added after that version.
                     let old_col_count = state
                         .version_column_counts
-                        .get(&tuple_version)
+                        .get(&(tuple_version as u16))
                         .copied()
                         .unwrap_or(state.schema.columns.len());
 
@@ -295,6 +360,24 @@ impl<S: StorageEngine> StrictEngine<S> {
         Ok(arrays)
     }
 
+    /// Scan all rows in a collection and decode each to `Vec<Value>`.
+    ///
+    /// Returns rows in storage key order. Column order matches the schema
+    /// definition order, consistent with `schema().columns`.
+    pub async fn list_rows(&self, collection: &str) -> Result<Vec<Vec<Value>>, LiteError> {
+        let state = self.get_state(collection)?;
+        let raw_tuples = self.scan_raw(collection).await?;
+        let mut rows = Vec::with_capacity(raw_tuples.len());
+        for bytes in &raw_tuples {
+            let values = state
+                .decoder
+                .extract_all(bytes)
+                .map_err(strict_err_to_lite)?;
+            rows.push(values);
+        }
+        Ok(rows)
+    }
+
     /// Count the number of rows in a collection.
     pub async fn count(&self, collection: &str) -> Result<usize, LiteError> {
         let _state = self.get_state(collection)?;
@@ -304,5 +387,17 @@ impl<S: StorageEngine> StrictEngine<S> {
             .scan_prefix(Namespace::Strict, prefix.as_bytes())
             .await?;
         Ok(entries.len())
+    }
+}
+
+/// Extract the `__system_from_ms` value from the leading values of a bitemporal row.
+///
+/// In a bitemporal strict schema, `__system_from_ms` is always at user-visible
+/// index 0 of the `values` slice passed to `insert` / `update`. Returns 0 if the
+/// value is not an integer (should not happen for correctly-constructed rows).
+fn extract_system_from_values(values: &[Value]) -> i64 {
+    match values.first() {
+        Some(Value::Integer(ms)) => *ms,
+        _ => 0,
     }
 }

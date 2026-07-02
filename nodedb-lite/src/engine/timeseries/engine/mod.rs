@@ -12,7 +12,7 @@ mod wal;
 pub use compaction::{CompactionResult, MaintenanceResult};
 pub use continuous_agg::LiteContinuousAggManager;
 pub use core::TimeseriesEngine;
-pub use flush::{FlushResult, RedbEntry};
+pub use flush::{FlushResult, KvFlushEntry};
 pub use lifecycle::{
     BackupResult, BudgetAction, BudgetCheckResult, BudgetPolicy, CompactionScheduler,
     DownsamplePlan,
@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn flush_result_redb_entries() {
+    fn flush_result_kv_entries() {
         let mut engine = TimeseriesEngine::new();
         engine.ingest_metric(
             "m",
@@ -175,7 +175,7 @@ mod tests {
             },
         );
         let flush = engine.flush("m").expect("flush non-empty");
-        let entries = flush.to_redb_entries().expect("serialize meta");
+        let entries = flush.to_kv_entries().expect("serialize meta");
         assert_eq!(entries.len(), 4);
         assert!(entries[0].0.starts_with(b"ts:m:1000:ts"));
     }

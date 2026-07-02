@@ -1,6 +1,7 @@
 pub mod array;
 pub mod columnar;
 pub mod crdt;
+pub mod document;
 pub mod fts;
 pub mod graph;
 pub mod htap;

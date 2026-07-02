@@ -1,6 +1,7 @@
 //! Handshake: build outgoing `HandshakeMsg`, process incoming `HandshakeAckMsg`.
 
 use nodedb_types::sync::wire::{HandshakeAckMsg, HandshakeMsg};
+use nodedb_types::wire_version::WIRE_FORMAT_VERSION;
 
 use super::config::SyncState;
 use super::state::SyncClient;
@@ -24,7 +25,7 @@ impl SyncClient {
             client_version: self.config.client_version.clone(),
             lite_id: self.lite_id.clone().unwrap_or_default(),
             epoch: self.epoch.unwrap_or(0),
-            wire_version: 1,
+            wire_version: WIRE_FORMAT_VERSION,
         }
     }
 
@@ -39,6 +40,10 @@ impl SyncClient {
         }
 
         *self.session_id.lock().await = Some(ack.session_id.clone());
+        // New session — every collection must be re-announced before its
+        // first delta so Origin materializes it, even if it was already
+        // announced in a prior session.
+        self.announced_collections.lock().await.clear();
 
         let mut clock = self.clock.lock().await;
         for (peer_hex, &counter) in &ack.server_clock {
@@ -46,9 +51,18 @@ impl SyncClient {
                 clock.advance(peer_id, counter);
             }
         }
+        drop(clock);
+
+        self.set_producer_id(ack.producer_id).await;
+        self.set_accepted_epoch(ack.accepted_epoch).await;
 
         *self.state.lock().await = SyncState::Connected;
-        tracing::info!(session = %ack.session_id, "sync handshake accepted");
+        tracing::info!(
+            session = %ack.session_id,
+            producer_id = ack.producer_id,
+            accepted_epoch = ack.accepted_epoch,
+            "sync handshake accepted"
+        );
         true
     }
 }
@@ -95,6 +109,8 @@ mod tests {
             error: None,
             fork_detected: false,
             server_wire_version: 1,
+            producer_id: 0,
+            accepted_epoch: 0,
         };
 
         assert!(client.handle_handshake_ack(&ack).await);
@@ -111,6 +127,8 @@ mod tests {
             error: Some("invalid token".into()),
             fork_detected: false,
             server_wire_version: 1,
+            producer_id: 0,
+            accepted_epoch: 0,
         };
 
         assert!(!client.handle_handshake_ack(&ack).await);

@@ -13,9 +13,9 @@ use nodedb_array::sync::op::ArrayOp;
 use nodedb_array::sync::snapshot::{SnapshotChunk, SnapshotHeader};
 
 use crate::error::LiteError;
-use crate::storage::engine::StorageEngineSync;
+use crate::storage::engine::StorageEngine;
 use crate::sync::array::catchup::CatchupTracker;
-use crate::sync::array::op_log_redb::RedbOpLog;
+use crate::sync::array::op_log_store::KvOpLogStore;
 use crate::sync::array::pending::PendingQueue;
 use crate::sync::array::replica_state::ReplicaState;
 use crate::sync::array::schema_registry::SchemaRegistry;
@@ -46,13 +46,13 @@ impl SnapshotAssembly {
 ///
 /// Snapshot state is buffered internally in `snapshots` until all chunks for a
 /// given `(array, snapshot_hlc)` have arrived.
-pub struct ArrayInbound<S: StorageEngineSync> {
+pub struct ArrayInbound<S: StorageEngine> {
     pub(super) engine: Arc<LiteApplyEngine<S>>,
     pub(super) schemas: Arc<SchemaRegistry<S>>,
     pub(super) replica: Arc<ReplicaState>,
     pub(super) pending: Arc<PendingQueue<S>>,
     #[allow(dead_code)]
-    pub(super) op_log: Arc<RedbOpLog<S>>,
+    pub(super) op_log: Arc<KvOpLogStore<S>>,
     /// Catchup tracker — updated when Origin sends `RetentionFloor` rejects.
     pub(super) catchup: Arc<CatchupTracker<S>>,
     /// In-flight snapshot chunk buffers.
@@ -60,14 +60,14 @@ pub struct ArrayInbound<S: StorageEngineSync> {
     pub(super) snapshots: Mutex<HashMap<(String, [u8; 18]), SnapshotAssembly>>,
 }
 
-impl<S: StorageEngineSync> ArrayInbound<S> {
+impl<S: StorageEngine> ArrayInbound<S> {
     /// Construct from the component parts shared with `NodeDbLite`.
     pub fn new(
         engine: Arc<LiteApplyEngine<S>>,
         schemas: Arc<SchemaRegistry<S>>,
         replica: Arc<ReplicaState>,
         pending: Arc<PendingQueue<S>>,
-        op_log: Arc<RedbOpLog<S>>,
+        op_log: Arc<KvOpLogStore<S>>,
         catchup: Arc<CatchupTracker<S>>,
     ) -> Self {
         Self {
@@ -79,6 +79,13 @@ impl<S: StorageEngineSync> ArrayInbound<S> {
             catchup,
             snapshots: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The stable replica identity for this Lite peer.
+    ///
+    /// Used by the transport layer to construct `ArrayAckMsg` bodies.
+    pub fn replica_id(&self) -> u64 {
+        self.replica.replica_id().as_u64()
     }
 
     /// Drive [`nodedb_array::sync::apply::apply_op`] on a borrowed

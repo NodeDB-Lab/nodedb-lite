@@ -17,7 +17,7 @@ pub fn column_type_to_arrow(ct: &ColumnType) -> arrow::datatypes::DataType {
         ColumnType::Timestamp | ColumnType::SystemTimestamp => {
             arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None)
         }
-        ColumnType::Decimal => arrow::datatypes::DataType::Utf8, // Lossless string representation
+        ColumnType::Decimal { .. } => arrow::datatypes::DataType::Utf8, // Lossless string representation
         ColumnType::Uuid => arrow::datatypes::DataType::Utf8,
         ColumnType::Ulid => arrow::datatypes::DataType::Utf8,
         ColumnType::Duration => arrow::datatypes::DataType::Int64,
@@ -26,6 +26,7 @@ pub fn column_type_to_arrow(ct: &ColumnType) -> arrow::datatypes::DataType {
             arrow::datatypes::DataType::Binary
         }
         ColumnType::Vector(_) => arrow::datatypes::DataType::Binary, // Packed f32 bytes
+        _ => arrow::datatypes::DataType::Binary,
     }
 }
 

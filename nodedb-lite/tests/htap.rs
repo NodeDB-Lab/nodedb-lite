@@ -1,16 +1,19 @@
 //! HTAP bridge integration tests.
 //!
 //! Tests the CDC pipeline from strict document collections to columnar
-//! materialized views, query routing, and consistency controls.
+//! materialized views, query routing, and consistency controls. The
+//! columnar insert/scan path is exercised by the 0.1.0 gates; HTAP
+//! materialized-view routing tested here is not part of those gates
+//! (see `docs/lite-support-matrix.md`).
 
 use std::sync::Arc;
 
 use nodedb_client::NodeDb;
-use nodedb_lite::{NodeDbLite, RedbStorage};
+use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 use nodedb_types::value::Value;
 
-async fn open_db() -> Arc<NodeDbLite<RedbStorage>> {
-    let storage = RedbStorage::open_in_memory().unwrap();
+async fn open_db() -> Arc<NodeDbLite<PagedbStorageMem>> {
+    let storage = PagedbStorageMem::open_in_memory().await.unwrap();
     Arc::new(NodeDbLite::open(storage, 1).await.unwrap())
 }
 

@@ -6,7 +6,7 @@
 //! 1. Looks up the current `schema_hlc` from the [`SchemaRegistry`].
 //! 2. Mints a fresh HLC via [`ReplicaState::next_hlc`].
 //! 3. Builds the [`ArrayOp`].
-//! 4. Appends to the durable [`RedbOpLog`] (permanent record for GC).
+//! 4. Appends to the durable [`KvOpLogStore`] (permanent record for GC).
 //! 5. Enqueues in the durable [`PendingQueue`] (transport buffer).
 //!
 //! The caller must ensure the local engine write has already succeeded before
@@ -23,8 +23,8 @@ use nodedb_array::types::cell_value::value::CellValue;
 use nodedb_array::types::coord::value::CoordValue;
 
 use crate::error::LiteError;
-use crate::storage::engine::StorageEngineSync;
-use crate::sync::array::op_log_redb::RedbOpLog;
+use crate::storage::engine::StorageEngine;
+use crate::sync::array::op_log_store::KvOpLogStore;
 use crate::sync::array::pending::PendingQueue;
 use crate::sync::array::replica_state::ReplicaState;
 use crate::sync::array::schema_registry::SchemaRegistry;
@@ -33,17 +33,17 @@ use crate::sync::array::schema_registry::SchemaRegistry;
 ///
 /// All fields are `Arc`-wrapped so the struct can be shared across the
 /// `NodeDbLite` struct and any future transport tasks.
-pub struct ArrayOutbound<S: StorageEngineSync> {
-    pub(crate) op_log: Arc<RedbOpLog<S>>,
+pub struct ArrayOutbound<S: StorageEngine> {
+    pub(crate) op_log: Arc<KvOpLogStore<S>>,
     pub(crate) pending: Arc<PendingQueue<S>>,
     pub(crate) schemas: Arc<SchemaRegistry<S>>,
     pub(crate) replica: Arc<ReplicaState>,
 }
 
-impl<S: StorageEngineSync> ArrayOutbound<S> {
+impl<S: StorageEngine> ArrayOutbound<S> {
     /// Create an [`ArrayOutbound`] from its component parts.
     pub fn new(
-        op_log: Arc<RedbOpLog<S>>,
+        op_log: Arc<KvOpLogStore<S>>,
         pending: Arc<PendingQueue<S>>,
         schemas: Arc<SchemaRegistry<S>>,
         replica: Arc<ReplicaState>,
@@ -57,7 +57,7 @@ impl<S: StorageEngineSync> ArrayOutbound<S> {
     }
 
     /// Access the underlying op-log (for sharing with inbound handler).
-    pub fn op_log(&self) -> &Arc<RedbOpLog<S>> {
+    pub fn op_log(&self) -> &Arc<KvOpLogStore<S>> {
         &self.op_log
     }
 
@@ -70,7 +70,7 @@ impl<S: StorageEngineSync> ArrayOutbound<S> {
     ///
     /// `coord` and `attrs` must be the same values passed to the array engine
     /// (cloned before the engine call to avoid moves).
-    pub fn emit_put(
+    pub async fn emit_put(
         &self,
         array: &str,
         coord: Vec<CoordValue>,
@@ -95,7 +95,7 @@ impl<S: StorageEngineSync> ArrayOutbound<S> {
             attrs: Some(attrs),
         };
 
-        self.record(&op)?;
+        self.record(&op).await?;
         Ok(hlc)
     }
 
@@ -104,7 +104,7 @@ impl<S: StorageEngineSync> ArrayOutbound<S> {
     /// `valid_from_ms` / `valid_until_ms` default to `0` / `i64::MAX` at the
     /// call sites because the current [`NodeDbLite::array_delete_cell`] API
     /// does not yet carry valid-time arguments. Phase F will widen the API.
-    pub fn emit_delete(
+    pub async fn emit_delete(
         &self,
         array: &str,
         coord: Vec<CoordValue>,
@@ -128,14 +128,14 @@ impl<S: StorageEngineSync> ArrayOutbound<S> {
             attrs: None,
         };
 
-        self.record(&op)?;
+        self.record(&op).await?;
         Ok(hlc)
     }
 
     /// Emit an `Erase` (GDPR hard tombstone) op.
     ///
     /// Same valid-time defaulting as [`emit_delete`].
-    pub fn emit_erase(
+    pub async fn emit_erase(
         &self,
         array: &str,
         coord: Vec<CoordValue>,
@@ -159,7 +159,7 @@ impl<S: StorageEngineSync> ArrayOutbound<S> {
             attrs: None,
         };
 
-        self.record(&op)?;
+        self.record(&op).await?;
         Ok(hlc)
     }
 
@@ -176,11 +176,11 @@ impl<S: StorageEngineSync> ArrayOutbound<S> {
     }
 
     /// Append to op-log then enqueue for transport.
-    fn record(&self, op: &ArrayOp) -> Result<(), LiteError> {
+    async fn record(&self, op: &ArrayOp) -> Result<(), LiteError> {
         self.op_log.append(op).map_err(|e| LiteError::Storage {
             detail: format!("array sync op_log: {e}"),
         })?;
-        self.pending.enqueue(op)?;
+        self.pending.enqueue(op).await?;
         Ok(())
     }
 }
@@ -190,7 +190,7 @@ impl<S: StorageEngineSync> ArrayOutbound<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::redb_storage::RedbStorage;
+    use crate::storage::pagedb_storage::PagedbStorageMem;
     use nodedb_array::schema::array_schema::ArraySchema;
     use nodedb_array::schema::attr_spec::{AttrSpec, AttrType};
     use nodedb_array::schema::cell_order::{CellOrder, TileOrder};
@@ -213,35 +213,41 @@ mod tests {
         }
     }
 
-    fn make_outbound() -> (ArrayOutbound<RedbStorage>, Arc<RedbStorage>) {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
-        let replica = Arc::new(ReplicaState::load_or_init(&*storage).unwrap());
+    // multi_thread flavor needed because emit_put uses pending.enqueue (async)
+    // and op_log.append uses block_in_place.
+
+    async fn make_outbound() -> (ArrayOutbound<PagedbStorageMem>, Arc<PagedbStorageMem>) {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+        let replica = Arc::new(ReplicaState::load_or_init(&*storage).await.unwrap());
         let schemas = Arc::new(SchemaRegistry::new(
             Arc::clone(&storage),
             Arc::clone(&replica),
         ));
-        let op_log = Arc::new(RedbOpLog::new(Arc::clone(&storage)));
+        let op_log = Arc::new(KvOpLogStore::new(Arc::clone(&storage)));
         let pending = Arc::new(PendingQueue::new(Arc::clone(&storage)));
         let ob = ArrayOutbound::new(op_log, pending, schemas, replica);
         (ob, storage)
     }
 
-    #[test]
-    fn emit_put_appends_to_log_and_queue() {
-        let (ob, _storage) = make_outbound();
-        ob.schemas.put_schema("arr", &simple_schema("arr")).unwrap();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_put_appends_to_log_and_queue() {
+        let (ob, _storage) = make_outbound().await;
+        ob.schemas
+            .put_schema("arr", &simple_schema("arr"))
+            .await
+            .unwrap();
 
         let coord = vec![CoordValue::Int64(5)];
         let attrs = vec![CellValue::Null];
-        ob.emit_put("arr", coord, attrs, 0, i64::MAX).unwrap();
+        ob.emit_put("arr", coord, attrs, 0, i64::MAX).await.unwrap();
 
         assert_eq!(ob.op_log.len().unwrap(), 1);
-        assert_eq!(ob.pending.len().unwrap(), 1);
+        assert_eq!(ob.pending.len().await.unwrap(), 1);
     }
 
-    #[test]
-    fn emit_without_schema_errors() {
-        let (ob, _storage) = make_outbound();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_without_schema_errors() {
+        let (ob, _storage) = make_outbound().await;
         let err = ob
             .emit_put(
                 "unknown",
@@ -250,6 +256,7 @@ mod tests {
                 0,
                 -1,
             )
+            .await
             .unwrap_err();
         assert!(
             matches!(err, LiteError::Storage { ref detail } if detail.contains("no schema CRDT")),
@@ -257,12 +264,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn emit_delete_carries_no_attrs() {
-        let (ob, _storage) = make_outbound();
-        ob.schemas.put_schema("d", &simple_schema("d")).unwrap();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_delete_carries_no_attrs() {
+        let (ob, _storage) = make_outbound().await;
+        ob.schemas
+            .put_schema("d", &simple_schema("d"))
+            .await
+            .unwrap();
 
         ob.emit_delete("d", vec![CoordValue::Int64(1)], 0, i64::MAX)
+            .await
             .unwrap();
 
         let ops: Vec<_> = ob
@@ -275,12 +286,16 @@ mod tests {
         assert!(ops[0].attrs.is_none(), "Delete must carry no attrs");
     }
 
-    #[test]
-    fn emit_erase_carries_no_attrs() {
-        let (ob, _storage) = make_outbound();
-        ob.schemas.put_schema("e", &simple_schema("e")).unwrap();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_erase_carries_no_attrs() {
+        let (ob, _storage) = make_outbound().await;
+        ob.schemas
+            .put_schema("e", &simple_schema("e"))
+            .await
+            .unwrap();
 
         ob.emit_erase("e", vec![CoordValue::Int64(2)], 0, i64::MAX)
+            .await
             .unwrap();
 
         let ops: Vec<_> = ob
@@ -293,10 +308,13 @@ mod tests {
         assert!(ops[0].attrs.is_none(), "Erase must carry no attrs");
     }
 
-    #[test]
-    fn emit_advances_hlc() {
-        let (ob, _storage) = make_outbound();
-        ob.schemas.put_schema("a", &simple_schema("a")).unwrap();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_advances_hlc() {
+        let (ob, _storage) = make_outbound().await;
+        ob.schemas
+            .put_schema("a", &simple_schema("a"))
+            .await
+            .unwrap();
 
         let h1 = ob
             .emit_put(
@@ -306,6 +324,7 @@ mod tests {
                 0,
                 i64::MAX,
             )
+            .await
             .unwrap();
         let h2 = ob
             .emit_put(
@@ -315,6 +334,7 @@ mod tests {
                 0,
                 i64::MAX,
             )
+            .await
             .unwrap();
         assert!(h2 > h1, "each emit must mint a strictly greater HLC");
     }

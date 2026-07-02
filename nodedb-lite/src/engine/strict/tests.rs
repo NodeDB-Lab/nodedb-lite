@@ -90,6 +90,56 @@ impl StorageEngine for MemStorage {
         let ns_byte = ns as u8;
         Ok(data.keys().filter(|k| k[0] == ns_byte).count() as u64)
     }
+
+    async fn scan_range(
+        &self,
+        ns: Namespace,
+        start: &[u8],
+        limit: usize,
+    ) -> Result<Vec<crate::storage::engine::KvPair>, LiteError> {
+        let data = self.data.lock().await;
+        let ns_byte = ns as u8;
+        let start_key = Self::make_key(ns, start);
+        let mut results: Vec<crate::storage::engine::KvPair> = data
+            .iter()
+            .filter(|(k, _)| k[0] == ns_byte && k.as_slice() >= start_key.as_slice())
+            .map(|(k, v)| (k[1..].to_vec(), v.clone()))
+            .collect();
+        results.sort_by(|(a, _), (b, _)| a.cmp(b));
+        results.truncate(limit);
+        Ok(results)
+    }
+
+    async fn scan_range_bounded(
+        &self,
+        ns: Namespace,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        limit: Option<usize>,
+    ) -> Result<Vec<crate::storage::engine::KvPair>, LiteError> {
+        let data = self.data.lock().await;
+        let ns_byte = ns as u8;
+        let start_key = start
+            .map(|s| Self::make_key(ns, s))
+            .unwrap_or_else(|| vec![ns_byte]);
+        let end_key = end
+            .map(|e| Self::make_key(ns, e))
+            .unwrap_or_else(|| vec![ns_byte + 1]);
+        let mut results: Vec<crate::storage::engine::KvPair> = data
+            .iter()
+            .filter(|(k, _)| {
+                k[0] == ns_byte
+                    && k.as_slice() >= start_key.as_slice()
+                    && k.as_slice() < end_key.as_slice()
+            })
+            .map(|(k, v)| (k[1..].to_vec(), v.clone()))
+            .collect();
+        results.sort_by(|(a, _), (b, _)| a.cmp(b));
+        if let Some(lim) = limit {
+            results.truncate(lim);
+        }
+        Ok(results)
+    }
 }
 
 fn crm_schema() -> nodedb_types::columnar::StrictSchema {
@@ -97,7 +147,13 @@ fn crm_schema() -> nodedb_types::columnar::StrictSchema {
         ColumnDef::required("id", ColumnType::Int64).with_primary_key(),
         ColumnDef::required("name", ColumnType::String),
         ColumnDef::nullable("email", ColumnType::String),
-        ColumnDef::required("balance", ColumnType::Decimal),
+        ColumnDef::required(
+            "balance",
+            ColumnType::Decimal {
+                precision: 18,
+                scale: 4,
+            },
+        ),
         ColumnDef::nullable("active", ColumnType::Bool),
     ])
     .expect("valid schema")

@@ -1,16 +1,17 @@
 //! `StorageEngine` trait: the async key-value blob interface.
 //!
-//! All persistent storage on the edge goes through this trait. SQLite
-//! (native) and OPFS (WASM) are the two backends. The engines above
-//! (HNSW, CSR, Loro) serialize their data to opaque blobs and store them
-//! here. SQLite/OPFS never interprets the data.
+//! All persistent storage on the edge goes through this trait. pagedb is the
+//! backend on every target — native via platform async I/O and WASM via the
+//! OPFS worker. The engines above (HNSW, CSR, Loro) serialize their data to
+//! opaque blobs and store them here. The storage layer never interprets the
+//! data.
 
 use async_trait::async_trait;
 
 use crate::error::LiteError;
 use nodedb_types::Namespace;
 
-/// Key-value pair returned by scan operations (`scan_prefix`, `scan_range_sync`).
+/// Key-value pair returned by scan operations (`scan_prefix`, `scan_range`).
 ///
 /// First element is the key (without namespace prefix), second is the value.
 /// Defined here (not in `nodedb-types`) because it's specific to the
@@ -70,36 +71,110 @@ pub trait StorageEngine: Send + Sync + 'static {
     ///
     /// Useful for cold-start progress reporting and memory governor decisions.
     async fn count(&self, ns: Namespace) -> Result<u64, LiteError>;
-}
 
-/// Synchronous KV fast path for storage backends that support it.
-///
-/// Bypasses the async runtime for the local-only KV engine. redb
-/// operations are inherently synchronous, so this avoids unnecessary
-/// async overhead on the hot path.
-pub trait StorageEngineSync: StorageEngine {
-    /// Sync get: retrieve a value by namespace and key.
-    fn get_sync(&self, ns: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, LiteError>;
-
-    /// Sync put: insert or overwrite a value.
-    fn put_sync(&self, ns: Namespace, key: &[u8], value: &[u8]) -> Result<(), LiteError>;
-
-    /// Sync delete: remove a key.
-    fn delete_sync(&self, ns: Namespace, key: &[u8]) -> Result<(), LiteError>;
-
-    /// Sync batch write: atomically apply a batch of writes.
-    fn batch_write_sync(&self, ops: &[WriteOp]) -> Result<(), LiteError>;
-
-    /// Sync range scan: return up to `limit` entries where key >= `start`.
-    fn scan_range_sync(
+    /// Range scan: return up to `limit` entries where key >= `start`.
+    ///
+    /// Results are ordered by key (lexicographic byte order).
+    async fn scan_range(
         &self,
         ns: Namespace,
         start: &[u8],
         limit: usize,
     ) -> Result<Vec<KvPair>, LiteError>;
 
-    /// Sync count: return the number of entries in a namespace.
-    fn count_sync(&self, ns: Namespace) -> Result<u64, LiteError>;
+    /// Bounded range scan: return entries where `start <= key < end`.
+    ///
+    /// - `start = None` means the beginning of the namespace.
+    /// - `end = None` means the end of the namespace.
+    /// - `limit = None` means no cap.
+    ///
+    /// Results are ordered by key (lexicographic byte order).
+    async fn scan_range_bounded(
+        &self,
+        ns: Namespace,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        limit: Option<usize>,
+    ) -> Result<Vec<KvPair>, LiteError>;
+
+    /// Return this engine's vector segment operations interface if supported.
+    ///
+    /// `PagedbStorage` returns `Some(self)`. Test doubles return `None`,
+    /// falling back to the legacy blob checkpoint path.
+    ///
+    /// Only available on non-WASM targets (mmap is required).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn as_vector_segment_ext(
+        &self,
+    ) -> Option<&dyn crate::storage::vector_segment_ext::VectorSegmentExt> {
+        None
+    }
+
+    /// Return this engine's array segment operations interface if supported.
+    ///
+    /// `PagedbStorage` returns `Some(self)`. Test doubles return `None`,
+    /// falling back to the KV blob path.
+    ///
+    /// Only available on non-WASM targets.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn as_array_segment_ext(
+        &self,
+    ) -> Option<&dyn crate::storage::array_segment_ext::ArraySegmentExt> {
+        None
+    }
+
+    /// Return this engine's FTS segment operations interface if supported.
+    ///
+    /// `PagedbStorage` returns `Some(self)`. Test doubles return `None`,
+    /// falling back to the KV blob path where each term's postings are stored
+    /// as a separate B+ tree entry.
+    ///
+    /// Only available on non-WASM targets.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn as_fts_segment_ext(&self) -> Option<&dyn crate::storage::fts_segment_ext::FtsSegmentExt> {
+        None
+    }
+
+    /// Return this engine's columnar segment operations interface if supported.
+    ///
+    /// `PagedbStorage` returns `Some(self)`. Test doubles return `None`,
+    /// falling back to the KV blob path for large segment bytes.
+    ///
+    /// Only available on non-WASM targets.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn as_columnar_segment_ext(
+        &self,
+    ) -> Option<&dyn crate::storage::columnar_segment_ext::ColumnarSegmentExt> {
+        None
+    }
+
+    /// Return this engine's graph segment operations interface if supported.
+    ///
+    /// `PagedbStorage` returns `Some(self)`. Test doubles return `None`,
+    /// falling back to the legacy `Namespace::Graph` KV blob path for CSR
+    /// adjacency checkpoints.
+    ///
+    /// Only available on non-WASM targets.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn as_graph_segment_ext(
+        &self,
+    ) -> Option<&dyn crate::storage::graph_segment_ext::GraphSegmentExt> {
+        None
+    }
+
+    /// Return this engine's spatial segment operations interface if supported.
+    ///
+    /// `PagedbStorage` returns `Some(self)`. Test doubles return `None`,
+    /// falling back to the legacy `Namespace::Spatial` KV blob path for R-tree
+    /// checkpoint blobs.
+    ///
+    /// Only available on non-WASM targets.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn as_spatial_segment_ext(
+        &self,
+    ) -> Option<&dyn crate::storage::spatial_segment_ext::SpatialSegmentExt> {
+        None
+    }
 }
 
 #[cfg(test)]

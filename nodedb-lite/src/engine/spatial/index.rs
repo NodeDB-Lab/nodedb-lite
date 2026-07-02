@@ -8,6 +8,12 @@
 
 use std::collections::HashMap;
 
+type CheckpointData = (
+    Vec<(String, String, Vec<u8>)>,
+    HashMap<(String, String), u64>,
+    u64,
+);
+
 use nodedb_spatial::rtree::{RTree, RTreeEntry};
 use nodedb_types::BoundingBox;
 use nodedb_types::geometry::Geometry;
@@ -23,6 +29,8 @@ pub struct SpatialIndexManager {
     /// Document ID → entry ID mapping for deletion.
     /// Key: (collection, doc_id), Value: entry_id in R-tree.
     doc_to_entry: HashMap<(String, String), u64>,
+    /// Inverse map: entry_id → (collection, doc_id) for scan result resolution.
+    entry_to_doc: HashMap<u64, (String, String)>,
     /// Next entry ID (monotonically increasing).
     next_id: u64,
 }
@@ -32,8 +40,16 @@ impl SpatialIndexManager {
         Self {
             indices: HashMap::new(),
             doc_to_entry: HashMap::new(),
+            entry_to_doc: HashMap::new(),
             next_id: 1,
         }
+    }
+
+    /// Resolve an R-tree entry ID to its document ID within a collection.
+    pub fn doc_id_for_entry(&self, entry_id: u64) -> Option<&str> {
+        self.entry_to_doc
+            .get(&entry_id)
+            .map(|(_, doc_id)| doc_id.as_str())
     }
 
     /// Index a geometry from a document. If the document already has an entry,
@@ -49,10 +65,11 @@ impl SpatialIndexManager {
         let doc_key = (collection.to_string(), doc_id.to_string());
 
         // Remove old entry if this document was previously indexed.
-        if let Some(old_id) = self.doc_to_entry.remove(&doc_key)
-            && let Some(tree) = self.indices.get_mut(&key)
-        {
-            tree.delete(old_id);
+        if let Some(old_id) = self.doc_to_entry.remove(&doc_key) {
+            self.entry_to_doc.remove(&old_id);
+            if let Some(tree) = self.indices.get_mut(&key) {
+                tree.delete(old_id);
+            }
         }
 
         let bbox = nodedb_types::geometry_bbox(geometry);
@@ -62,6 +79,8 @@ impl SpatialIndexManager {
         let tree = self.indices.entry(key).or_default();
         tree.insert(RTreeEntry { id: entry_id, bbox });
         self.doc_to_entry.insert(doc_key, entry_id);
+        self.entry_to_doc
+            .insert(entry_id, (collection.to_string(), doc_id.to_string()));
     }
 
     /// Remove a document's geometry from the index.
@@ -69,10 +88,11 @@ impl SpatialIndexManager {
         let key = (collection.to_string(), field.to_string());
         let doc_key = (collection.to_string(), doc_id.to_string());
 
-        if let Some(entry_id) = self.doc_to_entry.remove(&doc_key)
-            && let Some(tree) = self.indices.get_mut(&key)
-        {
-            tree.delete(entry_id);
+        if let Some(entry_id) = self.doc_to_entry.remove(&doc_key) {
+            self.entry_to_doc.remove(&entry_id);
+            if let Some(tree) = self.indices.get_mut(&key) {
+                tree.delete(entry_id);
+            }
         }
     }
 
@@ -122,7 +142,7 @@ impl SpatialIndexManager {
     pub fn checkpoint_all(&self) -> Vec<(String, String, Vec<u8>)> {
         let mut results = Vec::new();
         for ((collection, field), tree) in &self.indices {
-            match tree.checkpoint_to_bytes() {
+            match tree.checkpoint_to_bytes(None) {
                 Ok(bytes) => results.push((collection.clone(), field.clone(), bytes)),
                 Err(e) => {
                     tracing::error!(
@@ -137,33 +157,68 @@ impl SpatialIndexManager {
         results
     }
 
-    /// Restore R-trees from checkpoint data.
+    /// Return the data needed by the checkpoint module to persist full state.
     ///
-    /// Takes a vec of `(collection, field, rtree_bytes)`.
+    /// Returns `(rtree_checkpoints, doc_to_entry, next_id)`.
+    pub fn checkpoint_data(&self) -> CheckpointData {
+        (
+            self.checkpoint_all(),
+            self.doc_to_entry.clone(),
+            self.next_id,
+        )
+    }
+
+    /// Load a fully-restored checkpoint.
+    ///
+    /// Replaces the current in-memory state with the provided R-tree
+    /// checkpoints and the exact `doc_id → entry_id` mapping that was
+    /// serialised at flush time.
+    pub fn load_checkpoint(
+        &mut self,
+        checkpoints: &[(String, String, Vec<u8>)],
+        doc_to_entry: HashMap<(String, String), u64>,
+        next_id: u64,
+    ) {
+        // Rebuild inverse map from the restored forward map.
+        self.entry_to_doc = doc_to_entry
+            .iter()
+            .map(|((col, doc_id), &eid)| (eid, (col.clone(), doc_id.clone())))
+            .collect();
+        self.doc_to_entry = doc_to_entry;
+        self.next_id = next_id;
+        for (collection, field, bytes) in checkpoints {
+            match RTree::from_checkpoint(bytes, None) {
+                Ok(tree) => {
+                    self.indices
+                        .insert((collection.clone(), field.clone()), tree);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        collection = %collection,
+                        field = %field,
+                        error = %e,
+                        "spatial R-tree restore failed; collection will be empty until rebuilt"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Restore R-trees from raw checkpoint bytes only (no doc_to_entry).
+    ///
+    /// Used as a fallback when no docmap is available (e.g. legacy checkpoints
+    /// written before this field was introduced). After restoration, upserts
+    /// and deletes of already-indexed docs may not evict stale entries; a full
+    /// rebuild from documents is the reliable recovery path in that case.
     pub fn restore_all(checkpoints: &[(String, String, Vec<u8>)]) -> Self {
         let mut manager = Self::new();
         for (collection, field, bytes) in checkpoints {
-            match RTree::from_checkpoint(bytes) {
+            match RTree::from_checkpoint(bytes, None) {
                 Ok(tree) => {
-                    // Rebuild doc_to_entry from restored entries.
-                    // Entry IDs are opaque u64s; we reconstruct the mapping
-                    // assuming entry.id was originally assigned to collection:doc_id.
-                    // Since the R-tree doesn't store doc_ids, we record the
-                    // entry_id → (collection, entry_id_as_string) mapping so that
-                    // subsequent upserts can remove stale entries.
                     let max_id = tree.entries().iter().map(|e| e.id).max().unwrap_or(0);
                     if max_id >= manager.next_id {
                         manager.next_id = max_id + 1;
                     }
-
-                    // Rebuild doc_to_entry: entry IDs map back to themselves
-                    // as synthetic doc keys. The real doc_id mapping is rebuilt
-                    // when rebuild_from_documents() is called on cold start.
-                    for entry in tree.entries() {
-                        let doc_key = (collection.clone(), format!("__entry_{}", entry.id));
-                        manager.doc_to_entry.insert(doc_key, entry.id);
-                    }
-
                     manager
                         .indices
                         .insert((collection.clone(), field.clone()), tree);
@@ -198,6 +253,8 @@ impl SpatialIndexManager {
                 self.next_id += 1;
                 let doc_key = (collection.to_string(), doc_id.clone());
                 self.doc_to_entry.insert(doc_key, id);
+                self.entry_to_doc
+                    .insert(id, (collection.to_string(), doc_id.clone()));
                 RTreeEntry {
                     id,
                     bbox: nodedb_types::geometry_bbox(geom),

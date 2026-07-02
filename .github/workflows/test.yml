@@ -1,0 +1,80 @@
+# Reusable test workflow: fmt, clippy, native test suite, and wasm32 check.
+#
+# Called by:
+#   - ci.yml      (PR checks)
+#   - release.yml (pre-publish gate)
+#
+# Lite is a separate workspace from Origin. It consumes the nodedb-* shared
+# crates from crates.io. Local development uses `.cargo/config.toml`
+# [patch.crates-io] to resolve to a sibling Origin checkout; CI uses the
+# published versions.
+
+name: Test
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Lint & Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lite-workspace
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake clang libclang-dev pkg-config protobuf-compiler perl
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --profile ci -- -D warnings
+      - name: Check wasm32 target
+        run: cargo check -p nodedb-lite-wasm --target wasm32-unknown-unknown
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lite-workspace
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake clang libclang-dev pkg-config protobuf-compiler perl
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - name: Run tests
+        run: |
+          cargo nextest run \
+            --workspace \
+            --cargo-profile ci --profile ci \
+            --no-fail-fast
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-report
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore

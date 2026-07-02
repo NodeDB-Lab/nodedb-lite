@@ -13,6 +13,26 @@ pub struct UnsyncedDropWarning {
 }
 
 impl TimeseriesEngine {
+    /// Drop partitions whose `max_ts < cutoff_ms` across all collections.
+    ///
+    /// Unlike `apply_retention`, this method takes an explicit cutoff rather than
+    /// reading it from `config.retention_period_ms`. Used by `EnforceTimeseriesRetention`
+    /// when a per-collection cutoff is supplied by the caller.
+    pub fn purge_before_ms(&mut self, cutoff_ms: i64) -> Vec<String> {
+        let mut dropped = Vec::new();
+        for coll in self.collections.values_mut() {
+            coll.partitions.retain(|p| {
+                if p.meta.max_ts < cutoff_ms {
+                    dropped.push(p.key_prefix.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        dropped
+    }
+
     /// Drop partitions older than the retention period.
     pub fn apply_retention(&mut self, now_ms: i64) -> Vec<String> {
         if self.config.retention_period_ms == 0 {

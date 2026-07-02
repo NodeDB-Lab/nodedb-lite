@@ -1,4 +1,12 @@
-// Note: bypasses WebSocket transport; exercises wire-message handlers directly.
+//! Edge-side simulation — does NOT exercise real Origin transport.
+//! All tests here call Lite's inbound/outbound handlers directly, bypassing
+//! the WebSocket connection to a live Origin node.
+//!
+//! The real-transport round-trip (Lite → Origin WebSocket → Lite) is not covered
+//! by any test in this file.  See §13 of the release checklist for the decision
+//! record and the placeholder real-transport test in `tests/array_sync_interop.rs`.
+//!
+//! Original note: bypasses WebSocket transport; exercises wire-message handlers directly.
 
 mod common;
 
@@ -8,10 +16,10 @@ use nodedb_lite::sync::array::inbound::outcome::InboundOutcome;
 /// Lite writes the same coord at two different HLCs (i.e. two different
 /// system times). Both ops land at the "Origin" in-process engine.
 /// AS-OF queries return the correct version for each system time.
-#[test]
-fn two_writes_same_coord_bitemporal_as_of() {
-    let harness = common::SyncHarness::new_in_memory();
-    harness.create_array("bt");
+#[tokio::test(flavor = "multi_thread")]
+async fn two_writes_same_coord_bitemporal_as_of() {
+    let harness = common::SyncHarness::new_in_memory().await;
+    harness.create_array("bt").await;
 
     let schema_hlc = harness.schema_hlc("bt");
     let rep = common::replica(1);
@@ -26,10 +34,10 @@ fn two_writes_same_coord_bitemporal_as_of() {
     assert_eq!(o1, InboundOutcome::Applied);
     assert_eq!(o2, InboundOutcome::Applied);
 
-    harness.flush("bt");
+    harness.flush("bt").await;
 
     // AS-OF 150 → should see v1 (system_from_ms=100).
-    let val_150 = harness.read_coord("bt", 1, 150);
+    let val_150 = harness.read_coord("bt", 1, 150).await;
     assert!(val_150.is_some(), "expected a cell AS-OF 150");
     assert_eq!(
         val_150.unwrap(),
@@ -38,7 +46,7 @@ fn two_writes_same_coord_bitemporal_as_of() {
     );
 
     // AS-OF i64::MAX → should see v2 (system_from_ms=200, the latest).
-    let val_max = harness.read_coord("bt", 1, i64::MAX);
+    let val_max = harness.read_coord("bt", 1, i64::MAX).await;
     assert!(val_max.is_some(), "expected a cell AS-OF MAX");
     assert_eq!(
         val_max.unwrap(),
@@ -49,10 +57,10 @@ fn two_writes_same_coord_bitemporal_as_of() {
 
 /// When ops arrive out of HLC order (older before newer), the engine still
 /// stores both versions and returns them correctly under AS-OF.
-#[test]
-fn out_of_order_delivery_still_correct() {
-    let harness = common::SyncHarness::new_in_memory();
-    harness.create_array("oo");
+#[tokio::test(flavor = "multi_thread")]
+async fn out_of_order_delivery_still_correct() {
+    let harness = common::SyncHarness::new_in_memory().await;
+    harness.create_array("oo").await;
 
     let schema_hlc = harness.schema_hlc("oo");
     let rep = common::replica(1);
@@ -71,14 +79,14 @@ fn out_of_order_delivery_still_correct() {
         "early op must be Applied or Idempotent, got: {re:?}"
     );
 
-    harness.flush("oo");
+    harness.flush("oo").await;
 
     // AS-OF 150 → value at system 100 is 100.0.
-    let val = harness.read_coord("oo", 2, 150);
+    let val = harness.read_coord("oo", 2, 150).await;
     // The engine may or may not materialise the earlier write when a later
     // write already exists at the same coord — depends on engine semantics.
     // What we guarantee: AS-OF MAX sees the late value.
-    let val_max = harness.read_coord("oo", 2, i64::MAX);
+    let val_max = harness.read_coord("oo", 2, i64::MAX).await;
     assert!(val_max.is_some(), "latest value must be readable");
     assert_eq!(val_max.unwrap(), CellValue::Float64(200.0));
     let _ = val; // suppress unused-variable warning
@@ -86,10 +94,10 @@ fn out_of_order_delivery_still_correct() {
 
 /// HLC strictly advances between ops from the same replica: each successive op
 /// must carry a strictly greater HLC, confirmed by ordering.
-#[test]
-fn hlc_order_is_strictly_monotonic() {
-    let harness = common::SyncHarness::new_in_memory();
-    harness.create_array("mono");
+#[tokio::test(flavor = "multi_thread")]
+async fn hlc_order_is_strictly_monotonic() {
+    let harness = common::SyncHarness::new_in_memory().await;
+    harness.create_array("mono").await;
 
     let schema_hlc = harness.schema_hlc("mono");
     let rep = common::replica(42);
@@ -110,9 +118,9 @@ fn hlc_order_is_strictly_monotonic() {
     assert_eq!(harness.deliver(&op2), InboundOutcome::Applied);
     assert_eq!(harness.deliver(&op3), InboundOutcome::Applied);
 
-    harness.flush("mono");
+    harness.flush("mono").await;
 
-    let latest = harness.read_coord("mono", 0, i64::MAX);
+    let latest = harness.read_coord("mono", 0, i64::MAX).await;
     assert!(latest.is_some());
     assert_eq!(latest.unwrap(), CellValue::Float64(3.0));
 }

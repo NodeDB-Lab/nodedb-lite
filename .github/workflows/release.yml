@@ -1,0 +1,249 @@
+name: Release
+run-name: Release ${{ github.ref_name }}
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Validate tag ─────────────────────────────────────────────────────────────
+  validate-version:
+    name: Validate Version Tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      is_full_release: ${{ steps.version.outputs.is_full_release }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate tag against Cargo.toml
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          TAG_VERSION="${TAG#v}"
+
+          CARGO_VERSION=$(cargo metadata --no-deps --format-version=1 \
+            | jq -r '.packages[] | select(.name == "nodedb-lite") | .version')
+          CARGO_BASE=$(echo "$CARGO_VERSION" | grep -oP '^\d+\.\d+\.\d+')
+
+          echo "Tag version:        $TAG_VERSION"
+          echo "Cargo.toml version: $CARGO_VERSION"
+          echo "Cargo.toml base:    $CARGO_BASE"
+
+          if [[ ! "$TAG_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)(-[a-zA-Z]+\.[0-9]+)?$ ]]; then
+            echo "::error::Invalid tag format '$TAG'. Expected: vX.Y.Z or vX.Y.Z-label.N"
+            exit 1
+          fi
+
+          TAG_BASE="${BASH_REMATCH[1]}"
+
+          if [[ "$TAG_BASE" != "$CARGO_BASE" ]]; then
+            echo "::error::Base version mismatch! Tag '$TAG_BASE' != Cargo.toml '$CARGO_BASE'"
+            exit 1
+          fi
+
+          # Full release = no hyphen suffix (v0.1.0, not v0.1.0-beta.1)
+          if [[ "$TAG_VERSION" == *-* ]]; then
+            echo "is_full_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_full_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+
+  # ── CI gate ──────────────────────────────────────────────────────────────────
+  ci:
+    name: CI Gate
+    needs: validate-version
+    uses: ./.github/workflows/ci.yml
+
+  # ── WASM gate ────────────────────────────────────────────────────────────────
+  wasm:
+    name: WASM Gate
+    needs: validate-version
+    uses: ./.github/workflows/wasm.yml
+
+  # ── Publish crates to crates.io ──────────────────────────────────────────────
+  # Requires secret: CARGO_REGISTRY_TOKEN
+  # Tier 1: nodedb-lite (no internal Lite deps).
+  # Tier 2: nodedb-lite-ffi, nodedb-lite-wasm (both depend on nodedb-lite).
+  # is_published / wait_for polling mirrors the nodedb workspace pattern so
+  # a re-run after a failed publish never double-publishes an already-indexed
+  # crate.
+  publish-crates:
+    name: Publish to crates.io
+    needs: [validate-version, ci, wasm]
+    runs-on: ubuntu-latest
+    environment: crates.io
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake clang libclang-dev pkg-config protobuf-compiler perl
+
+      - name: Set version from tag
+        run: |
+          VERSION="${{ needs.validate-version.outputs.version }}"
+          CURRENT=$(cargo metadata --no-deps --format-version=1 \
+            | jq -r '.packages[] | select(.name == "nodedb-lite") | .version')
+          if [[ "$VERSION" != "$CURRENT" ]]; then
+            sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml
+
+            # For pre-release versions, pin internal dep requirements so
+            # semver "0.1.0" doesn't fail to match "0.1.0-beta.1".
+            if [[ "$VERSION" == *-* ]]; then
+              sed -i -E 's/(nodedb-lite = \{ [^}]*version = )"[^"]*"/\1"='"$VERSION"'"/' Cargo.toml
+              echo "Updated internal dep versions to =$VERSION"
+            fi
+
+            echo "Updated workspace version: $CURRENT -> $VERSION"
+          else
+            echo "Version already matches, no change needed"
+          fi
+
+      - name: Publish crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          TIER1="nodedb-lite"
+          TIER2="nodedb-lite-ffi nodedb-lite-wasm"
+
+          is_published() {
+            curl -sf \
+              -H "User-Agent: nodedb-lite-ci (github.com/NodeDB-Lab/nodedb-lite)" \
+              "https://crates.io/api/v1/crates/$1/$2" > /dev/null 2>&1
+          }
+
+          wait_for() {
+            local crate="$1" version="$2"
+            echo -n "  Waiting for $crate@$version..."
+            for i in $(seq 1 30); do
+              if is_published "$crate" "$version"; then
+                echo " ready"
+                return 0
+              fi
+              sleep 5
+            done
+            echo " timed out!"
+            return 1
+          }
+
+          publish_tier() {
+            local tier_name="$1"; shift
+            local crates=("$@")
+            local need_wait=()
+
+            echo "::group::Tier: $tier_name"
+            for crate in "${crates[@]}"; do
+              VERSION=$(cargo metadata --no-deps --format-version=1 \
+                | jq -r --arg name "$crate" '.packages[] | select(.name == $name) | .version')
+              if is_published "$crate" "$VERSION"; then
+                echo "  $crate@$VERSION already published — skipping"
+              else
+                echo "  Publishing $crate@$VERSION..."
+                cargo publish -p "$crate" --allow-dirty --no-verify
+                need_wait+=("$crate:$VERSION")
+              fi
+            done
+
+            for entry in "${need_wait[@]}"; do
+              wait_for "${entry%%:*}" "${entry##*:}"
+            done
+            echo "::endgroup::"
+          }
+
+          publish_tier "1 (no internal Lite deps)" $TIER1
+          publish_tier "2 (depends on nodedb-lite)" $TIER2
+
+  # ── Publish npm package ──────────────────────────────────────────────────────
+  # Requires secret: NPM_TOKEN
+  publish-npm:
+    name: Publish to npm
+    needs: [validate-version, ci, wasm, publish-crates]
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Build WASM release
+        run: wasm-pack build --target web --release nodedb-lite-wasm
+
+      - name: Rewrite pkg/package.json metadata
+        working-directory: nodedb-lite-wasm/pkg
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.name = '@nodedb/lite';
+            pkg.version = '${{ needs.validate-version.outputs.version }}';
+            pkg.license = 'Apache-2.0';
+            pkg.repository = { type: 'git', url: 'https://github.com/NodeDB-Lab/nodedb-lite' };
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Publish to npm
+        working-directory: nodedb-lite-wasm/pkg
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ "${{ needs.validate-version.outputs.is_full_release }}" == "true" ]]; then
+            npm publish --access public
+          else
+            npm publish --access public --tag beta
+          fi
+
+  # ── Create GitHub Release ─────────────────────────────────────────────────────
+  github-release:
+    name: Create GitHub Release
+    needs: [validate-version, publish-crates, publish-npm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.validate-version.outputs.version }}
+          name: NodeDB Lite ${{ needs.validate-version.outputs.version }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(needs.validate-version.outputs.version, '-') }}

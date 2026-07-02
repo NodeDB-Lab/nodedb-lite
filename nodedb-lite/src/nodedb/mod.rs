@@ -8,14 +8,16 @@ mod diagnostic;
 mod graph_rag;
 mod health;
 pub(crate) mod lock_ext;
+#[cfg(not(target_arch = "wasm32"))]
 mod sync_delegate;
 mod trait_impl;
 
 pub use collection::{CollectionMeta, TransactionOp};
-pub use core::NodeDbLite;
+pub use core::{NodeDbLite, SyncGate};
 pub use diagnostic::DiagnosticDump;
 pub use health::{HealthStatus, OverallStatus};
 pub(crate) use lock_ext::LockExt;
+pub use trait_impl::BatchItem;
 
 #[cfg(test)]
 mod tests {
@@ -24,12 +26,12 @@ mod tests {
     use nodedb_types::id::NodeId;
     use nodedb_types::value::Value;
 
-    use crate::RedbStorage;
+    use crate::PagedbStorageMem;
 
     use super::*;
 
-    async fn make_db() -> NodeDbLite<RedbStorage> {
-        let storage = RedbStorage::open_in_memory().unwrap();
+    async fn make_db() -> NodeDbLite<PagedbStorageMem> {
+        let storage = PagedbStorageMem::open_in_memory().await.unwrap();
         NodeDbLite::open(storage, 1).await.unwrap()
     }
 
@@ -54,7 +56,7 @@ mod tests {
             .unwrap();
 
         let results = db
-            .vector_search("embeddings", &[1.0, 0.0, 0.0], 2, None)
+            .vector_search("embeddings", &[1.0, 0.0, 0.0], 2, None, None)
             .await
             .unwrap();
 
@@ -71,7 +73,7 @@ mod tests {
         db.vector_delete("coll", "v1").await.unwrap();
 
         let results = db
-            .vector_search("coll", &[1.0, 0.0], 5, None)
+            .vector_search("coll", &[1.0, 0.0], 5, None, None)
             .await
             .unwrap();
         assert!(results.is_empty());
@@ -81,15 +83,32 @@ mod tests {
     async fn graph_insert_and_traverse() {
         let db = make_db().await;
 
-        db.graph_insert_edge(&NodeId::new("alice"), &NodeId::new("bob"), "KNOWS", None)
-            .await
-            .unwrap();
-        db.graph_insert_edge(&NodeId::new("bob"), &NodeId::new("carol"), "KNOWS", None)
-            .await
-            .unwrap();
+        db.graph_insert_edge(
+            "social",
+            &NodeId::from_validated("alice".to_string()),
+            &NodeId::from_validated("bob".to_string()),
+            "KNOWS",
+            None,
+        )
+        .await
+        .unwrap();
+        db.graph_insert_edge(
+            "social",
+            &NodeId::from_validated("bob".to_string()),
+            &NodeId::from_validated("carol".to_string()),
+            "KNOWS",
+            None,
+        )
+        .await
+        .unwrap();
 
         let subgraph = db
-            .graph_traverse(&NodeId::new("alice"), 2, None)
+            .graph_traverse(
+                "social",
+                &NodeId::from_validated("alice".to_string()),
+                2,
+                None,
+            )
             .await
             .unwrap();
 
@@ -101,13 +120,22 @@ mod tests {
     async fn graph_delete_edge() {
         let db = make_db().await;
         let edge_id = db
-            .graph_insert_edge(&NodeId::new("a"), &NodeId::new("b"), "L", None)
+            .graph_insert_edge(
+                "test",
+                &NodeId::from_validated("a".to_string()),
+                &NodeId::from_validated("b".to_string()),
+                "L",
+                None,
+            )
             .await
             .unwrap();
 
-        db.graph_delete_edge(&edge_id).await.unwrap();
+        db.graph_delete_edge("test", &edge_id).await.unwrap();
 
-        let subgraph = db.graph_traverse(&NodeId::new("a"), 1, None).await.unwrap();
+        let subgraph = db
+            .graph_traverse("test", &NodeId::from_validated("a".to_string()), 1, None)
+            .await
+            .unwrap();
         assert_eq!(subgraph.edge_count(), 0);
     }
 
@@ -163,15 +191,21 @@ mod tests {
     #[tokio::test]
     async fn flush_and_reopen() {
         {
-            let s = RedbStorage::open_in_memory().unwrap();
+            let s = PagedbStorageMem::open_in_memory().await.unwrap();
             let db = NodeDbLite::open(s, 1).await.unwrap();
 
             let mut doc = Document::new("d1");
             doc.set("key", Value::String("val".into()));
             db.document_put("docs", doc).await.unwrap();
-            db.graph_insert_edge(&NodeId::new("x"), &NodeId::new("y"), "REL", None)
-                .await
-                .unwrap();
+            db.graph_insert_edge(
+                "test",
+                &NodeId::from_validated("x".to_string()),
+                &NodeId::from_validated("y".to_string()),
+                "REL",
+                None,
+            )
+            .await
+            .unwrap();
 
             db.flush().await.unwrap();
 
@@ -226,9 +260,60 @@ mod tests {
     async fn search_nonexistent_collection() {
         let db = make_db().await;
         let results = db
-            .vector_search("no_such_collection", &[1.0], 5, None)
+            .vector_search("no_such_collection", &[1.0], 5, None, None)
             .await
             .unwrap();
         assert!(results.is_empty());
+    }
+
+    /// Verify that a vector insert is rejected with Backpressure when the
+    /// memory governor reports Critical pressure.
+    ///
+    /// Strategy: open a db with a tiny budget so that a first insert (which
+    /// calls `update_memory_stats` at the end) pushes reported usage over the
+    /// 95% threshold, then assert the second insert returns a Backpressure
+    /// error.
+    #[tokio::test]
+    async fn vector_insert_rejected_at_critical_pressure() {
+        use crate::config::LiteConfig;
+        use crate::memory::PressureLevel;
+
+        // Budget is tiny (1 byte) so any HNSW usage immediately reports Critical.
+        let config = LiteConfig {
+            memory_budget: 1,
+            ..LiteConfig::default()
+        };
+        let storage = PagedbStorageMem::open_in_memory().await.unwrap();
+        let db = NodeDbLite::open_with_config(storage, 1, config)
+            .await
+            .unwrap();
+
+        // First insert: succeeds and updates memory stats so the governor
+        // reports Critical after this call returns.
+        db.vector_insert("embeddings", "v1", &[1.0, 0.0, 0.0], None)
+            .await
+            .unwrap();
+
+        // Confirm the governor is now Critical before the second insert.
+        assert_eq!(
+            db.governor().pressure(),
+            PressureLevel::Critical,
+            "governor should be Critical after first insert with 1-byte budget"
+        );
+
+        // Second insert must be rejected with a Backpressure error.
+        let result = db
+            .vector_insert("embeddings", "v2", &[0.0, 1.0, 0.0], None)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "second vector insert should fail under Critical pressure"
+        );
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("backpressure") || err_str.contains("Backpressure"),
+            "error should mention backpressure, got: {err_str}"
+        );
     }
 }

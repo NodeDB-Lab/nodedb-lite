@@ -12,7 +12,7 @@
 //!
 //! # Cold-start scan
 //!
-//! [`SchemaRegistry::load`] uses `scan_range_sync` starting at the prefix
+//! [`SchemaRegistry::load`] uses `scan_range` starting at the prefix
 //! `b"array.schema_doc:"` and stops when the first key that does not share
 //! that prefix is encountered.
 
@@ -25,7 +25,7 @@ use nodedb_array::sync::schema_crdt::SchemaDoc;
 use nodedb_types::Namespace;
 
 use crate::error::LiteError;
-use crate::storage::engine::StorageEngineSync;
+use crate::storage::engine::StorageEngine;
 use crate::sync::array::replica_state::ReplicaState;
 
 /// Prefix used for schema snapshot storage keys.
@@ -48,13 +48,13 @@ fn schema_key(name: &str) -> Vec<u8> {
 ///
 /// Thread-safe via an internal [`Mutex`]. Multiple subsystems hold an
 /// `Arc<SchemaRegistry<S>>` and call into it independently.
-pub struct SchemaRegistry<S: StorageEngineSync> {
+pub struct SchemaRegistry<S: StorageEngine> {
     storage: Arc<S>,
     docs: Mutex<HashMap<String, SchemaDoc>>,
     replica: Arc<ReplicaState>,
 }
 
-impl<S: StorageEngineSync> SchemaRegistry<S> {
+impl<S: StorageEngine> SchemaRegistry<S> {
     /// Create an empty registry (no cold-start scan).
     ///
     /// Use [`load`] to reconstruct persisted schemas on startup.
@@ -70,9 +70,11 @@ impl<S: StorageEngineSync> SchemaRegistry<S> {
     ///
     /// Scans `Namespace::Meta` starting at `b"array.schema_doc:"` and stops
     /// at the first key that no longer shares that prefix.
-    pub fn load(storage: Arc<S>, replica: Arc<ReplicaState>) -> Result<Self, LiteError> {
+    pub async fn load(storage: Arc<S>, replica: Arc<ReplicaState>) -> Result<Self, LiteError> {
         let prefix = SCHEMA_KEY_PREFIX.as_bytes();
-        let pairs = storage.scan_range_sync(Namespace::Meta, prefix, usize::MAX)?;
+        let pairs = storage
+            .scan_range(Namespace::Meta, prefix, usize::MAX)
+            .await?;
 
         let mut docs = HashMap::new();
         for (key, value) in pairs {
@@ -121,32 +123,38 @@ impl<S: StorageEngineSync> SchemaRegistry<S> {
     ///
     /// Persists a Loro snapshot under the schema key so the registry
     /// survives restarts. Returns the freshly minted `schema_hlc`.
-    pub fn put_schema(&self, name: &str, schema: &ArraySchema) -> Result<Hlc, LiteError> {
-        let mut docs = self.docs.lock().map_err(|_| LiteError::LockPoisoned)?;
+    pub async fn put_schema(&self, name: &str, schema: &ArraySchema) -> Result<Hlc, LiteError> {
+        let (schema_hlc, snapshot) = {
+            let mut docs = self.docs.lock().map_err(|_| LiteError::LockPoisoned)?;
 
-        let doc = if let Some(existing) = docs.get_mut(name) {
-            existing
-                .replace_schema(schema, &self.replica.hlc_gen())
-                .map_err(|e| LiteError::Storage {
-                    detail: format!("schema_registry put_schema '{name}': {e}"),
-                })?;
-            existing
-        } else {
-            let new_doc =
-                SchemaDoc::from_schema(self.replica.replica_id(), schema, &self.replica.hlc_gen())
+            let doc = if let Some(existing) = docs.get_mut(name) {
+                existing
+                    .replace_schema(schema, &self.replica.hlc_gen())
                     .map_err(|e| LiteError::Storage {
-                        detail: format!("schema_registry from_schema '{name}': {e}"),
+                        detail: format!("schema_registry put_schema '{name}': {e}"),
                     })?;
-            docs.insert(name.to_owned(), new_doc);
-            docs.get_mut(name).expect("just inserted")
-        };
+                existing
+            } else {
+                let new_doc = SchemaDoc::from_schema(
+                    self.replica.replica_id(),
+                    schema,
+                    &self.replica.hlc_gen(),
+                )
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("schema_registry from_schema '{name}': {e}"),
+                })?;
+                docs.insert(name.to_owned(), new_doc);
+                docs.get_mut(name).expect("just inserted")
+            };
 
-        let schema_hlc = doc.schema_hlc();
-        let snapshot = doc.export_snapshot().map_err(|e| LiteError::Storage {
-            detail: format!("schema_registry export '{name}': {e}"),
-        })?;
+            let schema_hlc = doc.schema_hlc();
+            let snapshot = doc.export_snapshot().map_err(|e| LiteError::Storage {
+                detail: format!("schema_registry export '{name}': {e}"),
+            })?;
+            (schema_hlc, snapshot)
+        }; // docs lock released here
 
-        self.persist(name, schema_hlc, snapshot)?;
+        self.persist(name, schema_hlc, snapshot).await?;
         Ok(schema_hlc)
     }
 
@@ -160,7 +168,8 @@ impl<S: StorageEngineSync> SchemaRegistry<S> {
     ///
     /// Creates the entry if absent. Persists the updated snapshot.
     /// Used by Phase E inbound to ingest schema sync messages.
-    pub fn import_snapshot(
+    #[allow(clippy::await_holding_lock)]
+    pub async fn import_snapshot(
         &self,
         name: &str,
         snapshot_bytes: &[u8],
@@ -183,7 +192,7 @@ impl<S: StorageEngineSync> SchemaRegistry<S> {
         })?;
         drop(docs);
 
-        self.persist(name, schema_hlc, snapshot)
+        self.persist(name, schema_hlc, snapshot).await
     }
 
     /// Return all array names currently registered in this registry.
@@ -212,7 +221,7 @@ impl<S: StorageEngineSync> SchemaRegistry<S> {
 
     // ─── Internal helpers ─────────────────────────────────────────────────────
 
-    fn persist(
+    async fn persist(
         &self,
         name: &str,
         schema_hlc: Hlc,
@@ -227,7 +236,8 @@ impl<S: StorageEngineSync> SchemaRegistry<S> {
             detail: format!("schema_registry persist '{name}': {e}"),
         })?;
         self.storage
-            .put_sync(Namespace::Meta, &schema_key(name), &bytes)
+            .put(Namespace::Meta, &schema_key(name), &bytes)
+            .await
     }
 }
 
@@ -236,7 +246,7 @@ impl<S: StorageEngineSync> SchemaRegistry<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::redb_storage::RedbStorage;
+    use crate::storage::pagedb_storage::{PagedbStorageDefault, PagedbStorageMem};
     use nodedb_array::schema::array_schema::ArraySchema;
     use nodedb_array::schema::attr_spec::{AttrSpec, AttrType};
     use nodedb_array::schema::cell_order::{CellOrder, TileOrder};
@@ -259,96 +269,120 @@ mod tests {
         }
     }
 
-    fn make_replica(storage: &Arc<RedbStorage>) -> Arc<ReplicaState> {
-        Arc::new(ReplicaState::load_or_init(&**storage).unwrap())
+    use crate::storage::engine::StorageEngine;
+
+    async fn make_replica(storage: &Arc<PagedbStorageMem>) -> Arc<ReplicaState> {
+        Arc::new(ReplicaState::load_or_init(&**storage).await.unwrap())
     }
 
-    fn make_registry(storage: Arc<RedbStorage>) -> SchemaRegistry<RedbStorage> {
-        let replica = make_replica(&storage);
+    async fn make_registry(storage: Arc<PagedbStorageMem>) -> SchemaRegistry<PagedbStorageMem> {
+        let replica = make_replica(&storage).await;
         SchemaRegistry::new(storage, replica)
     }
 
-    #[test]
-    fn put_schema_persists() {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
-        let reg = make_registry(Arc::clone(&storage));
-        let hlc = reg.put_schema("arr", &simple_schema("arr")).unwrap();
+    #[tokio::test]
+    async fn put_schema_persists() {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+        let reg = make_registry(Arc::clone(&storage)).await;
+        let hlc = reg.put_schema("arr", &simple_schema("arr")).await.unwrap();
         assert!(hlc > Hlc::ZERO);
 
         // Storage must have the key.
         let raw = storage
-            .get_sync(Namespace::Meta, &schema_key("arr"))
+            .get(Namespace::Meta, &schema_key("arr"))
+            .await
             .unwrap();
         assert!(raw.is_some(), "schema must be persisted");
     }
 
-    #[test]
-    fn load_restores_after_restart() {
+    #[tokio::test]
+    async fn load_restores_after_restart() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("schema_reg.redb");
+        let path = dir.path().join("schema_reg.pagedb");
 
         let schema_hlc;
         {
-            let storage = Arc::new(RedbStorage::open(&path).unwrap());
-            let replica = make_replica(&storage);
+            let storage = Arc::new(
+                PagedbStorageDefault::open(
+                    &path,
+                    crate::storage::encryption::Encryption::Plaintext,
+                )
+                .await
+                .unwrap(),
+            );
+            let replica = Arc::new(ReplicaState::load_or_init(&*storage).await.unwrap());
             let reg = SchemaRegistry::new(Arc::clone(&storage), Arc::clone(&replica));
-            schema_hlc = reg.put_schema("arr", &simple_schema("arr")).unwrap();
+            schema_hlc = reg.put_schema("arr", &simple_schema("arr")).await.unwrap();
         }
 
         {
-            let storage = Arc::new(RedbStorage::open(&path).unwrap());
-            let replica = Arc::new(ReplicaState::load_or_init(&*storage).unwrap());
-            let reg = SchemaRegistry::load(Arc::clone(&storage), replica).unwrap();
+            let storage = Arc::new(
+                PagedbStorageDefault::open(
+                    &path,
+                    crate::storage::encryption::Encryption::Plaintext,
+                )
+                .await
+                .unwrap(),
+            );
+            let replica = Arc::new(ReplicaState::load_or_init(&*storage).await.unwrap());
+            let reg = SchemaRegistry::load(Arc::clone(&storage), replica)
+                .await
+                .unwrap();
             let loaded_hlc = reg.schema_hlc("arr").expect("arr must be loaded");
             // After import the HLC is bumped, so it must be >= the stored one.
             assert!(loaded_hlc >= schema_hlc);
         }
     }
 
-    #[test]
-    fn import_snapshot_creates_entry() {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
-        let replica = make_replica(&storage);
+    #[tokio::test]
+    async fn import_snapshot_creates_entry() {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+        let replica = make_replica(&storage).await;
 
         // Create a schema on replica A.
         let reg_a = SchemaRegistry::new(Arc::clone(&storage), Arc::clone(&replica));
-        reg_a.put_schema("x", &simple_schema("x")).unwrap();
+        reg_a.put_schema("x", &simple_schema("x")).await.unwrap();
         let snapshot = reg_a.export_snapshot("x").unwrap().unwrap();
         let remote_hlc = reg_a.schema_hlc("x").unwrap();
 
         // Import on registry B.
-        let storage_b = Arc::new(RedbStorage::open_in_memory().unwrap());
-        let replica_b = make_replica(&storage_b);
+        let storage_b = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+        let replica_b = make_replica(&storage_b).await;
         let reg_b = SchemaRegistry::new(storage_b, replica_b);
 
         assert!(reg_b.schema_hlc("x").is_none(), "not yet present");
-        reg_b.import_snapshot("x", &snapshot, remote_hlc).unwrap();
+        reg_b
+            .import_snapshot("x", &snapshot, remote_hlc)
+            .await
+            .unwrap();
         assert!(reg_b.schema_hlc("x").is_some(), "must exist after import");
     }
 
-    #[test]
-    fn import_snapshot_advances_hlc() {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
-        let replica = make_replica(&storage);
+    #[tokio::test]
+    async fn import_snapshot_advances_hlc() {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+        let replica = make_replica(&storage).await;
         let reg = SchemaRegistry::new(Arc::clone(&storage), Arc::clone(&replica));
 
         // Seed a schema.
-        reg.put_schema("y", &simple_schema("y")).unwrap();
+        reg.put_schema("y", &simple_schema("y")).await.unwrap();
         let hlc_before = reg.schema_hlc("y").unwrap();
 
         // Import a snapshot with a higher HLC.
         let snapshot = reg.export_snapshot("y").unwrap().unwrap();
         let future_hlc = Hlc::new(hlc_before.physical_ms + 50_000, 0, ReplicaId::new(99)).unwrap();
-        reg.import_snapshot("y", &snapshot, future_hlc).unwrap();
+        reg.import_snapshot("y", &snapshot, future_hlc)
+            .await
+            .unwrap();
 
         let hlc_after = reg.schema_hlc("y").unwrap();
         assert!(hlc_after > hlc_before, "HLC must advance on import");
     }
 
-    #[test]
-    fn export_returns_none_for_unknown() {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
-        let reg = make_registry(storage);
+    #[tokio::test]
+    async fn export_returns_none_for_unknown() {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+        let reg = make_registry(storage).await;
         let result = reg.export_snapshot("nonexistent").unwrap();
         assert!(result.is_none());
     }

@@ -3,6 +3,7 @@
 //! Parses SQL with nodedb-sql, then executes against CRDT, strict,
 //! and columnar engines directly — no DataFusion dependency.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use nodedb_sql::types::*;
@@ -11,12 +12,17 @@ use nodedb_types::value::Value;
 
 use crate::engine::columnar::ColumnarEngine;
 use crate::engine::crdt::CrdtEngine;
+use crate::engine::fts::FtsState;
+use crate::engine::graph::index::CsrIndex;
 use crate::engine::htap::HtapBridge;
+use crate::engine::spatial::SpatialIndexManager;
 use crate::engine::strict::StrictEngine;
+use crate::engine::vector::VectorState;
 use crate::error::LiteError;
 use crate::storage::engine::StorageEngine;
 
 use super::catalog::LiteCatalog;
+use super::meta_ops::CancellationRegistry;
 
 /// Lite-side query engine.
 pub struct LiteQueryEngine<S: StorageEngine> {
@@ -27,9 +33,23 @@ pub struct LiteQueryEngine<S: StorageEngine> {
     pub(in crate::query) storage: Arc<S>,
     pub(in crate::query) timeseries:
         Arc<Mutex<crate::engine::timeseries::engine::TimeseriesEngine>>,
+    pub(crate) vector_state: Arc<VectorState<S>>,
+    pub(crate) array_state: Arc<tokio::sync::Mutex<crate::engine::array::engine::ArrayEngineState>>,
+    pub(crate) fts_state: Arc<FtsState>,
+    pub(in crate::query) spatial: Arc<Mutex<SpatialIndexManager>>,
+    pub(crate) cancellation: CancellationRegistry,
+    /// Per-collection CSR graph indices shared with the owning NodeDbLite.
+    pub(crate) csr: Arc<Mutex<HashMap<String, CsrIndex>>>,
+    /// Durable outbound queue for FTS sync — `None` when sync is disabled.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fts_outbound: Option<Arc<crate::sync::FtsOutbound<S>>>,
+    /// Durable outbound queue for spatial sync — `None` when sync is disabled.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) spatial_outbound: Option<Arc<crate::sync::SpatialOutbound<S>>>,
 }
 
 impl<S: StorageEngine> LiteQueryEngine<S> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         crdt: Arc<Mutex<CrdtEngine>>,
         strict: Arc<StrictEngine<S>>,
@@ -37,6 +57,11 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         htap: Arc<HtapBridge>,
         storage: Arc<S>,
         timeseries: Arc<Mutex<crate::engine::timeseries::engine::TimeseriesEngine>>,
+        vector_state: Arc<VectorState<S>>,
+        array_state: Arc<tokio::sync::Mutex<crate::engine::array::engine::ArrayEngineState>>,
+        fts_state: Arc<FtsState>,
+        spatial: Arc<Mutex<SpatialIndexManager>>,
+        csr: Arc<Mutex<HashMap<String, CsrIndex>>>,
     ) -> Self {
         Self {
             crdt,
@@ -45,7 +70,29 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             htap,
             storage,
             timeseries,
+            vector_state,
+            array_state,
+            fts_state,
+            spatial,
+            cancellation: CancellationRegistry::new(),
+            csr,
+            #[cfg(not(target_arch = "wasm32"))]
+            fts_outbound: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            spatial_outbound: None,
         }
+    }
+
+    /// Wire the durable FTS outbound queue so SQL-path spatial writes are sync-tracked.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_fts_outbound(&mut self, q: Arc<crate::sync::FtsOutbound<S>>) {
+        self.fts_outbound = Some(q);
+    }
+
+    /// Wire the durable spatial outbound queue so SQL-path spatial writes are sync-tracked.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_spatial_outbound(&mut self, q: Arc<crate::sync::SpatialOutbound<S>>) {
+        self.spatial_outbound = Some(q);
     }
 
     /// No-op — collections are auto-discovered via catalog.
@@ -59,78 +106,125 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
 
     /// Execute a SQL query and return results.
     pub async fn execute_sql(&self, sql: &str) -> Result<QueryResult, LiteError> {
+        self.execute_sql_with_params(sql, &[]).await
+    }
+
+    /// Execute a SQL query with bound `$N` parameters and return results.
+    ///
+    /// Each `Value` in `params` is bound to the corresponding `$1`, `$2`, …
+    /// placeholder in `sql` at the AST level before planning. Supported
+    /// `Value` variants: `Null`, `Bool`, `Integer`, `Float`, `String`, `Uuid`.
+    /// Other variants are treated as `Null`.
+    pub async fn execute_sql_with_params(
+        &self,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<QueryResult, LiteError> {
         if let Some(result) = self.try_handle_ddl(sql).await {
             return result;
         }
 
+        let metas =
+            crate::nodedb::collection::ddl::load_persisted_collection_metas(self.storage.as_ref())
+                .await
+                .unwrap_or_default();
         let catalog = LiteCatalog::new(
             Arc::clone(&self.crdt),
             Arc::clone(&self.strict),
             Arc::clone(&self.columnar),
+            metas,
         );
 
-        let plans = nodedb_sql::plan_sql(sql, &catalog)
-            .map_err(|e| LiteError::Query(format!("SQL plan: {e}")))?;
+        let sql_params: Vec<nodedb_sql::ParamValue> = params.iter().map(value_to_param).collect();
+
+        let plans = if sql_params.is_empty() {
+            nodedb_sql::plan_sql(sql, &catalog)
+        } else {
+            nodedb_sql::plan_sql_with_params(sql, &sql_params, &catalog)
+        }
+        .map_err(|e| LiteError::Query(format!("SQL plan: {e}")))?;
 
         if plans.is_empty() {
             return Ok(QueryResult::empty());
         }
 
-        self.execute_plan(&plans[0])
+        self.execute_plan(&plans[0]).await
     }
 
-    fn execute_plan(&self, plan: &SqlPlan) -> Result<QueryResult, LiteError> {
-        match plan {
-            SqlPlan::ConstantResult { columns, values } => {
-                let row = values.iter().map(sql_value_to_value).collect();
-                Ok(QueryResult {
-                    columns: columns.clone(),
-                    rows: vec![row],
-                    rows_affected: 0,
-                })
-            }
-
-            SqlPlan::Scan {
-                collection, engine, ..
-            } => self.execute_scan(collection, engine),
-            SqlPlan::PointGet {
-                collection,
-                engine,
-                key_value,
-                ..
-            } => self.execute_point_get(collection, engine, key_value),
-            SqlPlan::Insert {
-                collection,
-                rows,
-                if_absent,
-                ..
-            } => self.execute_insert(collection, rows, *if_absent),
-            SqlPlan::Update {
-                collection,
-                assignments,
-                target_keys,
-                ..
-            } => self.execute_update(collection, assignments, target_keys),
-            SqlPlan::Delete {
-                collection,
-                target_keys,
-                ..
-            } => self.execute_delete(collection, target_keys),
-            SqlPlan::Truncate { collection, .. } => self.execute_truncate(collection),
-            SqlPlan::Upsert {
-                collection, rows, ..
-            } => self.execute_upsert(collection, rows),
-            _ => Err(LiteError::Query(format!("unsupported plan: {plan:?}"))),
-        }
+    pub(in crate::query) async fn execute_plan(
+        &self,
+        plan: &SqlPlan,
+    ) -> Result<QueryResult, LiteError> {
+        let mut visitor = super::visitor::LiteVisitor { engine: self };
+        nodedb_sql::dispatch(&mut visitor, plan)?.await
     }
 
-    fn execute_scan(
+    pub(super) async fn execute_constant_result(
+        &self,
+        columns: &[String],
+        values: &[nodedb_sql::types::SqlValue],
+    ) -> Result<QueryResult, LiteError> {
+        let row = values.iter().map(sql_value_to_value).collect();
+        Ok(QueryResult {
+            columns: columns.to_vec(),
+            rows: vec![row],
+            rows_affected: 0,
+        })
+    }
+
+    pub(super) async fn execute_scan(
         &self,
         collection: &str,
         engine: &EngineType,
     ) -> Result<QueryResult, LiteError> {
         match engine {
             EngineType::DocumentSchemaless => {
+                // For bitemporal collections the Loro snapshot may lag storage
+                // (it is only saved on explicit flush).  Scan DocumentHistory
+                // as the authoritative source for the current set of live IDs.
+                let is_bt = crate::engine::document::history::ops::is_bitemporal(
+                    &*self.storage,
+                    collection,
+                )
+                .await
+                .unwrap_or(false);
+
+                if is_bt {
+                    let live_docs = crate::engine::document::history::ops::scan_live_documents(
+                        &*self.storage,
+                        collection,
+                    )
+                    .await
+                    .map_err(|e| LiteError::Query(e.to_string()))?;
+                    let mut rows = Vec::with_capacity(live_docs.len());
+                    for (id, body) in &live_docs {
+                        // Decode the msgpack body to a JSON string for the
+                        // document column so post-scan filters can match fields.
+                        let doc_str = if body.is_empty() {
+                            "{}".to_owned()
+                        } else {
+                            match nodedb_types::json_msgpack::value_from_msgpack(body) {
+                                Ok(nodedb_types::value::Value::Object(fields)) => {
+                                    let json_map: serde_json::Map<String, serde_json::Value> =
+                                        fields
+                                            .into_iter()
+                                            .map(|(k, v)| (k, value_to_serde_json(v)))
+                                            .collect();
+                                    sonic_rs::to_string(&serde_json::Value::Object(json_map))
+                                        .unwrap_or_else(|_| "{}".to_owned())
+                                }
+                                _ => "{}".to_owned(),
+                            }
+                        };
+                        rows.push(vec![Value::String(id.clone()), Value::String(doc_str)]);
+                    }
+                    return Ok(QueryResult {
+                        columns: vec!["id".into(), "document".into()],
+                        rows,
+                        rows_affected: 0,
+                    });
+                }
+
                 let crdt = self.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
                 let ids = crdt.list_ids(collection);
                 let mut rows = Vec::with_capacity(ids.len());
@@ -148,11 +242,29 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 })
             }
             EngineType::DocumentStrict => {
-                let schema = self.strict.schema(collection);
-                let columns = schema
-                    .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
-                    .unwrap_or_else(|| vec!["id".into(), "data".into()]);
-                let rows = Vec::new();
+                let schema =
+                    self.strict
+                        .schema(collection)
+                        .ok_or_else(|| LiteError::BadRequest {
+                            detail: format!("strict collection '{collection}' does not exist"),
+                        })?;
+                let columns: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
+                let rows = self.strict.list_rows(collection).await?;
+                Ok(QueryResult {
+                    columns,
+                    rows,
+                    rows_affected: 0,
+                })
+            }
+            EngineType::Columnar => {
+                let schema =
+                    self.columnar
+                        .schema(collection)
+                        .ok_or_else(|| LiteError::BadRequest {
+                            detail: format!("columnar collection '{collection}' does not exist"),
+                        })?;
+                let columns: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
+                let rows = self.columnar.list_rows(collection).await?;
                 Ok(QueryResult {
                     columns,
                     rows,
@@ -163,7 +275,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         }
     }
 
-    fn execute_point_get(
+    pub(super) async fn execute_point_get(
         &self,
         collection: &str,
         engine: &EngineType,
@@ -186,31 +298,80 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                     None => Ok(QueryResult::empty()),
                 }
             }
+            EngineType::DocumentStrict => {
+                let schema =
+                    self.strict
+                        .schema(collection)
+                        .ok_or_else(|| LiteError::BadRequest {
+                            detail: format!("strict collection '{collection}' does not exist"),
+                        })?;
+                let columns: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
+                // The PK column type determines how to parse the key string.
+                let pk_col = schema
+                    .columns
+                    .iter()
+                    .find(|c| c.primary_key)
+                    .ok_or_else(|| LiteError::BadRequest {
+                        detail: format!(
+                            "strict collection '{collection}' has no primary key column"
+                        ),
+                    })?;
+                let pk_value = parse_pk_value(&key_str, &pk_col.column_type);
+                match self.strict.get(collection, &pk_value).await? {
+                    Some(values) => Ok(QueryResult {
+                        columns,
+                        rows: vec![values],
+                        rows_affected: 0,
+                    }),
+                    None => Ok(QueryResult {
+                        columns,
+                        rows: Vec::new(),
+                        rows_affected: 0,
+                    }),
+                }
+            }
             _ => Ok(QueryResult::empty()),
         }
     }
 
-    fn execute_upsert(
+    pub(super) async fn execute_insert(
         &self,
         collection: &str,
-        rows: &[Vec<(String, nodedb_sql::SqlValue)>],
-    ) -> Result<QueryResult, LiteError> {
-        // In Lite, CRDT storage is naturally upsert — same as insert.
-        self.execute_insert(collection, rows, true)
-    }
-
-    fn execute_insert(
-        &self,
-        collection: &str,
+        engine: &EngineType,
         rows: &[Vec<(String, SqlValue)>],
         if_absent: bool,
+        primary_key: Option<&str>,
     ) -> Result<QueryResult, LiteError> {
+        if *engine == EngineType::DocumentStrict {
+            return super::strict_dml::insert_strict(&self.strict, collection, rows, if_absent)
+                .await;
+        }
+        if *engine == EngineType::Columnar {
+            // `written` feeds outbound sync, which is compiled out on wasm32.
+            #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+            let (result, written) =
+                super::columnar_dml::insert_columnar(&self.columnar, collection, rows)?;
+            // Durable outbound enqueue must run here (async) — the sync insert
+            // path cannot await. Covers the SQL-INSERT route to Origin sync.
+            #[cfg(not(target_arch = "wasm32"))]
+            crate::sync::reconcile_outbound_enqueue(
+                self.columnar.enqueue_outbound(collection, &written).await,
+                "columnar insert (sql)",
+                collection,
+                "",
+            )?;
+            return Ok(result);
+        }
+        // CRDT / schemaless path.
         let mut crdt = self.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
         let mut affected = 0;
         for row in rows {
             let id = row
                 .iter()
-                .find(|(k, _)| k == "id")
+                .find(|(k, _)| match primary_key {
+                    Some(pk) => k == pk,
+                    None => k == "id",
+                })
                 .map(|(_, v)| sql_value_to_string(v))
                 .unwrap_or_default();
             if crdt.exists(collection, &id) {
@@ -236,12 +397,23 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         })
     }
 
-    fn execute_update(
+    pub(super) async fn execute_update(
         &self,
         collection: &str,
+        engine: &EngineType,
         assignments: &[(String, nodedb_sql::types::SqlExpr)],
         target_keys: &[SqlValue],
     ) -> Result<QueryResult, LiteError> {
+        if *engine == EngineType::DocumentStrict {
+            return super::strict_dml::update_strict(
+                &self.strict,
+                collection,
+                assignments,
+                target_keys,
+            )
+            .await;
+        }
+        // CRDT / schemaless path.
         let mut crdt = self.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
         let mut affected = 0;
         for key in target_keys {
@@ -267,11 +439,16 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         })
     }
 
-    fn execute_delete(
+    pub(super) async fn execute_delete(
         &self,
         collection: &str,
+        engine: &EngineType,
         target_keys: &[SqlValue],
     ) -> Result<QueryResult, LiteError> {
+        if *engine == EngineType::DocumentStrict {
+            return super::strict_dml::delete_strict(&self.strict, collection, target_keys).await;
+        }
+        // CRDT / schemaless path.
         let mut crdt = self.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
         let mut affected = 0;
         for key in target_keys {
@@ -287,7 +464,10 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         })
     }
 
-    fn execute_truncate(&self, collection: &str) -> Result<QueryResult, LiteError> {
+    pub(super) async fn execute_truncate(
+        &self,
+        collection: &str,
+    ) -> Result<QueryResult, LiteError> {
         self.crdt
             .lock()
             .map_err(|_| LiteError::LockPoisoned)?
@@ -318,7 +498,7 @@ fn sql_value_to_loro(v: &SqlValue) -> loro::LoroValue {
     }
 }
 
-fn sql_value_to_value(v: &nodedb_sql::types::SqlValue) -> Value {
+pub(super) fn sql_value_to_value(v: &nodedb_sql::types::SqlValue) -> Value {
     match v {
         nodedb_sql::types::SqlValue::Int(i) => Value::Integer(*i),
         nodedb_sql::types::SqlValue::Float(f) => Value::Float(*f),
@@ -326,6 +506,58 @@ fn sql_value_to_value(v: &nodedb_sql::types::SqlValue) -> Value {
         nodedb_sql::types::SqlValue::Bool(b) => Value::Bool(*b),
         nodedb_sql::types::SqlValue::Null => Value::Null,
         _ => Value::Null,
+    }
+}
+
+/// Convert a primary-key string from a SQL literal into the appropriate `Value`
+/// variant based on the column's declared type.
+pub(super) fn parse_pk_value(
+    key_str: &str,
+    col_type: &nodedb_types::columnar::ColumnType,
+) -> Value {
+    use nodedb_types::columnar::ColumnType;
+    match col_type {
+        ColumnType::Int64 => key_str
+            .parse::<i64>()
+            .map(Value::Integer)
+            .unwrap_or_else(|_| Value::String(key_str.to_string())),
+        ColumnType::Uuid => Value::Uuid(key_str.to_string()),
+        _ => Value::String(key_str.to_string()),
+    }
+}
+
+/// Convert a `nodedb_types::Value` to the `nodedb_sql::ParamValue` type used
+/// for AST-level parameter binding in `plan_sql_with_params`.
+fn value_to_param(v: &Value) -> nodedb_sql::ParamValue {
+    match v {
+        Value::Null => nodedb_sql::ParamValue::Null,
+        Value::Bool(b) => nodedb_sql::ParamValue::Bool(*b),
+        Value::Integer(n) => nodedb_sql::ParamValue::Int64(*n),
+        Value::Float(f) => nodedb_sql::ParamValue::Float64(*f),
+        Value::String(s) => nodedb_sql::ParamValue::Text(s.clone()),
+        Value::Uuid(s) => nodedb_sql::ParamValue::Text(s.clone()),
+        _ => nodedb_sql::ParamValue::Null,
+    }
+}
+
+fn value_to_serde_json(v: nodedb_types::value::Value) -> serde_json::Value {
+    match v {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(b),
+        Value::Integer(n) => serde_json::json!(n),
+        Value::Float(f) => serde_json::json!(f),
+        Value::String(s) => serde_json::Value::String(s),
+        Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(value_to_serde_json).collect())
+        }
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, val) in map {
+                out.insert(k, value_to_serde_json(val));
+            }
+            serde_json::Value::Object(out)
+        }
+        _ => serde_json::Value::Null,
     }
 }
 

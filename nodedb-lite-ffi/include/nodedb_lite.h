@@ -25,6 +25,9 @@
  * Opaque handle to a NodeDB-Lite database.
  *
  * Created by `nodedb_open`, freed by `nodedb_close`.
+ *
+ * `_tmpdir` is `Some` when the database was opened with the `:memory:` path.
+ * The directory is deleted when the handle is dropped.
  */
 typedef struct NodeDbNodeDbHandle NodeDbNodeDbHandle;
 
@@ -35,25 +38,43 @@ typedef struct NodeDbNodeDbHandle NodeDbNodeDbHandle;
  * The caller must call `nodedb_close` to free the handle.
  *
  * # Safety
- * `path` must be a valid null-terminated UTF-8 string.
+ * - `path` must be a valid null-terminated UTF-8 string.
+ * - `passphrase` must be NULL or a valid null-terminated UTF-8 string.
+ *
+ * Encryption convention:
+ * - `passphrase` is NULL and `path` is `":memory:"` → `Encryption::Plaintext` (volatile data, safe).
+ * - `passphrase` is NULL and `path` is a real path → returns NULL (silent plaintext persistent
+ *   storage is refused; pass an empty string to opt out explicitly).
+ * - `passphrase` is `""` (empty string) → `Encryption::Plaintext` (explicit conscious opt-out).
+ * - `passphrase` is a non-empty string → `Encryption::passphrase(passphrase)`.
+ * - `passphrase` is non-NULL but invalid UTF-8 → returns NULL.
  */
-struct NodeDbNodeDbHandle *nodedb_open(const char *path, uint64_t peer_id);
+struct NodeDbNodeDbHandle *nodedb_open(const char *path,
+                                       uint64_t peer_id,
+                                       const char *passphrase);
 
 /**
  * Open or create a NodeDB-Lite database with an explicit memory budget.
  *
  * # Safety
- * `path` must be a valid null-terminated UTF-8 string.
+ * - `path` must be a valid null-terminated UTF-8 string.
+ * - `passphrase` must be NULL or a valid null-terminated UTF-8 string.
+ *
+ * See `nodedb_open` for the passphrase/encryption convention.
+ * `memory_mb` of 0 uses the default memory budget.
  */
 struct NodeDbNodeDbHandle *nodedb_open_with_config(const char *path,
                                                    uint64_t peer_id,
-                                                   uint64_t memory_mb);
+                                                   uint64_t memory_mb,
+                                                   const char *passphrase);
 
 /**
  * Close a NodeDB-Lite database and free the handle.
  *
  * # Safety
- * `handle` must be a valid pointer returned by `nodedb_open`, or NULL (no-op).
+ * `handle` must be a token returned by `nodedb_open`, or NULL/0 (no-op).
+ * The token is a `u64` id packed into a pointer-width integer; it is never
+ * dereferenced as a raw pointer.
  */
 void nodedb_close(struct NodeDbNodeDbHandle *handle);
 
@@ -272,6 +293,7 @@ int32_t nodedb_document_delete(struct NodeDbNodeDbHandle *handle,
 /**
  * Full-text search (BM25). Results written as JSON array to `out_json`.
  *
+ * `field` is the document field to search (e.g. `"body"`).
  * `*out_json` is only written on success. The caller must free via `nodedb_free_string`.
  *
  * # Safety
@@ -279,6 +301,7 @@ int32_t nodedb_document_delete(struct NodeDbNodeDbHandle *handle,
  */
 int32_t nodedb_text_search(struct NodeDbNodeDbHandle *handle,
                            const char *collection,
+                           const char *field,
                            const char *query,
                            uintptr_t top_k,
                            char **out_json);
@@ -294,41 +317,46 @@ int32_t nodedb_text_search(struct NodeDbNodeDbHandle *handle,
 int32_t nodedb_execute_sql(struct NodeDbNodeDbHandle *handle, const char *sql, char **out_json);
 
 /**
- * Insert a directed graph edge.
+ * Insert a directed graph edge into `collection`.
  *
  * # Safety
  * All pointer parameters must be valid null-terminated UTF-8.
  */
 int32_t nodedb_graph_insert_edge(struct NodeDbNodeDbHandle *handle,
+                                 const char *collection,
                                  const char *from,
                                  const char *to,
                                  const char *edge_type);
 
 /**
- * Delete a graph edge by ID.
+ * Delete a graph edge by ID from `collection`.
  *
- * Edge ID format: "src--label-->dst" (as returned by graph_insert_edge).
+ * Edge ID format: length-prefixed form as returned by `graph_insert_edge`
+ * Display (`"{src_len}:{src}|{label_len}:{label}|{dst_len}:{dst}|{seq}"`).
  *
  * # Safety
- * `edge_id` must be valid null-terminated UTF-8.
+ * All pointer parameters must be valid null-terminated UTF-8.
  */
-int32_t nodedb_graph_delete_edge(struct NodeDbNodeDbHandle *handle, const char *edge_id);
+int32_t nodedb_graph_delete_edge(struct NodeDbNodeDbHandle *handle,
+                                 const char *collection,
+                                 const char *edge_id);
 
 /**
- * Traverse the graph from a start node. Results written as JSON to `out_json`.
+ * Traverse the graph from a start node in `collection`. Results written as JSON to `out_json`.
  *
  * `*out_json` is only written on success. The caller must free via `nodedb_free_string`.
  *
  * # Safety
- * `start` must be valid UTF-8. `out_json` must not be null.
+ * All pointer parameters must be valid UTF-8. `out_json` must not be null.
  */
 int32_t nodedb_graph_traverse(struct NodeDbNodeDbHandle *handle,
+                              const char *collection,
                               const char *start,
                               uint8_t depth,
                               char **out_json);
 
 /**
- * Find the shortest path between two nodes. Results written as JSON to `out_json`.
+ * Find the shortest path between two nodes in `collection`. Results written as JSON to `out_json`.
  *
  * Returns `NODEDB_OK` with a JSON array of node IDs, or `"null"` if no path exists.
  * `*out_json` is only written on success. The caller must free via `nodedb_free_string`.
@@ -337,6 +365,7 @@ int32_t nodedb_graph_traverse(struct NodeDbNodeDbHandle *handle,
  * All pointer parameters must be valid. `out_json` must not be null.
  */
 int32_t nodedb_graph_shortest_path(struct NodeDbNodeDbHandle *handle,
+                                   const char *collection,
                                    const char *from,
                                    const char *to,
                                    uint8_t max_depth,
@@ -346,7 +375,10 @@ int32_t nodedb_graph_shortest_path(struct NodeDbNodeDbHandle *handle,
  * Insert a vector into a collection.
  *
  * # Safety
- * All pointer parameters must be valid. `embedding` must point to `dim` floats.
+ * All pointer parameters must be valid. `embedding` must be non-null, properly
+ * aligned for `f32`, and valid for exactly `dim` elements for the entire duration
+ * of this call. No runtime length validation is possible; passing a mismatched
+ * `dim` or a dangling pointer is immediate undefined behaviour.
  */
 int32_t nodedb_vector_insert(struct NodeDbNodeDbHandle *handle,
                              const char *collection,
@@ -360,7 +392,10 @@ int32_t nodedb_vector_insert(struct NodeDbNodeDbHandle *handle,
  * `*out_json` is only written on success. The caller must free via `nodedb_free_string`.
  *
  * # Safety
- * `query` must point to `dim` valid floats. `out_json` must not be null.
+ * `query` must be non-null, properly aligned for `f32`, and valid for exactly `dim`
+ * elements for the entire duration of this call. No runtime length validation is
+ * possible; passing a mismatched `dim` or a dangling pointer is immediate undefined
+ * behaviour. `out_json` must not be null.
  */
 int32_t nodedb_vector_search(struct NodeDbNodeDbHandle *handle,
                              const char *collection,

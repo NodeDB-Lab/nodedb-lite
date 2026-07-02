@@ -12,7 +12,7 @@ use nodedb_types::Namespace;
 use serde::{Deserialize, Serialize};
 
 use crate::error::LiteError;
-use crate::storage::engine::StorageEngineSync;
+use crate::storage::engine::StorageEngine;
 
 const CATALOG_PREFIX: &str = "catalog:";
 const CATALOG_INDEX_KEY: &[u8] = b"catalog_index";
@@ -43,13 +43,13 @@ impl ArrayCatalogEntry {
 }
 
 /// In-memory + persisted catalog for all arrays.
-pub struct ArrayCatalog<S: StorageEngineSync> {
+pub struct ArrayCatalog<S: StorageEngine> {
     storage: Arc<S>,
     /// Cached entries — the source of truth after open().
     entries: HashMap<String, ArrayCatalogEntry>,
 }
 
-impl<S: StorageEngineSync> ArrayCatalog<S> {
+impl<S: StorageEngine> ArrayCatalog<S> {
     fn catalog_key(name: &str) -> Vec<u8> {
         let mut k = CATALOG_PREFIX.as_bytes().to_vec();
         k.extend_from_slice(name.as_bytes());
@@ -57,10 +57,10 @@ impl<S: StorageEngineSync> ArrayCatalog<S> {
     }
 
     /// Load catalog from storage.
-    pub fn open(storage: Arc<S>) -> Result<Self, LiteError> {
+    pub async fn open(storage: Arc<S>) -> Result<Self, LiteError> {
         let mut entries = HashMap::new();
 
-        let index_bytes = storage.get_sync(Namespace::Array, CATALOG_INDEX_KEY)?;
+        let index_bytes = storage.get(Namespace::Array, CATALOG_INDEX_KEY).await?;
         let names: Vec<String> = match index_bytes {
             Some(b) => zerompk::from_msgpack(&b).map_err(|e| LiteError::Serialization {
                 detail: format!("decode catalog index: {e}"),
@@ -70,7 +70,7 @@ impl<S: StorageEngineSync> ArrayCatalog<S> {
 
         for name in names {
             let key = Self::catalog_key(&name);
-            if let Some(bytes) = storage.get_sync(Namespace::Array, &key)? {
+            if let Some(bytes) = storage.get(Namespace::Array, &key).await? {
                 let entry: ArrayCatalogEntry =
                     zerompk::from_msgpack(&bytes).map_err(|e| LiteError::Serialization {
                         detail: format!("decode catalog entry '{name}': {e}"),
@@ -83,7 +83,7 @@ impl<S: StorageEngineSync> ArrayCatalog<S> {
     }
 
     /// Insert a new entry and persist atomically.
-    pub fn insert(&mut self, entry: ArrayCatalogEntry) -> Result<(), LiteError> {
+    pub async fn insert(&mut self, entry: ArrayCatalogEntry) -> Result<(), LiteError> {
         let name = entry.name.clone();
         let entry_bytes =
             zerompk::to_msgpack_vec(&entry).map_err(|e| LiteError::Serialization {
@@ -99,22 +99,24 @@ impl<S: StorageEngineSync> ArrayCatalog<S> {
             })?;
 
         let key = Self::catalog_key(&name);
-        self.storage.batch_write_sync(&[
-            crate::storage::engine::WriteOp::Put {
-                ns: Namespace::Array,
-                key,
-                value: entry_bytes,
-            },
-            crate::storage::engine::WriteOp::Put {
-                ns: Namespace::Array,
-                key: CATALOG_INDEX_KEY.to_vec(),
-                value: index_bytes,
-            },
-        ])
+        self.storage
+            .batch_write(&[
+                crate::storage::engine::WriteOp::Put {
+                    ns: Namespace::Array,
+                    key,
+                    value: entry_bytes,
+                },
+                crate::storage::engine::WriteOp::Put {
+                    ns: Namespace::Array,
+                    key: CATALOG_INDEX_KEY.to_vec(),
+                    value: index_bytes,
+                },
+            ])
+            .await
     }
 
     /// Remove an entry from the catalog and persist atomically.
-    pub fn remove(&mut self, name: &str) -> Result<(), LiteError> {
+    pub async fn remove(&mut self, name: &str) -> Result<(), LiteError> {
         self.entries.remove(name);
 
         let names: Vec<&str> = self.entries.keys().map(|s| s.as_str()).collect();
@@ -124,17 +126,19 @@ impl<S: StorageEngineSync> ArrayCatalog<S> {
             })?;
 
         let key = Self::catalog_key(name);
-        self.storage.batch_write_sync(&[
-            crate::storage::engine::WriteOp::Delete {
-                ns: Namespace::Array,
-                key,
-            },
-            crate::storage::engine::WriteOp::Put {
-                ns: Namespace::Array,
-                key: CATALOG_INDEX_KEY.to_vec(),
-                value: index_bytes,
-            },
-        ])
+        self.storage
+            .batch_write(&[
+                crate::storage::engine::WriteOp::Delete {
+                    ns: Namespace::Array,
+                    key,
+                },
+                crate::storage::engine::WriteOp::Put {
+                    ns: Namespace::Array,
+                    key: CATALOG_INDEX_KEY.to_vec(),
+                    value: index_bytes,
+                },
+            ])
+            .await
     }
 
     pub fn get(&self, name: &str) -> Option<&ArrayCatalogEntry> {
@@ -162,7 +166,7 @@ pub fn hash_schema(schema: &ArraySchema) -> Result<u64, LiteError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::redb_storage::RedbStorage;
+    use crate::storage::pagedb_storage::PagedbStorageMem;
     use nodedb_array::schema::ArraySchemaBuilder;
     use nodedb_array::schema::attr_spec::{AttrSpec, AttrType};
     use nodedb_array::schema::dim_spec::{DimSpec, DimType};
@@ -193,33 +197,33 @@ mod tests {
         }
     }
 
-    #[test]
-    fn insert_and_get() {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
-        let mut catalog = ArrayCatalog::open(Arc::clone(&storage)).unwrap();
+    #[tokio::test]
+    async fn insert_and_get() {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+        let mut catalog = ArrayCatalog::open(Arc::clone(&storage)).await.unwrap();
         let schema = test_schema();
         let entry = make_entry(&schema);
-        catalog.insert(entry).unwrap();
+        catalog.insert(entry).await.unwrap();
         assert!(catalog.get("t").is_some());
     }
 
-    #[test]
-    fn persists_across_reopen() {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
+    #[tokio::test]
+    async fn persists_across_reopen() {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
         {
-            let mut catalog = ArrayCatalog::open(Arc::clone(&storage)).unwrap();
-            catalog.insert(make_entry(&test_schema())).unwrap();
+            let mut catalog = ArrayCatalog::open(Arc::clone(&storage)).await.unwrap();
+            catalog.insert(make_entry(&test_schema())).await.unwrap();
         }
-        let catalog2 = ArrayCatalog::open(Arc::clone(&storage)).unwrap();
+        let catalog2 = ArrayCatalog::open(Arc::clone(&storage)).await.unwrap();
         assert!(catalog2.get("t").is_some());
     }
 
-    #[test]
-    fn remove_entry() {
-        let storage = Arc::new(RedbStorage::open_in_memory().unwrap());
-        let mut catalog = ArrayCatalog::open(Arc::clone(&storage)).unwrap();
-        catalog.insert(make_entry(&test_schema())).unwrap();
-        catalog.remove("t").unwrap();
+    #[tokio::test]
+    async fn remove_entry() {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+        let mut catalog = ArrayCatalog::open(Arc::clone(&storage)).await.unwrap();
+        catalog.insert(make_entry(&test_schema())).await.unwrap();
+        catalog.remove("t").await.unwrap();
         assert!(catalog.get("t").is_none());
     }
 

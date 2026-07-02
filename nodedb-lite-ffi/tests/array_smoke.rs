@@ -40,7 +40,7 @@ fn encode<T: zerompk::ToMessagePack>(value: &T) -> Vec<u8> {
 fn array_create_put_slice_roundtrip() {
     let path = CString::new(":memory:").unwrap();
     unsafe {
-        let handle = nodedb_open(path.as_ptr(), 42);
+        let handle = nodedb_open(path.as_ptr(), 42, std::ptr::null());
         assert!(!handle.is_null());
 
         let name = CString::new("grid").unwrap();
@@ -118,7 +118,7 @@ fn array_create_put_slice_roundtrip() {
 fn array_read_coord_returns_cell() {
     let path = CString::new(":memory:").unwrap();
     unsafe {
-        let handle = nodedb_open(path.as_ptr(), 43);
+        let handle = nodedb_open(path.as_ptr(), 43, std::ptr::null());
         assert!(!handle.is_null());
 
         let name = CString::new("rc").unwrap();
@@ -173,7 +173,7 @@ fn array_read_coord_returns_cell() {
 fn array_delete_cell_tombstones_coord() {
     let path = CString::new(":memory:").unwrap();
     unsafe {
-        let handle = nodedb_open(path.as_ptr(), 44);
+        let handle = nodedb_open(path.as_ptr(), 44, std::ptr::null());
         assert!(!handle.is_null());
 
         let name = CString::new("del").unwrap();
@@ -228,7 +228,7 @@ fn array_delete_cell_tombstones_coord() {
 fn array_gdpr_erase_cell_removes_content() {
     let path = CString::new(":memory:").unwrap();
     unsafe {
-        let handle = nodedb_open(path.as_ptr(), 45);
+        let handle = nodedb_open(path.as_ptr(), 45, std::ptr::null());
         assert!(!handle.is_null());
 
         let name = CString::new("gdpr").unwrap();

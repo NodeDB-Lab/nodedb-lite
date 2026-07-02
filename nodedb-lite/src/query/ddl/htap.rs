@@ -31,7 +31,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             .map_err(|e| LiteError::Query(e.to_string()))?;
 
         self.columnar
-            .create_collection(&target, columnar_schema, ColumnarProfile::Plain)
+            .create_collection(&target, columnar_schema, ColumnarProfile::Plain, false)
             .await?;
 
         // Register the CDC bridge.

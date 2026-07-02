@@ -39,7 +39,7 @@ pub(super) struct CollectionTs {
     pub dirty: bool,
 }
 
-/// A flushed partition stored in redb.
+/// A flushed partition stored in the KV store.
 #[derive(Debug, Clone)]
 pub(super) struct FlushedPartition {
     pub meta: PartitionMeta,

@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use loro::LoroValue;
 use nodedb_crdt::CrdtState;
+use sonic_rs::JsonValueTrait as _;
 
 use crate::error::LiteError;
 
@@ -48,6 +49,11 @@ pub struct CrdtEngine {
     /// Conflict resolution policies per collection.
     /// Evaluated on sync when Origin rejects a delta.
     pub(super) policies: nodedb_crdt::PolicyRegistry,
+    /// Explicitly registered collection names for collections that exist in the
+    /// catalog (e.g. bitemporal document collections) but have no Loro root-map
+    /// entry yet (i.e. no document has been inserted).  Merged into
+    /// `collection_names()` so that SQL SELECT works before the first insert.
+    registered_collections: std::collections::HashSet<String>,
     /// Version vector captured before the first deferred mutation.
     /// Used by `flush_deltas()` to export a single delta covering all
     /// deferred operations.
@@ -74,6 +80,11 @@ pub struct PendingDelta {
     pub document_id: String,
     /// Loro delta bytes (compact binary).
     pub delta_bytes: Vec<u8>,
+    /// Stable idempotent-producer seq for this delta. 0 = unassigned;
+    /// assigned at first send and reused on reconnect re-send so Origin
+    /// dedups instead of double-applying.
+    #[serde(default)]
+    pub seq: u64,
 }
 
 impl CrdtEngine {
@@ -89,6 +100,7 @@ impl CrdtEngine {
             pending_deltas: Vec::new(),
             acked_versions: HashMap::new(),
             policies: nodedb_crdt::PolicyRegistry::new(),
+            registered_collections: std::collections::HashSet::new(),
             deferred_version: None,
             deferred_count: 0,
         })
@@ -109,6 +121,7 @@ impl CrdtEngine {
             pending_deltas: Vec::new(),
             acked_versions: HashMap::new(),
             policies: nodedb_crdt::PolicyRegistry::new(),
+            registered_collections: std::collections::HashSet::new(),
             deferred_version: None,
             deferred_count: 0,
         })
@@ -154,6 +167,7 @@ impl CrdtEngine {
             collection: collection.to_string(),
             document_id: doc_id.to_string(),
             delta_bytes,
+            seq: 0,
         });
 
         Ok(mutation_id)
@@ -183,6 +197,7 @@ impl CrdtEngine {
             collection: collection.to_string(),
             document_id: doc_id.to_string(),
             delta_bytes,
+            seq: 0,
         });
 
         Ok(mutation_id)
@@ -232,6 +247,7 @@ impl CrdtEngine {
             collection: collection_name,
             document_id: format!("{}_ops", ops.len()),
             delta_bytes,
+            seq: 0,
         });
 
         Ok(mutation_id)
@@ -309,6 +325,7 @@ impl CrdtEngine {
             collection: "deferred".to_string(),
             document_id: format!("{count}_ops"),
             delta_bytes,
+            seq: 0,
         });
 
         self.deferred_count = 0;
@@ -367,15 +384,36 @@ impl CrdtEngine {
                 collection: collection.to_string(),
                 document_id: "*".to_string(),
                 delta_bytes,
+                seq: 0,
             });
         }
 
         Ok(count)
     }
 
-    /// List all collection names (top-level Loro map keys).
+    /// Register a collection name so it appears in `collection_names()` even
+    /// before any document has been inserted into it.
+    ///
+    /// This is needed for bitemporal document collections created via DDL: the
+    /// bitemporal flag is persisted to `Namespace::Meta`, but the Loro root map
+    /// has no entry for the collection until the first `upsert`.  Calling this
+    /// method ensures the SQL catalog can resolve the collection name immediately
+    /// after `CREATE COLLECTION … WITH (bitemporal=true)`.
+    pub fn register_collection(&mut self, name: &str) {
+        self.registered_collections.insert(name.to_owned());
+    }
+
+    /// List all known collection names.
+    ///
+    /// Merges names that appear as top-level keys in the Loro document (i.e.
+    /// collections that have at least one row) with names that were explicitly
+    /// registered via `register_collection` (i.e. collections created via DDL
+    /// but not yet populated).
     pub fn collection_names(&self) -> Vec<String> {
-        self.state.collection_names()
+        let mut names: std::collections::HashSet<String> =
+            self.state.collection_names().into_iter().collect();
+        names.extend(self.registered_collections.iter().cloned());
+        names.into_iter().collect()
     }
 
     /// Set conflict resolution policy for a collection.
@@ -404,6 +442,32 @@ impl CrdtEngine {
     /// The CRDT state is authoritative — pending deltas are regenerated on next mutation.
     pub fn clear_pending_deltas(&mut self) {
         self.pending_deltas.clear();
+    }
+
+    /// Drop a single pending delta by `mutation_id` without touching CRDT state.
+    ///
+    /// Unlike [`reject_delta`](Self::reject_delta), this does **not** delete the
+    /// document — the row stays in local CRDT state (so local reads/search work);
+    /// it is simply never pushed to Origin. Used to keep a document local-only
+    /// when the host's `SyncGate` rejects it for sync.
+    pub fn drop_pending(&mut self, mutation_id: u64) {
+        self.pending_deltas.retain(|d| d.mutation_id != mutation_id);
+    }
+
+    /// Assign a stable stream seq to a pending delta the first time it is sent.
+    ///
+    /// If the delta already has a non-zero seq (assigned on a previous send)
+    /// the call is a no-op — the existing seq is reused on reconnect re-sends
+    /// so Origin can deduplicate rather than double-apply.
+    pub fn set_pending_delta_seq(&mut self, mutation_id: u64, seq: u64) {
+        if let Some(d) = self
+            .pending_deltas
+            .iter_mut()
+            .find(|d| d.mutation_id == mutation_id)
+            && d.seq == 0
+        {
+            d.seq = seq;
+        }
     }
 
     /// Mark deltas as acknowledged by Origin (after DeltaAck received).
@@ -537,13 +601,13 @@ impl CrdtEngine {
         })
     }
 
-    /// Build the redb key for a single pending delta: `delta:{mutation_id:016x}`.
+    /// Build the KV key for a single pending delta: `delta:{mutation_id:016x}`.
     /// Zero-padded hex ensures lexicographic ordering matches numeric ordering.
     pub fn delta_storage_key(mutation_id: u64) -> Vec<u8> {
         format!("delta:{mutation_id:016x}").into_bytes()
     }
 
-    /// Restore pending deltas from individual redb entries (append-only format).
+    /// Restore pending deltas from individual KV entries (append-only format).
     ///
     /// Each entry is stored under `Namespace::Crdt` with key `delta:{mutation_id:016x}`.
     /// Falls back to legacy bulk restore if no individual entries found.
@@ -584,6 +648,187 @@ impl CrdtEngine {
     /// Access the underlying `CrdtState` for advanced operations.
     pub fn state(&self) -> &CrdtState {
         &self.state
+    }
+
+    // ─── Version-History Operations ──────────────────────────────────
+
+    /// Export the oplog delta from a specific version to the current state.
+    ///
+    /// Returns the Loro update bytes that transform `from_version` into
+    /// the current oplog state. Used by `ExportDelta`.
+    pub fn export_delta_from(
+        &self,
+        from_version: &loro::VersionVector,
+    ) -> Result<Vec<u8>, LiteError> {
+        self.state
+            .export_updates_since(from_version)
+            .map_err(|e| LiteError::Storage {
+                detail: format!("export_delta_from: {e}"),
+            })
+    }
+
+    /// Compact history at a specific version, discarding oplog entries before it.
+    ///
+    /// The current state and all versions after the target are preserved.
+    /// Used by `CompactAtVersion`.
+    pub fn compact_at_version(&mut self, version: &loro::VersionVector) -> Result<(), LiteError> {
+        self.state
+            .compact_at_version(version)
+            .map_err(|e| LiteError::Storage {
+                detail: format!("compact_at_version: {e}"),
+            })
+    }
+
+    // ─── LoroMovableList Operations ──────────────────────────────────
+
+    /// Run `body` against the doc, capture the resulting Loro delta against
+    /// the pre-mutation version vector, and push it onto the pending-deltas
+    /// queue tagged with a fresh mutation id. Used to factor the
+    /// "snapshot → mutate → export delta → enqueue" envelope shared by all
+    /// LoroMovableList helpers.
+    fn with_delta_capture<F>(
+        &mut self,
+        collection: &str,
+        document_id: &str,
+        op_name: &str,
+        body: F,
+    ) -> Result<(), LiteError>
+    where
+        F: FnOnce(&loro::LoroDoc) -> Result<(), LiteError>,
+    {
+        let version_before = self.state.doc().oplog_vv();
+        body(self.state.doc())?;
+        let delta_bytes = self
+            .state
+            .doc()
+            .export(loro::ExportMode::updates(&version_before))
+            .map_err(|e| LiteError::Storage {
+                detail: format!("{op_name} delta export: {e}"),
+            })?;
+        let mutation_id = self.next_mutation_id.fetch_add(1, Ordering::Relaxed);
+        self.pending_deltas.push(PendingDelta {
+            mutation_id,
+            collection: collection.to_string(),
+            document_id: document_id.to_string(),
+            delta_bytes,
+            seq: 0,
+        });
+        Ok(())
+    }
+
+    /// Insert a new LoroMap block into a document's movable list at `index`.
+    ///
+    /// `fields` is a `sonic_rs::Value` object; each top-level key is
+    /// recursively converted via [`sonic_value_to_loro`] so nested objects /
+    /// arrays survive the round-trip as `LoroValue::Map` / `LoroValue::List`.
+    pub fn list_insert(
+        &mut self,
+        collection: &str,
+        document_id: &str,
+        list_path: &str,
+        index: usize,
+        fields: &sonic_rs::Value,
+    ) -> Result<(), LiteError> {
+        use sonic_rs::JsonContainerTrait as _;
+
+        self.with_delta_capture(collection, document_id, "list_insert", |doc| {
+            let block = nodedb_crdt::list_ops::list_insert_container(
+                doc,
+                collection,
+                document_id,
+                list_path,
+                index,
+            )
+            .map_err(|e| LiteError::Storage {
+                detail: format!("list_insert container: {e}"),
+            })?;
+
+            if let Some(obj) = fields.as_object() {
+                for (k, v) in obj {
+                    block
+                        .insert(k, sonic_value_to_loro(v))
+                        .map_err(|e| LiteError::Storage {
+                            detail: format!("list_insert field '{k}': {e}"),
+                        })?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Delete a block from a document's movable list at `index`.
+    pub fn list_delete(
+        &mut self,
+        collection: &str,
+        document_id: &str,
+        list_path: &str,
+        index: usize,
+    ) -> Result<(), LiteError> {
+        self.with_delta_capture(collection, document_id, "list_delete", |doc| {
+            nodedb_crdt::list_ops::list_delete(doc, collection, document_id, list_path, index)
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("list_delete: {e}"),
+                })
+        })
+    }
+
+    /// Move a block within a document's movable list from `from_index` to `to_index`.
+    pub fn list_move(
+        &mut self,
+        collection: &str,
+        document_id: &str,
+        list_path: &str,
+        from_index: usize,
+        to_index: usize,
+    ) -> Result<(), LiteError> {
+        self.with_delta_capture(collection, document_id, "list_move", |doc| {
+            nodedb_crdt::list_ops::list_move(
+                doc,
+                collection,
+                document_id,
+                list_path,
+                from_index,
+                to_index,
+            )
+            .map_err(|e| LiteError::Storage {
+                detail: format!("list_move: {e}"),
+            })
+        })
+    }
+}
+
+/// Convert a `sonic_rs::Value` to a `loro::LoroValue`, recursing into
+/// objects and arrays so nested data is preserved as `LoroValue::Map` /
+/// `LoroValue::List` rather than collapsed to an opaque JSON string.
+///
+/// Plain `LoroValue` containers (as opposed to `LoroMap` / `LoroList`
+/// containers attached to the document) are value-only and have no CRDT
+/// identity — that is the right shape for a field inserted onto a block
+/// map: it round-trips through `read()` as a `LoroValue::Map`/`List`.
+fn sonic_value_to_loro(v: &sonic_rs::Value) -> loro::LoroValue {
+    use sonic_rs::JsonContainerTrait as _;
+
+    if v.is_null() {
+        loro::LoroValue::Null
+    } else if let Some(b) = v.as_bool() {
+        loro::LoroValue::Bool(b)
+    } else if let Some(n) = v.as_i64() {
+        loro::LoroValue::I64(n)
+    } else if let Some(f) = v.as_f64() {
+        loro::LoroValue::Double(f)
+    } else if v.is_str() {
+        loro::LoroValue::String(v.as_str().unwrap_or("").to_string().into())
+    } else if let Some(arr) = v.as_array() {
+        let items: Vec<loro::LoroValue> = arr.iter().map(sonic_value_to_loro).collect();
+        loro::LoroValue::List(items.into())
+    } else if let Some(obj) = v.as_object() {
+        let map: std::collections::HashMap<String, loro::LoroValue> = obj
+            .iter()
+            .map(|(k, vv)| (k.to_string(), sonic_value_to_loro(vv)))
+            .collect();
+        loro::LoroValue::Map(map.into())
+    } else {
+        loro::LoroValue::Null
     }
 }
 

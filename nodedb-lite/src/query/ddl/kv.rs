@@ -62,7 +62,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         let meta = crate::nodedb::collection::ddl::CollectionMeta {
             name: name.clone(),
             collection_type: "kv".to_string(),
-            created_at_ms: crate::nodedb::collection::ddl::now_ms(),
+            created_at_ms: crate::runtime::now_millis(),
             fields: config
                 .schema
                 .columns
@@ -70,6 +70,8 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 .map(|c| (c.name.clone(), c.column_type.to_string()))
                 .collect(),
             config_json: sonic_rs::to_string(&config).ok(),
+            descriptor_json: None,
+            bitemporal: false,
         };
         let key = format!("collection:{name}");
         let bytes =
@@ -87,6 +89,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 format!(" (ttl: {field} + {offset_ms}ms)")
             }
             None => String::new(),
+            Some(_) => String::new(),
         };
 
         Ok(QueryResult {

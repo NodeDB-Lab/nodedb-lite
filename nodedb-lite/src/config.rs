@@ -6,9 +6,11 @@
 //!
 //! ## Environment variables
 //!
-//! | Variable                | Description                                  | Default |
-//! |-------------------------|----------------------------------------------|---------|
-//! | `NODEDB_LITE_MEMORY_MB` | Total memory budget in mebibytes             | 100     |
+//! | Variable                      | Description                                        | Default |
+//! |-------------------------------|----------------------------------------------------|---------|
+//! | `NODEDB_LITE_MEMORY_MB`          | Total memory budget in mebibytes                   | 100     |
+//! | `NODEDB_LITE_AUTO_FLUSH_MS`      | Auto-flush interval in milliseconds (0 = disabled) | 1000    |
+//! | `NODEDB_LITE_OUTBOUND_QUEUE_CAP` | Max pending entries per durable outbound queue     | 100000  |
 
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 use serde::{Deserialize, Serialize};
@@ -51,7 +53,7 @@ pub struct LiteConfig {
 
     /// Enable CRDT sync for KV operations. Default: `true`.
     ///
-    /// When `false`, KV operations go directly to redb (B-tree), bypassing
+    /// When `false`, KV operations go directly to the B+ tree, bypassing
     /// Loro entirely. This gives SQLite-class performance for local-only use.
     /// Other engines (vector, graph, document) still use Loro for their storage.
     ///
@@ -72,6 +74,54 @@ pub struct LiteConfig {
     /// Argon2id parallelism lanes. Default: 1.
     #[serde(default = "default_argon2_p_cost")]
     pub argon2_p_cost: u32,
+
+    /// Maximum entries in the in-memory KV read cache. Default: 10_000.
+    ///
+    /// Each entry holds the raw encoded value (typically ~80 bytes for a
+    /// 64-byte payload + 8-byte TTL framing), so 10 000 entries ≈ 800 KB.
+    ///
+    /// A value of 0 is rejected at open time; use 1 as the effective minimum.
+    #[serde(default = "default_kv_cache_capacity")]
+    pub kv_cache_capacity: usize,
+
+    /// Maximum number of pending entries in each durable outbound queue
+    /// (columnar and timeseries). Default: 100_000.
+    ///
+    /// When a queue reaches this cap, write operations return
+    /// [`LiteError::Backpressure`] until the sync transport drains entries.
+    /// This bounds RAM usage to the key/pointer overhead regardless of how
+    /// long the device stays offline; the payloads themselves are on disk.
+    ///
+    /// Can also be set via the `NODEDB_LITE_OUTBOUND_QUEUE_CAP` environment
+    /// variable.
+    #[serde(default = "default_outbound_queue_cap")]
+    pub outbound_queue_cap: usize,
+
+    /// Interval between automatic background flushes, in milliseconds.
+    /// Default: 1000 (1 second).
+    ///
+    /// The auto-flush task calls the global `flush()` every `auto_flush_ms`
+    /// milliseconds, bounding the data-loss window uniformly across all engines
+    /// (KV buffer, vector id-map, CRDT deltas, CSR graph, spatial, FTS).
+    ///
+    /// **Durability contract**: `await`-ing a write operation (e.g. `kv_put`,
+    /// `vector_insert`) returning `Ok` does NOT guarantee on-disk durability.
+    /// Durability is bounded by `auto_flush_ms`. Set to 0 to disable the
+    /// background task; call `flush()` explicitly to guarantee durability.
+    #[serde(default = "default_auto_flush_ms")]
+    pub auto_flush_ms: u64,
+}
+
+fn default_outbound_queue_cap() -> usize {
+    100_000
+}
+
+fn default_kv_cache_capacity() -> usize {
+    10_000
+}
+
+fn default_auto_flush_ms() -> u64 {
+    1_000
 }
 
 fn default_sync_enabled() -> bool {
@@ -99,9 +149,12 @@ impl Default for LiteConfig {
             loro_percent: 15,
             query_percent: 15,
             sync_enabled: true,
+            outbound_queue_cap: default_outbound_queue_cap(),
             argon2_m_cost: default_argon2_m_cost(),
             argon2_t_cost: default_argon2_t_cost(),
             argon2_p_cost: default_argon2_p_cost(),
+            kv_cache_capacity: default_kv_cache_capacity(),
+            auto_flush_ms: default_auto_flush_ms(),
         }
     }
 }
@@ -112,6 +165,10 @@ impl LiteConfig {
     ///
     /// Handled variables:
     /// - `NODEDB_LITE_MEMORY_MB` — total memory budget in mebibytes (parsed as `usize`)
+    /// - `NODEDB_LITE_AUTO_FLUSH_MS` — auto-flush interval in milliseconds (parsed as `u64`;
+    ///   0 = disabled)
+    /// - `NODEDB_LITE_OUTBOUND_QUEUE_CAP` — max pending entries per durable outbound queue
+    ///   (parsed as `usize`; must be > 0)
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
 
@@ -133,6 +190,54 @@ impl LiteConfig {
                         value = %val,
                         "ignoring malformed environment variable (expected unsigned integer), \
                          using default 100 MiB"
+                    );
+                }
+            }
+        }
+
+        if let Ok(val) = std::env::var("NODEDB_LITE_OUTBOUND_QUEUE_CAP") {
+            match val.trim().parse::<usize>() {
+                Ok(cap) if cap > 0 => {
+                    tracing::info!(
+                        env_var = "NODEDB_LITE_OUTBOUND_QUEUE_CAP",
+                        value = cap,
+                        "environment variable override applied"
+                    );
+                    cfg.outbound_queue_cap = cap;
+                }
+                Ok(_) => {
+                    tracing::warn!(
+                        env_var = "NODEDB_LITE_OUTBOUND_QUEUE_CAP",
+                        "value must be > 0; using default 100_000"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        env_var = "NODEDB_LITE_OUTBOUND_QUEUE_CAP",
+                        value = %val,
+                        "ignoring malformed environment variable (expected unsigned integer), \
+                         using default 100_000"
+                    );
+                }
+            }
+        }
+
+        if let Ok(val) = std::env::var("NODEDB_LITE_AUTO_FLUSH_MS") {
+            match val.trim().parse::<u64>() {
+                Ok(ms) => {
+                    tracing::info!(
+                        env_var = "NODEDB_LITE_AUTO_FLUSH_MS",
+                        value = ms,
+                        "environment variable override applied"
+                    );
+                    cfg.auto_flush_ms = ms;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        env_var = "NODEDB_LITE_AUTO_FLUSH_MS",
+                        value = %val,
+                        "ignoring malformed environment variable (expected unsigned integer), \
+                         using default 1000 ms"
                     );
                 }
             }
@@ -192,6 +297,7 @@ mod tests {
         assert_eq!(cfg.argon2_m_cost, 19_456);
         assert_eq!(cfg.argon2_t_cost, 2);
         assert_eq!(cfg.argon2_p_cost, 1);
+        assert_eq!(cfg.auto_flush_ms, 1_000);
     }
 
     #[test]
@@ -248,6 +354,37 @@ mod tests {
 
         // Cleanup.
         unsafe { std::env::remove_var("NODEDB_LITE_MEMORY_MB") };
+
+        // NODEDB_LITE_AUTO_FLUSH_MS cases.
+
+        // Case A: var absent → default 1000.
+        unsafe { std::env::remove_var("NODEDB_LITE_AUTO_FLUSH_MS") };
+        let cfg = LiteConfig::from_env();
+        assert_eq!(
+            cfg.auto_flush_ms, 1_000,
+            "absent var should give default 1000 ms"
+        );
+
+        // Case B: valid integer → applied.
+        unsafe { std::env::set_var("NODEDB_LITE_AUTO_FLUSH_MS", "500") };
+        let cfg = LiteConfig::from_env();
+        assert_eq!(cfg.auto_flush_ms, 500, "500 ms should be applied");
+
+        // Case C: 0 = disabled.
+        unsafe { std::env::set_var("NODEDB_LITE_AUTO_FLUSH_MS", "0") };
+        let cfg = LiteConfig::from_env();
+        assert_eq!(cfg.auto_flush_ms, 0, "0 should disable auto-flush");
+
+        // Case D: malformed → fallback to default.
+        unsafe { std::env::set_var("NODEDB_LITE_AUTO_FLUSH_MS", "not_a_number") };
+        let cfg = LiteConfig::from_env();
+        assert_eq!(
+            cfg.auto_flush_ms, 1_000,
+            "malformed var should fall back to default 1000 ms"
+        );
+
+        // Cleanup.
+        unsafe { std::env::remove_var("NODEDB_LITE_AUTO_FLUSH_MS") };
     }
 
     #[test]

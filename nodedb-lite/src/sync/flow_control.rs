@@ -81,6 +81,8 @@ pub struct SyncMetricsSnapshot {
     pub current_batch_size: u64,
     /// Total conflict-related rejections (lifetime).
     pub conflicts_total: u64,
+    /// In-flight entries evicted by stale-timeout (lifetime).
+    pub stale_timeouts: u64,
 }
 
 /// Sync metrics — atomic counters for lock-free concurrent access.
@@ -97,6 +99,8 @@ pub struct SyncMetrics {
     conflicts_by_collection: std::sync::Mutex<HashMap<String, u64>>,
     /// Clock-skew warnings received from Origin on DeltaAck.
     pub clock_skew_warnings: AtomicU64,
+    /// In-flight entries evicted by stale-timeout (lifetime).
+    pub stale_timeouts: AtomicU64,
 }
 
 impl SyncMetrics {
@@ -111,7 +115,13 @@ impl SyncMetrics {
             conflicts_total: AtomicU64::new(0),
             conflicts_by_collection: std::sync::Mutex::new(HashMap::new()),
             clock_skew_warnings: AtomicU64::new(0),
+            stale_timeouts: AtomicU64::new(0),
         }
+    }
+
+    /// Record stale in-flight evictions (from `cleanup_stale`).
+    pub fn record_stale_timeouts(&self, count: u64) {
+        self.stale_timeouts.fetch_add(count, Ordering::Relaxed);
     }
 
     /// Record a clock-skew warning reported by Origin in a DeltaAck.
@@ -300,7 +310,10 @@ impl FlowController {
     }
 
     /// Clean up in-flight entries older than a timeout (stale ACKs).
-    /// Returns the number of timed-out entries cleaned.
+    ///
+    /// Returns the number of timed-out entries cleaned. On any eviction applies
+    /// AIMD multiplicative decrease (halves `current_batch_size` to `min_batch_size`)
+    /// and resets `consecutive_acks`.
     pub fn cleanup_stale(&mut self, timeout: std::time::Duration) -> usize {
         let now = Instant::now();
         let before = self.in_flight.len();
@@ -313,6 +326,25 @@ impl FlowController {
             self.current_batch_size = (self.current_batch_size / 2).max(self.config.min_batch_size);
         }
         cleaned
+    }
+
+    /// Clean up stale in-flight entries and record evictions in `metrics`.
+    ///
+    /// Called periodically from the ping loop. `timeout` is the maximum age
+    /// an unACK'd in-flight entry may have before it is evicted.
+    pub fn cleanup_stale_and_record(
+        &mut self,
+        timeout: std::time::Duration,
+        metrics: &SyncMetrics,
+    ) {
+        let cleaned = self.cleanup_stale(timeout);
+        if cleaned > 0 {
+            metrics.record_stale_timeouts(cleaned as u64);
+            tracing::warn!(
+                evicted = cleaned,
+                "stale in-flight entries evicted; AIMD batch-size decreased"
+            );
+        }
     }
 
     /// Build a snapshot of all sync metrics (for health API / monitoring).
@@ -331,6 +363,7 @@ impl FlowController {
             checksum_failures: metrics.checksum_failures.load(Ordering::Relaxed),
             current_batch_size: self.current_batch_size as u64,
             conflicts_total: metrics.conflicts_total.load(Ordering::Relaxed),
+            stale_timeouts: metrics.stale_timeouts.load(Ordering::Relaxed),
         }
     }
 
@@ -544,6 +577,44 @@ mod tests {
         assert_eq!(snap.deltas_rejected, 1);
         assert_eq!(snap.reconnect_count, 1);
         assert_eq!(snap.current_batch_size, 50);
+    }
+
+    #[test]
+    fn cleanup_stale_removes_old_entries_and_halves_batch() {
+        let mut fc = FlowController::new(FlowControlConfig {
+            initial_batch_size: 80,
+            min_batch_size: 10,
+            max_in_flight: 1000,
+            ..Default::default()
+        });
+        let metrics = SyncMetrics::new();
+
+        fc.record_push(&[10, 20, 30]);
+        assert_eq!(fc.in_flight_count(), 3);
+
+        // Zero timeout → all three entries are stale.
+        fc.cleanup_stale_and_record(std::time::Duration::ZERO, &metrics);
+        assert_eq!(fc.in_flight_count(), 0);
+        // Batch size halved: 80 / 2 = 40.
+        assert_eq!(fc.current_batch_size(), 40);
+        // Metric incremented by 3.
+        assert_eq!(
+            metrics
+                .stale_timeouts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            3
+        );
+
+        // No entries → no change on second call.
+        fc.cleanup_stale_and_record(std::time::Duration::ZERO, &metrics);
+        assert_eq!(
+            metrics
+                .stale_timeouts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            3
+        );
+        // Batch size unchanged when nothing was evicted.
+        assert_eq!(fc.current_batch_size(), 40);
     }
 
     #[test]

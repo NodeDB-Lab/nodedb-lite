@@ -320,6 +320,7 @@ mod tests {
 
     fn make_def(name: &str, source: &str, interval_ms: i64) -> ContinuousAggregateDef {
         ContinuousAggregateDef {
+            database_id: nodedb_types::id::DatabaseId::DEFAULT.as_u64(),
             name: name.into(),
             source: source.into(),
             bucket_interval: format!("{}ms", interval_ms),
