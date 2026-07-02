@@ -16,6 +16,17 @@ pub struct CollectionMeta {
     /// `StrictSchema` for strict collections). Empty for schemaless document collections.
     #[serde(default)]
     pub config_json: Option<String>,
+    /// Optional JSON-serialized full `CollectionDescriptor` (from
+    /// `nodedb_types::sync::wire::CollectionDescriptor`). Set for collections
+    /// materialized from an inbound sync schema announcement so the SQL catalog
+    /// can surface the real engine, bitemporal flag, and column schema, and so a
+    /// future emit path can reconstruct the descriptor losslessly. `None` for
+    /// locally-created collections.
+    #[serde(default)]
+    pub descriptor_json: Option<String>,
+    /// Whether the collection tracks system-time + valid-time versions.
+    #[serde(default)]
+    pub bitemporal: bool,
 }
 
 impl<S: StorageEngine> NodeDbLite<S> {
@@ -34,6 +45,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
             created_at_ms: crate::runtime::now_millis(),
             fields: fields.to_vec(),
             config_json: None,
+            descriptor_json: None,
+            bitemporal: false,
         };
         let key = format!("collection:{name}");
         let bytes = sonic_rs::to_vec(&meta).map_err(|e| NodeDbError::storage(e.to_string()))?;
@@ -68,6 +81,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
             created_at_ms: crate::runtime::now_millis(),
             fields,
             config_json: Some(config_json),
+            descriptor_json: None,
+            bitemporal: false,
         };
         let key = format!("collection:{name}");
         let bytes = sonic_rs::to_vec(&meta).map_err(|e| NodeDbError::storage(e.to_string()))?;
@@ -127,9 +142,36 @@ impl<S: StorageEngine> NodeDbLite<S> {
                     created_at_ms: 0,
                     fields: Vec::new(),
                     config_json: None,
+                    descriptor_json: None,
+                    bitemporal: false,
                 });
             }
         }
         Ok(result)
     }
+}
+
+/// Load all explicitly-persisted collection metadata as a name→meta map.
+///
+/// Unlike [`NodeDbLite::list_collections`], this does NOT merge implicit CRDT
+/// collections — it returns only the metas durably written under the
+/// `collection:` prefix (via `create_collection`, `create_kv_collection`, or
+/// inbound schema sync). The SQL catalog uses this snapshot to surface the real
+/// engine, bitemporal flag, and columns for DDL/synced collections, while
+/// implicit CRDT-only collections still fall through to engine-based detection.
+/// Free-function form so callers that hold only an `&S` (e.g. the SQL query
+/// engine building its catalog) can reuse the same scan-and-decode logic.
+pub(crate) async fn load_persisted_collection_metas<S: StorageEngine>(
+    storage: &S,
+) -> NodeDbResult<std::collections::HashMap<String, CollectionMeta>> {
+    let pairs = storage
+        .scan_prefix(nodedb_types::Namespace::Meta, b"collection:")
+        .await?;
+    let mut map = std::collections::HashMap::with_capacity(pairs.len());
+    for (_, value) in &pairs {
+        if let Ok(meta) = sonic_rs::from_slice::<CollectionMeta>(value) {
+            map.insert(meta.name.clone(), meta);
+        }
+    }
+    Ok(map)
 }

@@ -51,6 +51,18 @@ pub trait SyncDelegate: Send + Sync + 'static {
     /// KV store writes through `spawn_blocking`.
     async fn import_definition(&self, msg: &nodedb_types::sync::wire::DefinitionSyncMsg);
 
+    /// Materialize a collection announced by a sync peer (opcode `0x13`).
+    ///
+    /// Create-if-absent registers the collection from the descriptor and
+    /// persists authoritative metadata so the SQL catalog surfaces the real
+    /// engine, bitemporal flag, and columns. Async because it performs storage
+    /// reads/writes. Errors are logged and swallowed at the impl boundary so a
+    /// bad announcement never kills the sync session.
+    async fn import_collection_schema(
+        &self,
+        msg: &nodedb_types::sync::wire::CollectionSchemaSyncMsg,
+    );
+
     /// Apply a single `ArrayDelta` frame from Origin.
     ///
     /// Returns the `ArrayAckMsg` to send back to Origin (advancing its GC

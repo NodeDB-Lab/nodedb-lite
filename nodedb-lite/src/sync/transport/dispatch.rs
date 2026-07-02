@@ -176,6 +176,15 @@ pub(super) async fn dispatch_frame(
                 delegate.import_definition(&msg).await;
             }
         }
+        SyncMessageType::CollectionSchema => {
+            if let Some(msg) =
+                frame.decode_body::<nodedb_types::sync::wire::CollectionSchemaSyncMsg>()
+            {
+                delegate.import_collection_schema(&msg).await;
+            } else {
+                tracing::warn!("CollectionSchema: failed to decode frame body");
+            }
+        }
         SyncMessageType::ArrayDelta => {
             if let Some(msg) = frame.decode_body::<nodedb_types::sync::wire::ArrayDeltaMsg>() {
                 if let Some(ack) = delegate.handle_array_delta(&msg) {

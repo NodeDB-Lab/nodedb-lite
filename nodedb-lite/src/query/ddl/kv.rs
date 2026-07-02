@@ -70,6 +70,8 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 .map(|c| (c.name.clone(), c.column_type.to_string()))
                 .collect(),
             config_json: sonic_rs::to_string(&config).ok(),
+            descriptor_json: None,
+            bitemporal: false,
         };
         let key = format!("collection:{name}");
         let bytes =

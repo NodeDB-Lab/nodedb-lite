@@ -21,6 +21,7 @@ struct MockDelegate {
     acked_up_to: AtomicU64,
     rejected: std::sync::Mutex<Vec<u64>>,
     imported: std::sync::Mutex<Vec<Vec<u8>>>,
+    imported_schemas: std::sync::Mutex<Vec<String>>,
 }
 
 impl MockDelegate {
@@ -29,6 +30,7 @@ impl MockDelegate {
             acked_up_to: AtomicU64::new(0),
             rejected: std::sync::Mutex::new(Vec::new()),
             imported: std::sync::Mutex::new(Vec::new()),
+            imported_schemas: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -56,6 +58,15 @@ impl SyncDelegate for MockDelegate {
         self.imported.lock().unwrap().push(data.to_vec());
     }
     async fn import_definition(&self, _msg: &nodedb_types::sync::wire::DefinitionSyncMsg) {}
+    async fn import_collection_schema(
+        &self,
+        msg: &nodedb_types::sync::wire::CollectionSchemaSyncMsg,
+    ) {
+        self.imported_schemas
+            .lock()
+            .unwrap()
+            .push(msg.descriptor.name.clone());
+    }
     fn handle_array_delta(
         &self,
         _msg: &nodedb_types::sync::wire::ArrayDeltaMsg,
@@ -302,4 +313,37 @@ async fn dispatch_clock_sync() {
 
     let clock = client.clock().lock().await;
     assert_eq!(clock.get(1), 99);
+}
+
+#[tokio::test]
+async fn dispatch_collection_schema() {
+    let client = make_client();
+    let mock = Arc::new(MockDelegate::new());
+    let delegate: Arc<dyn SyncDelegate> = Arc::clone(&mock) as _;
+
+    let msg = nodedb_types::sync::wire::CollectionSchemaSyncMsg {
+        descriptor: nodedb_types::sync::wire::CollectionDescriptor {
+            tenant_id: 1,
+            database_id: nodedb_types::id::DatabaseId::new(1),
+            name: "users".into(),
+            collection_type: nodedb_types::collection::CollectionType::document(),
+            bitemporal: false,
+            fields: Vec::new(),
+            primary: nodedb_types::PrimaryEngine::Document,
+            vector_primary: None,
+            partition_strategy: nodedb_types::PartitionStrategy::default(),
+            declared_primary_key: None,
+            descriptor_version: 1,
+        },
+        creation_hlc: nodedb_types::hlc::Hlc::new(1, 0),
+    };
+    let frame =
+        SyncFrame::try_encode(SyncMessageType::CollectionSchema, &msg).expect("test frame encode");
+
+    dispatch_frame(&client, &delegate, &frame).await;
+
+    assert_eq!(
+        *mock.imported_schemas.lock().unwrap(),
+        vec!["users".to_string()]
+    );
 }

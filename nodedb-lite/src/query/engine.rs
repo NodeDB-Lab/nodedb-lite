@@ -124,10 +124,15 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             return result;
         }
 
+        let metas =
+            crate::nodedb::collection::ddl::load_persisted_collection_metas(self.storage.as_ref())
+                .await
+                .unwrap_or_default();
         let catalog = LiteCatalog::new(
             Arc::clone(&self.crdt),
             Arc::clone(&self.strict),
             Arc::clone(&self.columnar),
+            metas,
         );
 
         let sql_params: Vec<nodedb_sql::ParamValue> = params.iter().map(value_to_param).collect();

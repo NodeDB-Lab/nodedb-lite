@@ -2,6 +2,7 @@
 
 mod array_handlers;
 mod definition_apply;
+mod import_collection_schema;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::storage::engine::StorageEngine;
@@ -458,6 +459,22 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
                 name = %msg.name,
                 error = %e,
                 "definition sync failed"
+            );
+        }
+    }
+
+    async fn import_collection_schema(
+        &self,
+        msg: &nodedb_types::sync::wire::CollectionSchemaSyncMsg,
+    ) {
+        if let Err(e) = self
+            .register_collection_from_descriptor(&msg.descriptor)
+            .await
+        {
+            tracing::warn!(
+                collection = %msg.descriptor.name,
+                error = %e,
+                "collection schema sync failed"
             );
         }
     }
