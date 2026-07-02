@@ -10,6 +10,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use nodedb_physical::physical_plan::GraphOp;
 use nodedb_types::result::QueryResult;
@@ -20,6 +21,8 @@ use crate::query::graph_ops::{
     algorithms, edges, fusion, labels, match_engine, stats, temporal, traversal,
 };
 use crate::storage::engine::StorageEngine;
+
+use super::graph_resolve::resolve_collection_for_nodes;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) type GraphFut<'a> =
@@ -478,30 +481,3 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
 
     Ok(fut)
 }
-
-/// Resolve which collection a set of node IDs belongs to by scanning the CSR map.
-///
-/// Returns the first collection that contains any of the given nodes, or an
-/// empty string when none is found (which will produce an empty result set
-/// rather than an error — correct for "no such graph" semantics).
-fn resolve_collection_for_nodes(
-    csr_map: &Arc<
-        std::sync::Mutex<std::collections::HashMap<String, crate::engine::graph::index::CsrIndex>>,
-    >,
-    node_ids: &[String],
-) -> String {
-    let Ok(map) = csr_map.lock() else {
-        return String::new();
-    };
-    for (coll, csr) in map.iter() {
-        for node in node_ids {
-            if csr.contains_node(node) {
-                return coll.clone();
-            }
-        }
-    }
-    // Fall back to the first collection in the map.
-    map.keys().next().cloned().unwrap_or_default()
-}
-
-use std::sync::Arc;

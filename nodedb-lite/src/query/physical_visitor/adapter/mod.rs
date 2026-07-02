@@ -33,6 +33,7 @@ mod columnar;
 mod crdt;
 mod document;
 mod graph;
+mod graph_resolve;
 mod kv;
 mod meta;
 mod query;
