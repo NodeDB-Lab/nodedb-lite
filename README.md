@@ -4,12 +4,12 @@
 
 # NodeDB Lite
 
-<h3>The embedded multi-model database for local-first apps, agents, and edge runtimes.</h3>
+<h3>The embedded memory engine for AI agents and local-first apps.</h3>
 
 <p>
-  <a href="https://github.com/NodeDB-Lab/nodedb">NodeDB</a> engines in-process. One API.
-  Zero server requirement. Run vector search, graph traversal, document queries, full-text search,
-  timeseries, and other multi-model workloads on device, then sync to Origin when connectivity returns.
+  Durable, queryable memory that lives in your app — vector, graph, document, full-text, timeseries,
+  and key-value <a href="https://github.com/NodeDB-Lab/nodedb">NodeDB</a> engines in-process, offline by
+  default, syncing conflict-free to NodeDB Origin when connectivity returns. One API, no server required.
 </p>
 
 <p>
@@ -45,7 +45,9 @@
 
 </div>
 
-NodeDB Lite replaces the usual SQLite + vector sidecar + ad hoc cache + custom sync layer stack with one embedded engine. Local reads stay in-process, writes remain available offline, and the same application code can later sync to NodeDB Origin without a rewrite.
+Agent memory and local-first data usually mean a pile of files, or a SQLite database with a vector sidecar, an ad-hoc cache, and a hand-written sync layer. NodeDB Lite is one embedded engine instead: durable, queryable memory in-process, available offline, with conflict-free sync to NodeDB Origin when you want it — and no rewrite to move from edge to cloud.
+
+It's the engine behind **ma8e**, an in-development memory-and-knowledge layer for coding agents — deterministic capture, hybrid retrieval, and path-level access guards, all on embedded NodeDB Lite.
 
 ## Release Status
 
