@@ -224,7 +224,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 #[cfg(target_arch = "wasm32")]
                 {
                     // WASM: full checkpoint blob path (no segment ops).
-                    let checkpoint = index.checkpoint_to_bytes();
+                    let checkpoint = index
+                        .checkpoint_to_bytes()
+                        .map_err(|e| NodeDbError::serialization("hnsw-checkpoint", e))?;
                     ops.push(WriteOp::Put {
                         ns: Namespace::Vector,
                         key: key.into_bytes(),
