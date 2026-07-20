@@ -436,14 +436,22 @@ async fn live_shape_snapshot_with_wal_lsn() {
     .await
     .expect("send");
 
-    let resp = tokio::time::timeout(Duration::from_secs(5), ws.next())
-        .await
-        .expect("timeout")
-        .expect("closed")
-        .expect("error");
+    // Full-duplex channel: Origin may interleave a server-initiated frame
+    // (e.g. a `DeltaPush` for a concurrent write) ahead of the `ShapeSnapshot`
+    // answering our subscribe. Demultiplex by frame type rather than assuming
+    // the next frame is the snapshot.
+    let frame = loop {
+        let resp = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timeout")
+            .expect("closed")
+            .expect("error");
 
-    let frame = SyncFrame::from_bytes(resp.into_data().as_ref()).expect("decode");
-    assert_eq!(frame.msg_type, SyncMessageType::ShapeSnapshot);
+        let frame = SyncFrame::from_bytes(resp.into_data().as_ref()).expect("decode");
+        if frame.msg_type == SyncMessageType::ShapeSnapshot {
+            break frame;
+        }
+    };
 
     let snapshot: ShapeSnapshotMsg = frame.decode_body().expect("decode");
     assert_eq!(snapshot.shape_id, "lsn-live-shape");

@@ -47,23 +47,24 @@ async fn subscribe_shape(
         .await
         .expect("send ShapeSubscribe");
 
-    let resp = tokio::time::timeout(Duration::from_secs(10), ws.next())
-        .await
-        .expect("timeout waiting for ShapeSnapshot")
-        .expect("stream closed before snapshot")
-        .expect("WebSocket read error");
+    // The channel is full-duplex: Origin may interleave a server-initiated
+    // frame (e.g. a `DeltaPush` for a concurrent write, or a keepalive) ahead
+    // of the `ShapeSnapshot` that answers our subscribe. Demultiplex by frame
+    // type rather than assuming the next frame is the snapshot.
+    loop {
+        let resp = tokio::time::timeout(Duration::from_secs(10), ws.next())
+            .await
+            .expect("timeout waiting for ShapeSnapshot")
+            .expect("stream closed before snapshot")
+            .expect("WebSocket read error");
 
-    let frame = SyncFrame::from_bytes(resp.into_data().as_ref()).expect("decode frame");
-    assert_eq!(
-        frame.msg_type,
-        SyncMessageType::ShapeSnapshot,
-        "expected ShapeSnapshot, got {:?}",
-        frame.msg_type
-    );
-
-    frame
-        .decode_body::<ShapeSnapshotMsg>()
-        .expect("decode ShapeSnapshotMsg")
+        let frame = SyncFrame::from_bytes(resp.into_data().as_ref()).expect("decode frame");
+        if frame.msg_type == SyncMessageType::ShapeSnapshot {
+            return frame
+                .decode_body::<ShapeSnapshotMsg>()
+                .expect("decode ShapeSnapshotMsg");
+        }
+    }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

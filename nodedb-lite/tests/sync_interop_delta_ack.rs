@@ -35,13 +35,26 @@ async fn push_and_recv(
         .await
         .expect("send DeltaPush");
 
-    let resp = tokio::time::timeout(Duration::from_secs(10), ws.next())
-        .await
-        .expect("timeout waiting for delta response")
-        .expect("stream closed before response")
-        .expect("WebSocket read error");
+    // The sync channel is full-duplex: Origin may interleave its own
+    // server-initiated frames (e.g. a `DeltaPush` echoing another peer's
+    // write, or a keepalive `Ping`) ahead of the ack for the frame we just
+    // sent. A real client demultiplexes by frame type rather than assuming
+    // the next frame is its response, so skip anything that is not a
+    // terminal ack for our push.
+    loop {
+        let resp = tokio::time::timeout(Duration::from_secs(10), ws.next())
+            .await
+            .expect("timeout waiting for delta response")
+            .expect("stream closed before response")
+            .expect("WebSocket read error");
 
-    SyncFrame::from_bytes(resp.into_data().as_ref()).expect("decode response frame")
+        let frame =
+            SyncFrame::from_bytes(resp.into_data().as_ref()).expect("decode response frame");
+        match frame.msg_type {
+            SyncMessageType::DeltaAck | SyncMessageType::DeltaReject => return frame,
+            _ => continue,
+        }
+    }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
