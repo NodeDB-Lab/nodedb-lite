@@ -10,6 +10,8 @@
 
 use serde::Serialize;
 
+use nodedb_types::error::NodeDbResult;
+
 use crate::memory::{EngineId, PressureLevel};
 use crate::storage::engine::StorageEngine;
 
@@ -122,6 +124,19 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// backend-specific methods (e.g. size reporting) for compression-ratio measurement.
     pub fn storage(&self) -> &S {
         &self.storage
+    }
+
+    /// Compact the backing storage engine, reclaiming dead pages and
+    /// truncating the file to bound on-disk growth.
+    ///
+    /// Forwards to [`StorageEngine::compact`]. For the pagedb-backed engine this
+    /// drains the deferred-free list and truncates `main.db`; for in-memory or
+    /// test engines it is a no-op returning a zero
+    /// [`CompactionOutcome`](crate::storage::engine::CompactionOutcome).
+    pub async fn compact(
+        &self,
+    ) -> NodeDbResult<crate::storage::engine::CompactionOutcome> {
+        Ok(self.storage.compact().await?)
     }
 
     /// Get a structured health report.
