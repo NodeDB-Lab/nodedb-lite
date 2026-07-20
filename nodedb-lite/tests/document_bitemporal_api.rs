@@ -288,3 +288,60 @@ async fn non_bitemporal_collection_still_works_unchanged() {
         "document must be absent after hard delete on plain collection"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression: issue #3 / #6 — SQL-DDL bitemporal document collection is
+// SELECT-able and persists CollectionMeta.
+// ---------------------------------------------------------------------------
+
+/// `CREATE COLLECTION ... WITH (bitemporal=true)` via SQL DDL must:
+///   1. persist a `CollectionMeta` under `collection:{name}` (issue #6 — the
+///      key the sync outbound announce and the SQL catalog both read), and
+///   2. resolve for a plain `SELECT ... FROM <name>` instead of returning
+///      "table not found" (issue #3), surfacing the real bitemporal flag.
+#[tokio::test]
+async fn sql_ddl_bitemporal_collection_is_queryable_and_persists_meta() {
+    use nodedb_lite::PagedbStorageMem;
+    use nodedb_lite::storage::engine::StorageEngine;
+
+    let storage = PagedbStorageMem::open_in_memory().await.unwrap();
+    let storage_clone = storage.clone();
+    let db = NodeDbLite::open(storage, 1).await.unwrap();
+
+    db.execute_sql("CREATE COLLECTION entries WITH (bitemporal=true)", &[])
+        .await
+        .expect("create bitemporal collection via SQL DDL");
+
+    // Issue #6: CollectionMeta persisted under `collection:entries`, carrying
+    // the real bitemporal flag — this is what the announce path reads.
+    let raw = storage_clone
+        .get(nodedb_types::Namespace::Meta, b"collection:entries")
+        .await
+        .expect("meta read")
+        .expect("CollectionMeta must be persisted for a SQL-DDL bitemporal collection");
+    let meta: nodedb_lite::nodedb::collection::CollectionMeta =
+        sonic_rs::from_slice(&raw).expect("decode CollectionMeta");
+    assert!(
+        meta.bitemporal,
+        "persisted meta must carry bitemporal=true, got {meta:?}"
+    );
+
+    // Insert three documents.
+    for i in 0..3 {
+        let mut doc = Document::new(format!("d{i}"));
+        doc.set("body", Value::String(format!("row {i}")));
+        db.document_put("entries", doc).await.unwrap();
+    }
+
+    // Issue #3: a bare SELECT must resolve the relation (not "table not found")
+    // and return the inserted rows.
+    let r = db
+        .execute_sql("SELECT id FROM entries", &[])
+        .await
+        .expect("SELECT on a bitemporal document collection must resolve, not error");
+    assert_eq!(
+        r.rows.len(),
+        3,
+        "SELECT id FROM entries must return the three inserted documents"
+    );
+}

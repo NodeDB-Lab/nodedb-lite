@@ -27,7 +27,35 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             .await
             .map_err(|e| LiteError::Query(e.to_string()))?;
 
-        // Register the collection name in the CRDT engine so that the SQL
+        // Persist `CollectionMeta` under `collection:{name}` in `Namespace::Meta`,
+        // symmetric with `create_collection` and the KV DDL path. Without this the
+        // collection is invisible to two consumers that both read that key:
+        //   - `LiteCatalog` (via `load_persisted_collection_metas`), so the SQL
+        //     planner resolves `SELECT ... FROM <name>` with the REAL bitemporal
+        //     flag instead of "table not found" / a hardcoded non-bitemporal
+        //     fallback.
+        //   - the sync outbound announce (`get_collection_meta`), so a
+        //     `CollectionSchema` frame is emitted before the first delta and the
+        //     collection registers on Origin.
+        let meta = crate::nodedb::collection::ddl::CollectionMeta {
+            name: name.clone(),
+            collection_type: "document".to_string(),
+            created_at_ms: crate::runtime::now_millis(),
+            fields: Vec::new(),
+            config_json: None,
+            descriptor_json: None,
+            bitemporal: true,
+            crdt: false,
+        };
+        let key = format!("collection:{name}");
+        let bytes =
+            sonic_rs::to_vec(&meta).map_err(|e| LiteError::Query(format!("serialize: {e}")))?;
+        self.storage
+            .put(nodedb_types::Namespace::Meta, key.as_bytes(), &bytes)
+            .await
+            .map_err(|e| LiteError::Query(format!("storage: {e}")))?;
+
+        // Also register the collection name in the CRDT engine so the SQL
         // catalog can resolve it immediately for SELECT queries, even before
         // any document has been inserted (Loro's root map has no entry yet).
         self.crdt

@@ -206,3 +206,94 @@ async fn document_collection_registers_on_origin_via_announce() {
     // Cleanup.
     pg.execute("DROP COLLECTION doc_reg_test").await;
 }
+
+/// Same end-to-end proof, but the collection is created via SQL DDL
+/// (`CREATE COLLECTION ... WITH (bitemporal=true)`) instead of the programmatic
+/// `create_collection`. This is the exact entry point of lite issues #3/#6:
+/// before the fix, the SQL-DDL handler did not persist a `CollectionMeta`, so
+/// the outbound `CollectionSchema` announce was silently skipped and the
+/// collection never registered on Origin. With the meta persisted, the announce
+/// fires and the round-trip completes — registration (#6) and shape-servable
+/// materialization (#146) — via the SQL client path a real SQL consumer uses.
+#[tokio::test]
+async fn sql_ddl_bitemporal_collection_registers_and_serves_via_announce() {
+    let Some(_origin) = OriginServer::try_spawn_with_pgwire() else {
+        eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
+        return;
+    };
+    let pg = OriginPgwire::connect().await;
+
+    const SQL_COLLECTION: &str = "sql_ddl_reg_test";
+
+    let lite = open_lite().await;
+
+    // Create ONLY on Lite, via SQL DDL — no Origin pre-create. This is the path
+    // that previously persisted no `CollectionMeta` and thus never announced.
+    lite.execute_sql(
+        "CREATE COLLECTION sql_ddl_reg_test WITH (bitemporal=true)",
+        &[],
+    )
+    .await
+    .expect("Lite CREATE COLLECTION ... WITH (bitemporal=true)");
+
+    let _sync = start_sync(Arc::clone(&lite), 21).await;
+
+    let ids = ["ddl-a", "ddl-b", "ddl-c"];
+    for id in ids {
+        let doc = make_doc(id, &format!("sql-ddl registration probe for {id}"));
+        lite.document_put(SQL_COLLECTION, doc)
+            .await
+            .unwrap_or_else(|e| panic!("Lite document_put {id}: {e}"));
+    }
+
+    // Registration via the announce (#6): catalog-visible on Origin, no pre-create.
+    let mut catalog_visible = false;
+    let deadline = tokio::time::sleep(Duration::from_secs(10));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                if let Ok(rows) = pg
+                    .try_query("SELECT relname FROM pg_class WHERE relname = 'sql_ddl_reg_test'")
+                    .await
+                    && !rows.is_empty()
+                {
+                    catalog_visible = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        catalog_visible,
+        "a SQL-DDL bitemporal collection must register on Origin via the \
+         CollectionSchema announce (issue #6) within the deadline"
+    );
+
+    // Shape-servable materialization (#146): all 3 synced docs served.
+    let mut origin_row_count: usize = 0;
+    let deadline = tokio::time::sleep(Duration::from_secs(8));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                if let Ok(rows) = pg.try_query("SELECT id FROM sql_ddl_reg_test").await
+                    && rows.len() >= 3
+                {
+                    origin_row_count = rows.len();
+                    break;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        origin_row_count, 3,
+        "Origin must serve 3 synced documents for a SQL-DDL bitemporal collection \
+         after announce-driven registration; got {origin_row_count}"
+    );
+
+    // Cleanup.
+    pg.execute("DROP COLLECTION sql_ddl_reg_test").await;
+}
