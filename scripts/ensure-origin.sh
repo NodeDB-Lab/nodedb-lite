@@ -11,10 +11,18 @@
 # resolves from (`cargo metadata`) and derive the Origin workspace root from its
 # manifest path — a single source of truth, no duplicated path literal.
 #
-# Idempotent: `cargo build` rebuilds only when sources change. If `nodedb-types`
-# resolves from the registry instead of a local path (i.e. nobody has the Origin
-# source), we exit 0 WITHOUT exporting NODEDB_BIN, so the interop tests skip
-# rather than fail — a Lite-only checkout still passes `cargo nextest run`.
+# Idempotent: `cargo build` rebuilds only when sources change.
+#
+# Skip vs fail — the distinction is deliberate:
+#   - If the Origin source is NOT available locally (`nodedb-types` resolves from
+#     the registry, or the workspace can't be located) we exit 0 WITHOUT
+#     exporting NODEDB_BIN, so the interop tests skip rather than fail — a
+#     Lite-only checkout still passes `cargo nextest run`.
+#   - If the Origin source IS available but its build fails (or produces no
+#     binary), we exit NON-ZERO so nextest fails the run. A broken Origin build
+#     must surface loudly; silently skipping every interop test while the suite
+#     reports green would hide exactly the cross-repo regressions these tests exist
+#     to catch.
 #
 # nextest runs this from the workspace root and reads exported env vars from the
 # file named by $NEXTEST_ENV.
@@ -52,16 +60,20 @@ if [ -z "$origin_root" ] || [ ! -f "$origin_root/Cargo.toml" ] || [ ! -f "$origi
     exit 0
 fi
 
+# Past this point the Origin source IS present locally. A build failure or a
+# missing binary is now a REAL error, not a "no Origin available" skip — failing
+# here loudly is the whole point: a broken Origin build must fail the interop
+# suite rather than silently skip every test while the run still reports green.
 echo "ensure-origin: building Origin binary (cargo build -p nodedb in $origin_root) ..." >&2
 if ! cargo build --manifest-path "$origin_root/Cargo.toml" -p nodedb --bin nodedb >&2; then
-    echo "ensure-origin: Origin build failed; interop tests will skip" >&2
-    exit 0
+    echo "ensure-origin: Origin build FAILED; failing the interop suite (Origin source is present, so this is a real error, not a skip)" >&2
+    exit 1
 fi
 
 bin="$origin_root/target/debug/nodedb"
 if [ ! -x "$bin" ]; then
-    echo "ensure-origin: built binary not found at $bin; interop tests will skip" >&2
-    exit 0
+    echo "ensure-origin: Origin build reported success but binary not found at $bin; failing the interop suite" >&2
+    exit 1
 fi
 
 echo "NODEDB_BIN=$bin" >> "$NEXTEST_ENV"
