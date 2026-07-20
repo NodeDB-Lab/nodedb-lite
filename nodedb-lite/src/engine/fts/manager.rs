@@ -35,7 +35,7 @@ pub struct FtsResult {
 pub struct FtsCollectionManager {
     /// Key: `"{collection}:{field}"` → FTS index.
     /// Whole-document index uses key `"{collection}:_doc"`.
-    indices: HashMap<String, FtsIndex<MemoryBackend>>,
+    pub(super) indices: HashMap<String, FtsIndex<MemoryBackend>>,
     /// Forward map: original string doc_id → dense u32 surrogate.
     ///
     /// Surrogates **must** be dense (0, 1, 2, …) because `nodedb_fts::Memtable`
@@ -55,6 +55,13 @@ pub struct FtsCollectionManager {
     /// Needed by `FtsDeleteDoc` to translate the Origin surrogate back to the
     /// Lite string doc_id without dropping the whole collection.
     origin_surrogate_to_doc_id: HashMap<u32, String>,
+    /// Collection name → bound analyzer name, from `TextOp::SetAnalyzer`.
+    ///
+    /// Retained so indexes created after the analyzer was bound inherit it —
+    /// DDL normally binds the analyzer before the first document is written,
+    /// when none of the collection's indexes exist yet. See
+    /// `super::analyzer` for the binding logic.
+    pub(super) collection_analyzers: HashMap<String, String>,
 }
 
 impl FtsCollectionManager {
@@ -67,6 +74,7 @@ impl FtsCollectionManager {
             // rejected by FtsIndex::index_document with SurrogateOutOfRange.
             next_surrogate: 1,
             origin_surrogate_to_doc_id: HashMap::new(),
+            collection_analyzers: HashMap::new(),
         }
     }
 
@@ -111,10 +119,8 @@ impl FtsCollectionManager {
         }
         let surrogate = self.surrogate_for(doc_id);
         let key = format!("{collection}:_doc");
-        let idx = self
-            .indices
-            .entry(key.clone())
-            .or_insert_with(|| FtsIndex::new(MemoryBackend::new()));
+        let fresh = self.new_index_for(&key);
+        let idx = self.indices.entry(key.clone()).or_insert(fresh);
         // Remove old entry first (upsert semantics).
         let _ = idx.remove_document(0, 0, &key, surrogate);
         let _ = idx.index_document(0, 0, &key, surrogate, text);
@@ -415,10 +421,8 @@ impl FtsCollectionManager {
         }
         let surrogate = self.surrogate_for(doc_id);
         let key = format!("{collection}:{field}");
-        let idx = self
-            .indices
-            .entry(key.clone())
-            .or_insert_with(|| FtsIndex::new(MemoryBackend::new()));
+        let fresh = self.new_index_for(&key);
+        let idx = self.indices.entry(key.clone()).or_insert(fresh);
         let _ = idx.remove_document(0, 0, &key, surrogate);
         let _ = idx.index_document(0, 0, &key, surrogate, text);
     }

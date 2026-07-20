@@ -1,3 +1,4 @@
+pub mod analyzer;
 pub mod checkpoint;
 pub mod manager;
 pub mod search;

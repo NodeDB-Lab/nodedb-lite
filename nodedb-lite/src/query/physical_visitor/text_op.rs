@@ -471,5 +471,26 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                 })
             }))
         }
+
+        TextOp::SetAnalyzer {
+            collection,
+            analyzer_name,
+        } => {
+            let collection = collection.clone();
+            let analyzer_name = analyzer_name.clone();
+            let fts_state = Arc::clone(&engine.fts_state);
+            Ok(Box::pin(async move {
+                let mut mgr = fts_state
+                    .manager
+                    .lock()
+                    .map_err(|_| LiteError::LockPoisoned)?;
+                mgr.set_collection_analyzer(&collection, &analyzer_name);
+                Ok(QueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                    rows_affected: 0,
+                })
+            }))
+        }
     }
 }
