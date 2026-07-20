@@ -9,12 +9,14 @@ use crate::common::origin::OriginServer;
 use nodedb_types::sync::wire::HandshakeMsg;
 use nodedb_types::wire_version::WIRE_FORMAT_VERSION;
 
-/// §8.2a — WIRE_FORMAT_VERSION == 7 and is accepted by Origin.
+/// §8.2a — WIRE_FORMAT_VERSION == 1 and is accepted by Origin.
 ///
-/// If Origin bumps its constant without updating Lite (or vice versa), this
-/// test fails with a message pointing at the constant.
+/// The constant is deliberately pinned at 1 until 1.0 with
+/// `MIN_WIRE_FORMAT_VERSION == WIRE_FORMAT_VERSION`, so mixed-version peers
+/// cannot form. If Origin bumps its constant without updating Lite (or vice
+/// versa), this test fails with a message pointing at the constant.
 #[tokio::test]
-async fn exact_wire_version_7_is_accepted() {
+async fn exact_wire_version_1_is_accepted() {
     let Some(_server) = OriginServer::try_spawn() else {
         eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
         return;
@@ -22,12 +24,12 @@ async fn exact_wire_version_7_is_accepted() {
     let mut ws = raw_connect(_server.ws_url).await;
 
     assert_eq!(
-        WIRE_FORMAT_VERSION, 7,
-        "Lite WIRE_FORMAT_VERSION drifted from 7; update this test and the protocol doc"
+        WIRE_FORMAT_VERSION, 1,
+        "Lite WIRE_FORMAT_VERSION drifted from 1; update this test and the protocol doc"
     );
 
     let hs = HandshakeMsg {
-        wire_version: 7,
+        wire_version: 1,
         ..minimal_hs()
     };
     send_hs(&mut ws, &hs).await;
@@ -35,12 +37,12 @@ async fn exact_wire_version_7_is_accepted() {
 
     assert!(
         ack.success,
-        "wire_version=7 must be accepted; error: {:?}",
+        "wire_version=1 must be accepted; error: {:?}",
         ack.error
     );
     assert_eq!(
-        ack.server_wire_version, 7,
-        "server_wire_version must be 7; if this fails Origin bumped its constant without updating Lite"
+        ack.server_wire_version, 1,
+        "server_wire_version must be 1; if this fails Origin bumped its constant without updating Lite"
     );
 }
 
@@ -73,10 +75,12 @@ async fn wire_version_zero_is_rejected() {
     );
 }
 
-/// §8.2c — Wire version 6 (one below current floor) must be rejected.
+/// §8.2c — Wire version 6 (above the pinned ceiling) must be rejected.
 ///
-/// MIN_WIRE_FORMAT_VERSION == WIRE_FORMAT_VERSION == 7.  Any version below 7
-/// must fail.
+/// `MIN_WIRE_FORMAT_VERSION == WIRE_FORMAT_VERSION == 1`, so the accepted set
+/// is the single value 1 — anything above it is as incompatible as anything
+/// below it. A peer claiming 6 is either a future build or a spoof; either way
+/// the session must not form.
 #[tokio::test]
 async fn wire_version_6_is_rejected() {
     let Some(_server) = OriginServer::try_spawn() else {
@@ -94,7 +98,7 @@ async fn wire_version_6_is_rejected() {
 
     assert!(
         !ack.success,
-        "wire_version=6 must be rejected (floor is 7); if this passes Origin relaxed MIN_WIRE_FORMAT_VERSION"
+        "wire_version=6 must be rejected (only 1 is accepted); if this passes Origin widened its version check"
     );
 }
 

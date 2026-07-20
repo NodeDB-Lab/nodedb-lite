@@ -339,11 +339,14 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                             .saturating_mul(top_k * 3)
                             .max(DEFAULT_MAX_VISITED);
                         let expanded = csr_idx.traverse_bfs(
-                            &[graph_seed_id.as_str()],
-                            edge_label,
-                            Direction::Out,
-                            graph_depth,
-                            max_vis,
+                            nodedb_graph::BfsParams {
+                                start_nodes: &[graph_seed_id.as_str()],
+                                label_filter: edge_label,
+                                direction: Direction::Out,
+                                max_depth: graph_depth,
+                                max_visited: max_vis,
+                                frontier_bitmap: None,
+                            },
                             None,
                         );
                         expanded

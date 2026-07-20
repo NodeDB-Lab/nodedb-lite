@@ -50,7 +50,17 @@ pub fn hop(
 
     let starts: Vec<&str> = start_nodes.iter().map(String::as_str).collect();
     let mv = max_visited(options);
-    let nodes = csr.traverse_bfs(&starts, edge_label, direction, depth, mv, frontier_bitmap);
+    let nodes = csr.traverse_bfs(
+        nodedb_graph::BfsParams {
+            start_nodes: &starts,
+            label_filter: edge_label,
+            direction,
+            max_depth: depth,
+            max_visited: mv,
+            frontier_bitmap,
+        },
+        None,
+    );
 
     let rows = nodes.iter().map(|n| node_row(n)).collect();
     Ok(QueryResult {
@@ -155,7 +165,17 @@ pub fn path(
     };
 
     let mv = max_visited(options);
-    let maybe_path = csr.shortest_path(src, dst, edge_label, max_depth, mv, frontier_bitmap);
+    let maybe_path = csr.shortest_path(
+        nodedb_graph::ShortestPathParams {
+            src,
+            dst,
+            label_filter: edge_label,
+            max_depth,
+            max_visited: mv,
+            frontier_bitmap,
+        },
+        None,
+    );
 
     let columns = vec!["path".to_string()];
     let rows = match maybe_path {
@@ -189,7 +209,7 @@ pub fn subgraph(
 
     let starts: Vec<&str> = start_nodes.iter().map(String::as_str).collect();
     let mv = max_visited(options);
-    let edges = csr.subgraph(&starts, edge_label, depth, mv);
+    let edges = csr.subgraph(&starts, edge_label, Direction::Out, depth, mv, None);
 
     let columns = vec!["src".to_string(), "label".to_string(), "dst".to_string()];
     let rows = edges

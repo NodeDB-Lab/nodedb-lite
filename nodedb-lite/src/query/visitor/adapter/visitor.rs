@@ -13,11 +13,16 @@ use nodedb_sql::fts_types::FtsQuery;
 use nodedb_sql::temporal::TemporalScope;
 use nodedb_sql::types::SqlValue;
 use nodedb_sql::types::filter::Filter;
-use nodedb_sql::types::plan::VectorAnnOptions;
-use nodedb_sql::types::query::{EngineType, Projection, SortKey, WindowSpec};
-use nodedb_sql::types_expr::{SqlExpr, SqlPayloadAtom};
+use nodedb_sql::types::query::EngineType;
+use nodedb_sql::types_expr::SqlExpr;
+use nodedb_sql::{
+    AggregateVisitArgs, CreateArrayVisitArgs, DocumentIndexLookupVisitArgs,
+    HybridSearchTripleVisitArgs, HybridSearchVisitArgs, InsertVisitArgs, JoinVisitArgs,
+    LateralLoopVisitArgs, LateralTopKVisitArgs, MergeVisitArgs, RecursiveScanVisitArgs,
+    RecursiveValueVisitArgs, ScanVisitArgs, SpatialScanVisitArgs, TimeseriesScanVisitArgs,
+    UpdateFromVisitArgs, UpsertVisitArgs, VectorSearchVisitArgs,
+};
 use nodedb_types::result::QueryResult;
-use nodedb_types::vector_distance::DistanceMetric;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
@@ -34,7 +39,8 @@ use crate::query::visitor::queries::{
 };
 use crate::query::visitor::recursive::{lower_recursive_scan, lower_recursive_value};
 use crate::query::visitor::search::{
-    lower_hybrid_search, lower_hybrid_search_triple, lower_multi_vector_search, lower_spatial_scan,
+    lower_hybrid_search, lower_hybrid_search_triple, lower_multi_vector_search,
+    lower_sparse_search, lower_spatial_scan,
 };
 use crate::query::visitor::set_ops::{lower_except, lower_intersect, lower_union};
 use crate::query::visitor::timeseries::{lower_timeseries_ingest, lower_timeseries_scan};
@@ -73,20 +79,20 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         lower_constant_result(self.engine, columns, values)
     }
 
-    fn scan(
-        &mut self,
-        collection: &str,
-        _alias: Option<&str>,
-        engine_type: EngineType,
-        filters: &[Filter],
-        _projection: &[Projection],
-        sort_keys: &[SortKey],
-        limit: Option<usize>,
-        offset: usize,
-        distinct: bool,
-        window_functions: &[WindowSpec],
-        temporal: &TemporalScope,
-    ) -> Result<LiteFut<'a>, LiteError> {
+    fn scan(&mut self, args: ScanVisitArgs<'_>) -> Result<LiteFut<'a>, LiteError> {
+        let ScanVisitArgs {
+            collection,
+            alias: _alias,
+            engine: engine_type,
+            filters,
+            projection: _projection,
+            sort_keys,
+            limit,
+            offset,
+            distinct,
+            window_functions,
+            temporal,
+        } = args;
         lower_scan(
             self.engine,
             collection,
@@ -112,16 +118,16 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         lower_point_get(self.engine, collection, engine_type, key_value)
     }
 
-    fn insert(
-        &mut self,
-        collection: &str,
-        engine_type: EngineType,
-        rows: &[Vec<(String, SqlValue)>],
-        _column_defaults: &[(String, String)],
-        if_absent: bool,
-        _column_schema: &[(String, String)],
-        primary_key: Option<&str>,
-    ) -> Result<LiteFut<'a>, LiteError> {
+    fn insert(&mut self, args: InsertVisitArgs<'_>) -> Result<LiteFut<'a>, LiteError> {
+        let InsertVisitArgs {
+            collection,
+            engine: engine_type,
+            rows,
+            column_defaults: _column_defaults,
+            if_absent,
+            column_schema: _column_schema,
+            primary_key,
+        } = args;
         lower_insert(
             self.engine,
             collection,
@@ -132,16 +138,16 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         )
     }
 
-    fn upsert(
-        &mut self,
-        collection: &str,
-        engine_type: EngineType,
-        rows: &[Vec<(String, SqlValue)>],
-        _column_defaults: &[(String, String)],
-        _on_conflict_updates: &[(String, SqlExpr)],
-        _column_schema: &[(String, String)],
-        primary_key: Option<&str>,
-    ) -> Result<LiteFut<'a>, LiteError> {
+    fn upsert(&mut self, args: UpsertVisitArgs<'_>) -> Result<LiteFut<'a>, LiteError> {
+        let UpsertVisitArgs {
+            collection,
+            engine: engine_type,
+            rows,
+            column_defaults: _column_defaults,
+            on_conflict_updates: _on_conflict_updates,
+            column_schema: _column_schema,
+            primary_key,
+        } = args;
         lower_insert(
             self.engine,
             collection,
@@ -188,20 +194,20 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         lower_truncate(self.engine, collection)
     }
 
-    fn vector_search(
-        &mut self,
-        collection: &str,
-        field: &str,
-        query_vector: &[f32],
-        top_k: usize,
-        ef_search: usize,
-        metric: DistanceMetric,
-        filters: &[Filter],
-        array_prefilter: Option<&nodedb_sql::types::plan::ArrayPrefilter>,
-        ann_options: &VectorAnnOptions,
-        skip_payload_fetch: bool,
-        payload_filters: &[SqlPayloadAtom],
-    ) -> Result<LiteFut<'a>, LiteError> {
+    fn vector_search(&mut self, args: VectorSearchVisitArgs<'_>) -> Result<LiteFut<'a>, LiteError> {
+        let VectorSearchVisitArgs {
+            collection,
+            field,
+            query_vector,
+            top_k,
+            ef_search,
+            metric,
+            filters,
+            array_prefilter,
+            ann_options,
+            skip_payload_fetch,
+            payload_filters,
+        } = args;
         lower_vector_search(
             self.engine,
             collection,
@@ -231,21 +237,24 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
 
     fn document_index_lookup(
         &mut self,
-        collection: &str,
-        alias: Option<&str>,
-        engine_type: EngineType,
-        field: &str,
-        value: &SqlValue,
-        filters: &[Filter],
-        projection: &[Projection],
-        sort_keys: &[SortKey],
-        limit: Option<usize>,
-        offset: usize,
-        distinct: bool,
-        window_functions: &[WindowSpec],
-        case_insensitive: bool,
-        temporal: &TemporalScope,
+        args: DocumentIndexLookupVisitArgs<'_>,
     ) -> Result<LiteFut<'a>, LiteError> {
+        let DocumentIndexLookupVisitArgs {
+            collection,
+            alias,
+            engine: engine_type,
+            field,
+            value,
+            filters,
+            projection,
+            sort_keys,
+            limit,
+            offset,
+            distinct,
+            window_functions,
+            case_insensitive,
+            temporal,
+        } = args;
         lower_document_index_lookup(
             self.engine,
             collection,
@@ -285,17 +294,17 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         lower_insert_select(self.engine, target, source, limit)
     }
 
-    fn update_from(
-        &mut self,
-        collection: &str,
-        engine: EngineType,
-        source: &nodedb_sql::types::SqlPlan,
-        target_join_col: &str,
-        source_join_col: &str,
-        assignments: &[(String, SqlExpr)],
-        target_filters: &[Filter],
-        returning: bool,
-    ) -> Result<LiteFut<'a>, LiteError> {
+    fn update_from(&mut self, args: UpdateFromVisitArgs<'_>) -> Result<LiteFut<'a>, LiteError> {
+        let UpdateFromVisitArgs {
+            collection,
+            engine,
+            source,
+            target_join_col,
+            source_join_col,
+            assignments,
+            target_filters,
+            returning,
+        } = args;
         lower_update_from(
             self.engine,
             collection,
@@ -309,17 +318,17 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         )
     }
 
-    fn join(
-        &mut self,
-        left: &nodedb_sql::types::SqlPlan,
-        right: &nodedb_sql::types::SqlPlan,
-        on: &[(String, String)],
-        join_type: nodedb_sql::types::query::JoinType,
-        condition: Option<&SqlExpr>,
-        limit: Option<usize>,
-        projection: &[Projection],
-        filters: &[Filter],
-    ) -> Result<LiteFut<'a>, LiteError> {
+    fn join(&mut self, args: JoinVisitArgs<'_>) -> Result<LiteFut<'a>, LiteError> {
+        let JoinVisitArgs {
+            left,
+            right,
+            on,
+            join_type,
+            condition,
+            limit,
+            projection,
+            filters,
+        } = args;
         lower_join(
             self.engine,
             left,
@@ -333,16 +342,16 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         )
     }
 
-    fn aggregate(
-        &mut self,
-        input: &nodedb_sql::types::SqlPlan,
-        group_by: &[SqlExpr],
-        aggregates: &[nodedb_sql::types::query::AggregateExpr],
-        having: &[Filter],
-        limit: usize,
-        grouping_sets: Option<&[Vec<usize>]>,
-        sort_keys: &[SortKey],
-    ) -> Result<LiteFut<'a>, LiteError> {
+    fn aggregate(&mut self, args: AggregateVisitArgs<'_>) -> Result<LiteFut<'a>, LiteError> {
+        let AggregateVisitArgs {
+            input,
+            group_by,
+            aggregates,
+            having,
+            limit,
+            grouping_sets,
+            sort_keys,
+        } = args;
         lower_aggregate(
             self.engine,
             input,
@@ -389,17 +398,17 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         lower_cte(self.engine, definitions, outer)
     }
 
-    fn merge(
-        &mut self,
-        target: &str,
-        engine: EngineType,
-        source: &nodedb_sql::types::SqlPlan,
-        target_join_col: &str,
-        source_join_col: &str,
-        source_alias: &str,
-        clauses: &[nodedb_sql::types::plan::MergePlanClause],
-        returning: bool,
-    ) -> Result<LiteFut<'a>, LiteError> {
+    fn merge(&mut self, args: MergeVisitArgs<'_>) -> Result<LiteFut<'a>, LiteError> {
+        let MergeVisitArgs {
+            target,
+            engine,
+            source,
+            target_join_col,
+            source_join_col,
+            source_alias,
+            clauses,
+            returning,
+        } = args;
         lower_merge(
             self.engine,
             target,
@@ -423,17 +432,27 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         lower_multi_vector_search(self.engine, collection, query_vector, top_k, ef_search)
     }
 
-    fn hybrid_search(
+    fn sparse_search(
         &mut self,
         collection: &str,
-        query_vector: &[f32],
-        query_text: &str,
+        field: &str,
+        query_entries: &[(u32, f32)],
         top_k: usize,
-        ef_search: usize,
-        vector_weight: f32,
-        fuzzy: bool,
-        score_alias: Option<&str>,
     ) -> Result<LiteFut<'a>, LiteError> {
+        lower_sparse_search(self.engine, collection, field, query_entries, top_k)
+    }
+
+    fn hybrid_search(&mut self, args: HybridSearchVisitArgs<'_>) -> Result<LiteFut<'a>, LiteError> {
+        let HybridSearchVisitArgs {
+            collection,
+            query_vector,
+            query_text,
+            top_k,
+            ef_search,
+            vector_weight,
+            fuzzy,
+            score_alias,
+        } = args;
         lower_hybrid_search(
             self.engine,
             collection,
@@ -449,18 +468,21 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
 
     fn hybrid_search_triple(
         &mut self,
-        collection: &str,
-        query_vector: &[f32],
-        query_text: &str,
-        graph_seed_id: &str,
-        graph_depth: usize,
-        graph_edge_label: Option<&str>,
-        top_k: usize,
-        ef_search: usize,
-        fuzzy: bool,
-        rrf_k: (f64, f64, f64),
-        score_alias: Option<&str>,
+        args: HybridSearchTripleVisitArgs<'_>,
     ) -> Result<LiteFut<'a>, LiteError> {
+        let HybridSearchTripleVisitArgs {
+            collection,
+            query_vector,
+            query_text,
+            graph_seed_id,
+            graph_depth,
+            graph_edge_label,
+            top_k,
+            ef_search,
+            fuzzy,
+            rrf_k,
+            score_alias,
+        } = args;
         lower_hybrid_search_triple(
             self.engine,
             collection,
@@ -477,17 +499,17 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         )
     }
 
-    fn spatial_scan(
-        &mut self,
-        collection: &str,
-        field: &str,
-        predicate: &nodedb_sql::types::query::SpatialPredicate,
-        query_geometry: &nodedb_types::geometry::Geometry,
-        distance_meters: f64,
-        attribute_filters: &[Filter],
-        limit: usize,
-        projection: &[Projection],
-    ) -> Result<LiteFut<'a>, LiteError> {
+    fn spatial_scan(&mut self, args: SpatialScanVisitArgs<'_>) -> Result<LiteFut<'a>, LiteError> {
+        let SpatialScanVisitArgs {
+            collection,
+            field,
+            predicate,
+            query_geometry,
+            distance_meters,
+            attribute_filters,
+            limit,
+            projection,
+        } = args;
         lower_spatial_scan(
             self.engine,
             collection,
@@ -503,18 +525,21 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
 
     fn timeseries_scan(
         &mut self,
-        collection: &str,
-        time_range: (i64, i64),
-        bucket_interval_ms: i64,
-        group_by: &[String],
-        aggregates: &[nodedb_sql::types::query::AggregateExpr],
-        filters: &[Filter],
-        projection: &[Projection],
-        gap_fill: &str,
-        limit: usize,
-        tiered: bool,
-        temporal: &TemporalScope,
+        args: TimeseriesScanVisitArgs<'_>,
     ) -> Result<LiteFut<'a>, LiteError> {
+        let TimeseriesScanVisitArgs {
+            collection,
+            time_range,
+            bucket_interval_ms,
+            group_by,
+            aggregates,
+            filters,
+            projection,
+            gap_fill,
+            limit,
+            tiered,
+            temporal,
+        } = args;
         lower_timeseries_scan(
             self.engine,
             collection,
@@ -561,14 +586,17 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
 
     fn recursive_scan(
         &mut self,
-        collection: &str,
-        base_filters: &[Filter],
-        recursive_filters: &[Filter],
-        join_link: Option<&(String, String)>,
-        max_iterations: usize,
-        distinct: bool,
-        limit: usize,
+        args: RecursiveScanVisitArgs<'_>,
     ) -> Result<LiteFut<'a>, LiteError> {
+        let RecursiveScanVisitArgs {
+            collection,
+            base_filters,
+            recursive_filters,
+            join_link,
+            max_iterations,
+            distinct,
+            limit,
+        } = args;
         lower_recursive_scan(
             self.engine,
             collection,
@@ -583,14 +611,17 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
 
     fn recursive_value(
         &mut self,
-        cte_name: &str,
-        columns: &[String],
-        init_exprs: &[String],
-        step_exprs: &[String],
-        condition: Option<&str>,
-        max_depth: usize,
-        distinct: bool,
+        args: RecursiveValueVisitArgs<'_>,
     ) -> Result<LiteFut<'a>, LiteError> {
+        let RecursiveValueVisitArgs {
+            cte_name,
+            columns,
+            init_exprs,
+            step_exprs,
+            condition,
+            max_depth,
+            distinct,
+        } = args;
         lower_recursive_value(
             self.engine,
             cte_name,
@@ -603,19 +634,19 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         )
     }
 
-    fn lateral_top_k(
-        &mut self,
-        outer: &nodedb_sql::types::SqlPlan,
-        outer_alias: Option<&str>,
-        inner_collection: &str,
-        inner_filters: &[Filter],
-        inner_order_by: &[SortKey],
-        inner_limit: usize,
-        correlation_keys: &[(String, String)],
-        lateral_alias: &str,
-        projection: &[Projection],
-        left_join: bool,
-    ) -> Result<LiteFut<'a>, LiteError> {
+    fn lateral_top_k(&mut self, args: LateralTopKVisitArgs<'_>) -> Result<LiteFut<'a>, LiteError> {
+        let LateralTopKVisitArgs {
+            outer,
+            outer_alias,
+            inner_collection,
+            inner_filters,
+            inner_order_by,
+            inner_limit,
+            correlation_keys,
+            lateral_alias,
+            projection,
+            left_join,
+        } = args;
         lower_lateral_top_k(
             self.engine,
             outer,
@@ -631,17 +662,17 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         )
     }
 
-    fn lateral_loop(
-        &mut self,
-        outer: &nodedb_sql::types::SqlPlan,
-        outer_alias: Option<&str>,
-        inner: &nodedb_sql::types::SqlPlan,
-        correlation_predicates: &[(String, String)],
-        lateral_alias: &str,
-        projection: &[Projection],
-        outer_row_cap: usize,
-        left_join: bool,
-    ) -> Result<LiteFut<'a>, LiteError> {
+    fn lateral_loop(&mut self, args: LateralLoopVisitArgs<'_>) -> Result<LiteFut<'a>, LiteError> {
+        let LateralLoopVisitArgs {
+            outer,
+            outer_alias,
+            inner,
+            correlation_predicates,
+            lateral_alias,
+            projection,
+            outer_row_cap,
+            left_join,
+        } = args;
         lower_lateral_loop(
             self.engine,
             outer,
@@ -673,18 +704,18 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         )
     }
 
-    fn create_array(
-        &mut self,
-        name: &str,
-        dims: &[nodedb_sql::types_array::ArrayDimAst],
-        attrs: &[nodedb_sql::types_array::ArrayAttrAst],
-        tile_extents: &[i64],
-        cell_order: nodedb_sql::types_array::ArrayCellOrderAst,
-        tile_order: nodedb_sql::types_array::ArrayTileOrderAst,
-        prefix_bits: u8,
-        audit_retain_ms: Option<u64>,
-        minimum_audit_retain_ms: Option<u64>,
-    ) -> Result<LiteFut<'a>, LiteError> {
+    fn create_array(&mut self, args: CreateArrayVisitArgs<'_>) -> Result<LiteFut<'a>, LiteError> {
+        let CreateArrayVisitArgs {
+            name,
+            dims,
+            attrs,
+            tile_extents,
+            cell_order,
+            tile_order,
+            prefix_bits,
+            audit_retain_ms,
+            minimum_audit_retain_ms,
+        } = args;
         lower_create_array(
             self.engine,
             name,

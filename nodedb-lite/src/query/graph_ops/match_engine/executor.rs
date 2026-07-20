@@ -139,12 +139,15 @@ fn execute_triple(
     if triple.edge.is_variable_length() {
         for src_name in &src_nodes {
             let expanded = csr.traverse_bfs(
-                &[src_name.as_str()],
-                label_filter,
-                direction,
-                triple.edge.max_hops,
-                50_000,
-                frontier_bitmap,
+                nodedb_graph::BfsParams {
+                    start_nodes: &[src_name.as_str()],
+                    label_filter,
+                    direction,
+                    max_depth: triple.edge.max_hops,
+                    max_visited: 50_000,
+                    frontier_bitmap,
+                },
+                None,
             );
             for dst_name in expanded {
                 if dst_name == *src_name && triple.edge.min_hops > 0 {

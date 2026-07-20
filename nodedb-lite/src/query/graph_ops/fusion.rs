@@ -141,11 +141,14 @@ pub async fn rag_fusion<S: StorageEngine>(
                 .saturating_mul(vector_top_k)
                 .max(DEFAULT_MAX_VISITED);
             let expanded = csr.traverse_bfs(
-                &starts,
-                edge_label,
-                direction,
-                expansion_depth,
-                max_vis,
+                nodedb_graph::BfsParams {
+                    start_nodes: &starts,
+                    label_filter: edge_label,
+                    direction,
+                    max_depth: expansion_depth,
+                    max_visited: max_vis,
+                    frontier_bitmap: None,
+                },
                 None,
             );
 
@@ -302,6 +305,7 @@ mod tests {
             vector_state,
             array_state,
             fts_state,
+            Arc::new(crate::engine::sparse_vector::SparseVectorState::new()),
             spatial,
             Arc::new(Mutex::new(std::collections::HashMap::new())),
         )

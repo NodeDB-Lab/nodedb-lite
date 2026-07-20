@@ -154,6 +154,7 @@ mod tests {
             vector_state,
             array_state,
             fts_state,
+            Arc::new(crate::engine::sparse_vector::SparseVectorState::new()),
             spatial,
             Arc::new(Mutex::new(std::collections::HashMap::new())),
         )

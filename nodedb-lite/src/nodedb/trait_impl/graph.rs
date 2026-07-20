@@ -401,11 +401,14 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let csr_map = self.csr.lock_or_recover();
         let path = match csr_map.get(collection) {
             Some(csr) => csr.shortest_path(
-                from.as_str(),
-                to.as_str(),
-                label_filter,
-                max_depth as usize,
-                DEFAULT_MAX_VISITED,
+                nodedb_graph::ShortestPathParams {
+                    src: from.as_str(),
+                    dst: to.as_str(),
+                    label_filter,
+                    max_depth: max_depth as usize,
+                    max_visited: DEFAULT_MAX_VISITED,
+                    frontier_bitmap: None,
+                },
                 None,
             ),
             None => None,

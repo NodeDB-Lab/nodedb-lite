@@ -11,8 +11,8 @@ use tokio_tungstenite::tungstenite::Message;
 
 use nodedb_types::sync::wire::SyncMessageType;
 
-use super::send::{encode_and_send, send_binary};
 use super::super::delegate::SyncDelegate;
+use super::send::{encode_and_send, send_binary};
 use crate::sync::client::{SyncClient, SyncState};
 
 /// Maximum age of an unACK'd in-flight entry before it is evicted by the stale-
@@ -59,7 +59,10 @@ pub(in crate::sync::transport) async fn delta_push_loop<S>(
         {
             return;
         }
-        if super::columnar::push(client, delegate, sink).await.is_break() {
+        if super::columnar::push(client, delegate, sink)
+            .await
+            .is_break()
+        {
             return;
         }
         if super::vector::push(client, delegate, sink).await.is_break() {
@@ -68,10 +71,16 @@ pub(in crate::sync::transport) async fn delta_push_loop<S>(
         if super::fts::push(client, delegate, sink).await.is_break() {
             return;
         }
-        if super::spatial::push(client, delegate, sink).await.is_break() {
+        if super::spatial::push(client, delegate, sink)
+            .await
+            .is_break()
+        {
             return;
         }
-        if super::timeseries::push(client, delegate, sink).await.is_break() {
+        if super::timeseries::push(client, delegate, sink)
+            .await
+            .is_break()
+        {
             return;
         }
         if super::control::push_collection_schemas(client, delegate, sink)

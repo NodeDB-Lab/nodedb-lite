@@ -18,7 +18,9 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::document_ops::is_strict;
-use crate::query::document_ops::sets::{collect_ids_pub, fetch_document_value_pub};
+use crate::query::document_ops::sets::{
+    build_insert_map, collect_ids_pub, fetch_document_value_pub,
+};
 use crate::query::document_ops::writes::{point_delete, point_insert, point_update};
 use crate::query::engine::LiteQueryEngine;
 use crate::query::filter_convert::sql_value_to_value;
@@ -303,13 +305,13 @@ pub(super) fn lower_merge<'a, S: StorageEngine + 'a>(
                 None => continue,
             };
 
-            if source_index.contains_key(&join_key) {
+            if let Some(source_row) = source_index.get(&join_key) {
                 matched_source_keys.insert(join_key.clone());
                 let arm = phys_clauses
                     .iter()
                     .find(|c| c.kind == MergeClauseKind::Matched);
                 if let Some(arm) = arm {
-                    apply_merge_action(engine, &target, doc_id, &arm.action).await?;
+                    apply_merge_action(engine, &target, doc_id, &arm.action, source_row).await?;
                     affected += 1;
                 }
             } else {
@@ -317,7 +319,10 @@ pub(super) fn lower_merge<'a, S: StorageEngine + 'a>(
                     .iter()
                     .find(|c| c.kind == MergeClauseKind::NotMatchedBySource);
                 if let Some(arm) = arm {
-                    apply_merge_action(engine, &target, doc_id, &arm.action).await?;
+                    // No source row for this target — NOT MATCHED BY SOURCE arms
+                    // are UPDATE/DELETE only, so an empty source suffices.
+                    apply_merge_action(engine, &target, doc_id, &arm.action, &HashMap::new())
+                        .await?;
                     affected += 1;
                 }
             }
@@ -331,7 +336,7 @@ pub(super) fn lower_merge<'a, S: StorageEngine + 'a>(
             for (source_key, source_row) in &source_index {
                 if !matched_source_keys.contains(source_key) {
                     let doc_id = extract_id(source_row);
-                    apply_merge_action(engine, &target, &doc_id, &arm.action).await?;
+                    apply_merge_action(engine, &target, &doc_id, &arm.action, source_row).await?;
                     affected += 1;
                 }
             }
@@ -350,6 +355,7 @@ async fn apply_merge_action<S: StorageEngine>(
     target: &str,
     doc_id: &str,
     action: &MergeActionOp,
+    source_row: &HashMap<String, Value>,
 ) -> Result<(), LiteError> {
     match action {
         MergeActionOp::Update { updates } => {
@@ -359,14 +365,10 @@ async fn apply_merge_action<S: StorageEngine>(
             point_delete(engine, target, doc_id).await?;
         }
         MergeActionOp::Insert { columns, values } => {
-            let mut row_map: HashMap<String, Value> = HashMap::new();
-            for (col, val_bytes) in columns.iter().zip(values.iter()) {
-                let val: Value =
-                    zerompk::from_msgpack(val_bytes).map_err(|e| LiteError::Serialization {
-                        detail: format!("decode merge insert value '{col}': {e}"),
-                    })?;
-                row_map.insert(col.clone(), val);
-            }
+            // Evaluate each value against the source row: literals decode
+            // directly, expressions (`s.new_embedding`, `s.qty * 2`) evaluate
+            // against the bare-keyed source fields. Result keyed by target column.
+            let row_map = build_insert_map(columns, values, source_row)?;
             let id = extract_id(&row_map);
             let bytes = row_to_msgpack(&row_map)?;
             point_insert(engine, target, &id, &bytes, true).await?;
@@ -402,21 +404,16 @@ fn convert_merge_action(action: &MergePlanAction) -> Result<MergeActionOp, LiteE
         }
         MergePlanAction::Delete => Ok(MergeActionOp::Delete),
         MergePlanAction::Insert { columns, values } => {
-            let encoded: Result<Vec<Vec<u8>>, LiteError> = values
+            // Literal values are pre-encoded; source-referencing expressions
+            // (`s.new_embedding`, `s.qty * 2`) are carried as `UpdateValue::Expr`
+            // and evaluated against the source row at apply time.
+            let encoded = values
                 .iter()
-                .map(|v| {
-                    let ndb_val = match v {
-                        SqlExpr::Literal(sv) => sql_value_to_value(sv)?,
-                        _ => Value::Null,
-                    };
-                    zerompk::to_msgpack_vec(&ndb_val).map_err(|e| LiteError::Serialization {
-                        detail: format!("encode merge insert value: {e}"),
-                    })
-                })
-                .collect();
+                .map(expr_to_update_value)
+                .collect::<Result<Vec<_>, LiteError>>()?;
             Ok(MergeActionOp::Insert {
                 columns: columns.clone(),
-                values: encoded?,
+                values: encoded,
             })
         }
         MergePlanAction::DoNothing => Ok(MergeActionOp::DoNothing),

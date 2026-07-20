@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use nodedb_physical::physical_plan::query::AggregateSpec;
+use nodedb_query::expr::GroupKeySpec;
 use nodedb_query::scan_filter::ScanFilter;
 use nodedb_query::simd_agg::ts_runtime;
 use nodedb_query::simd_agg_i64::i64_runtime;
@@ -24,7 +25,7 @@ type GroupMap = HashMap<String, (Vec<Value>, Vec<HashMap<String, Value>>)>;
 /// Execute a full Aggregate: apply filters, group, aggregate, HAVING, sort.
 pub fn execute_aggregate(
     rows: Vec<HashMap<String, Value>>,
-    group_by: &[String],
+    group_by: &[GroupKeySpec],
     aggregates: &[AggregateSpec],
     filters: &[u8],
     having: &[u8],
@@ -58,7 +59,7 @@ pub fn execute_aggregate(
         // GROUPING SETS: union results for each subset.
         let mut all_rows: Vec<Vec<Value>> = Vec::new();
         for set_indices in grouping_sets {
-            let subset: Vec<String> = set_indices
+            let subset: Vec<GroupKeySpec> = set_indices
                 .iter()
                 .filter_map(|&i| group_by.get(i as usize).cloned())
                 .collect();
@@ -99,6 +100,10 @@ pub fn execute_partial_aggregate(
     aggregates: &[AggregateSpec],
     filters: &[u8],
 ) -> Result<QueryResult, LiteError> {
+    // `QueryOp::PartialAggregate` groups by bare column names only, so the
+    // column → spec lift is lossless here.
+    let group_by: Vec<GroupKeySpec> = group_by.iter().map(GroupKeySpec::column).collect();
+    let group_by = group_by.as_slice();
     let scan_filters = decode_filters(filters)?;
     let filtered: Vec<HashMap<String, Value>> = rows
         .into_iter()
@@ -145,12 +150,12 @@ fn decode_filters(bytes: &[u8]) -> Result<Vec<ScanFilter>, LiteError> {
 /// `Value` does not implement `Hash`/`Eq`, so we use a string serialisation of
 /// the key for the `HashMap` discriminant and carry the original `Vec<Value>`
 /// alongside for output.
-pub(crate) fn group_rows(rows: &[HashMap<String, Value>], group_by: &[String]) -> GroupMap {
+pub(crate) fn group_rows(rows: &[HashMap<String, Value>], group_by: &[GroupKeySpec]) -> GroupMap {
     let mut groups: GroupMap = HashMap::new();
     for row in rows {
         let key: Vec<Value> = group_by
             .iter()
-            .map(|col| row.get(col).cloned().unwrap_or(Value::Null))
+            .map(|spec| group_key_value(row, spec))
             .collect();
         let key_str = value_key_str(&key);
         groups
@@ -160,6 +165,19 @@ pub(crate) fn group_rows(rows: &[HashMap<String, Value>], group_by: &[String]) -
             .push(row.clone());
     }
     groups
+}
+
+/// Resolve one group key for a row.
+///
+/// A spec carrying an expression (e.g. `GROUP BY date_trunc('day', ts)`) is
+/// evaluated against the row; otherwise the named field is extracted directly.
+/// A spec with neither groups everything under `Null`.
+fn group_key_value(row: &HashMap<String, Value>, spec: &GroupKeySpec) -> Value {
+    match (&spec.expr, &spec.field) {
+        (Some(expr), _) => expr.eval(&Value::Object(row.clone())),
+        (None, Some(field)) => row.get(field).cloned().unwrap_or(Value::Null),
+        (None, None) => Value::Null,
+    }
 }
 
 /// Stable string discriminant for a `Vec<Value>` group key.
@@ -187,7 +205,7 @@ pub(crate) fn value_discriminant(v: &Value) -> String {
 
 fn compute_aggregate_groups(
     groups: GroupMap,
-    _group_by: &[String],
+    _group_by: &[GroupKeySpec],
     aggregates: &[AggregateSpec],
 ) -> Result<Vec<Vec<Value>>, LiteError> {
     let mut result = Vec::with_capacity(groups.len());
@@ -309,7 +327,7 @@ fn collect_numeric(group: &[HashMap<String, Value>], field: &str) -> (Vec<f64>, 
 fn apply_having(
     rows: &mut Vec<Vec<Value>>,
     having: &[ScanFilter],
-    group_by: &[String],
+    group_by: &[GroupKeySpec],
     aggregates: &[AggregateSpec],
 ) {
     if having.is_empty() {
@@ -329,7 +347,7 @@ fn apply_having(
 fn apply_sort(
     rows: &mut [Vec<Value>],
     sort_keys: &[(String, bool)],
-    group_by: &[String],
+    group_by: &[GroupKeySpec],
     aggregates: &[AggregateSpec],
 ) {
     if sort_keys.is_empty() {
@@ -371,8 +389,8 @@ pub(crate) fn value_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 }
 
-pub(crate) fn make_columns(group_by: &[String], aggregates: &[AggregateSpec]) -> Vec<String> {
-    let mut cols: Vec<String> = group_by.to_vec();
+pub(crate) fn make_columns(group_by: &[GroupKeySpec], aggregates: &[AggregateSpec]) -> Vec<String> {
+    let mut cols: Vec<String> = group_by.iter().map(|s| s.output_name.clone()).collect();
     for spec in aggregates {
         if let Some(alias) = &spec.user_alias {
             cols.push(alias.clone());
@@ -389,6 +407,7 @@ pub(crate) fn make_columns(group_by: &[String], aggregates: &[AggregateSpec]) ->
 mod tests {
     use super::*;
     use nodedb_physical::physical_plan::query::AggregateSpec;
+    use nodedb_query::expr::{BinaryOp, SqlExpr};
 
     fn make_spec(function: &str, field: &str, alias: &str) -> AggregateSpec {
         AggregateSpec {
@@ -430,7 +449,7 @@ mod tests {
 
         let result = execute_aggregate(
             rows,
-            &["category".to_string()],
+            &[GroupKeySpec::column("category")],
             &aggregates,
             &[],
             &having_bytes,
@@ -452,5 +471,40 @@ mod tests {
             execute_partial_aggregate(rows, &["category".to_string()], &aggregates, &[]).unwrap();
         assert_eq!(result.columns[0], "__partial");
         assert_eq!(result.rows[0][0], Value::Bool(true));
+    }
+
+    #[test]
+    fn group_by_computed_expression_key() {
+        // GROUP BY on a computed key (count + count) rather than a bare column:
+        // rows with counts 1 and 3 collapse into distinct groups 2 and 6, while
+        // the two rows with count 1 share a group.
+        let rows = make_rows(&[("a", 1, 10.0), ("b", 1, 20.0), ("c", 3, 5.0)]);
+        let aggregates = vec![make_spec("COUNT", "*", "cnt")];
+
+        let doubled = GroupKeySpec {
+            output_name: "doubled".to_string(),
+            field: None,
+            expr: Some(SqlExpr::BinaryOp {
+                left: Box::new(SqlExpr::Column("count".to_string())),
+                op: BinaryOp::Add,
+                right: Box::new(SqlExpr::Column("count".to_string())),
+            }),
+        };
+
+        let result = execute_aggregate(rows, &[doubled], &aggregates, &[], &[], &[], &[]).unwrap();
+
+        assert_eq!(result.columns[0], "doubled");
+        assert_eq!(result.rows.len(), 2);
+
+        let mut got: Vec<(i64, i64)> = result
+            .rows
+            .iter()
+            .filter_map(|r| match (&r[0], &r[1]) {
+                (Value::Integer(k), Value::Integer(n)) => Some((*k, *n)),
+                _ => None,
+            })
+            .collect();
+        got.sort_unstable();
+        assert_eq!(got, vec![(2, 2), (6, 1)]);
     }
 }

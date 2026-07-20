@@ -197,7 +197,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 {
                     if seg_ext.is_some() {
                         // Graph-only blob (vector bytes are empty placeholders).
-                        let graph_bytes = index.graph_checkpoint_to_bytes();
+                        let graph_bytes = index
+                            .graph_checkpoint_to_bytes()
+                            .map_err(|e| NodeDbError::serialization("hnsw-graph-checkpoint", e))?;
                         ops.push(WriteOp::Put {
                             ns: Namespace::Vector,
                             key: key.into_bytes(),
@@ -209,7 +211,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
                         segment_data.push((name.clone(), dim, vectors, surrogates));
                     } else {
                         // Non-pagedb native backend: full checkpoint blob path.
-                        let checkpoint = index.checkpoint_to_bytes();
+                        let checkpoint = index
+                            .checkpoint_to_bytes()
+                            .map_err(|e| NodeDbError::serialization("hnsw-checkpoint", e))?;
                         ops.push(WriteOp::Put {
                             ns: Namespace::Vector,
                             key: key.into_bytes(),

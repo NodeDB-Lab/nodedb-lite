@@ -23,7 +23,11 @@ async fn open_lite() -> Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()
         .await
         .expect("open_in_memory");
-    Arc::new(NodeDbLite::open(storage, 1).await.expect("NodeDbLite::open"))
+    Arc::new(
+        NodeDbLite::open(storage, 1)
+            .await
+            .expect("NodeDbLite::open"),
+    )
 }
 
 /// A pure-vector collection created only via `vector_insert` (no
@@ -61,7 +65,10 @@ async fn unknown_collection_has_no_meta() {
     let lite = open_lite().await;
     let delegate = Arc::clone(&lite) as Arc<dyn SyncDelegate>;
     assert!(
-        delegate.get_collection_meta("never_created").await.is_none(),
+        delegate
+            .get_collection_meta("never_created")
+            .await
+            .is_none(),
         "a collection with no persisted meta and no CRDT state must resolve None"
     );
 }

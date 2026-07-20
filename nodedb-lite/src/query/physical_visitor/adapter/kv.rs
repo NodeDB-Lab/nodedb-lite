@@ -167,6 +167,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             collection,
             entries,
             ttl_ms,
+            surrogates: _,
         } => {
             let col = collection.clone();
             let ents = entries.clone();
@@ -209,6 +210,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             key,
             delta,
             ttl_ms,
+            surrogate: _,
         } => {
             let col = collection.clone();
             let k = key.clone();
@@ -223,6 +225,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             collection,
             key,
             delta,
+            surrogate: _,
         } => {
             let col = collection.clone();
             let k = key.clone();
@@ -237,6 +240,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             key,
             expected,
             new_value,
+            surrogate: _,
         } => {
             let col = collection.clone();
             let k = key.clone();
@@ -251,6 +255,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             collection,
             key,
             new_value,
+            surrogate: _,
         } => {
             let col = collection.clone();
             let k = key.clone();
@@ -264,6 +269,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             collection,
             key,
             updates,
+            surrogate: _,
         } => {
             let col = collection.clone();
             let k = key.clone();
@@ -279,6 +285,8 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             dest_key,
             field,
             amount,
+            debit_surrogate: _,
+            credit_surrogate: _,
         } => {
             let col = collection.clone();
             let src = source_key.clone();
@@ -295,6 +303,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             dest_collection,
             item_key,
             dest_key,
+            surrogate: _,
         } => {
             let src_col = source_collection.clone();
             let dst_col = dest_collection.clone();

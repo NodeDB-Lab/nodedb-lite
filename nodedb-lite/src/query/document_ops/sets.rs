@@ -366,7 +366,7 @@ pub async fn merge<S: StorageEngine>(
                 .get(source_join_col)
                 .map(value_to_string)
                 .unwrap_or_else(|| key.clone());
-            let map: HashMap<String, Value> = build_insert_map(columns, values)?;
+            let map: HashMap<String, Value> = build_insert_map(columns, values, source_val)?;
             let bytes = zerompk::to_msgpack_vec(&Value::Object(map)).map_err(|e| {
                 LiteError::Serialization {
                     detail: format!("merge insert serialize: {e}"),
@@ -525,18 +525,31 @@ fn qualify_updates_with_source(
     Ok(updates.to_vec())
 }
 
-/// Decode a parallel (columns, values) pair into a field map.
-fn build_insert_map(
+/// Resolve a parallel (columns, values) pair into a field map, evaluating each
+/// value against the source row.
+///
+/// `UpdateValue::Literal` arms decode the pre-encoded msgpack directly.
+/// `UpdateValue::Expr` arms (e.g. `s.new_embedding`, `s.qty * 2`) are evaluated
+/// against the source row — Lite's `convert_sql_expr` strips table qualifiers,
+/// so column references resolve against the source row's bare field names. The
+/// result is stored under the *target* column name.
+pub(in crate::query) fn build_insert_map(
     columns: &[String],
-    values: &[Vec<u8>],
+    values: &[UpdateValue],
+    source_val: &HashMap<String, Value>,
 ) -> Result<HashMap<String, Value>, LiteError> {
+    let source_ndb = Value::Object(source_val.clone());
     let mut map = HashMap::with_capacity(columns.len());
-    for (col, val_bytes) in columns.iter().zip(values.iter()) {
-        let val: Value =
-            zerompk::from_msgpack(val_bytes).map_err(|e| LiteError::Serialization {
-                detail: format!("merge insert decode column '{col}': {e}"),
-            })?;
-        map.insert(col.clone(), val);
+    for (col, val) in columns.iter().zip(values.iter()) {
+        let resolved: Value = match val {
+            UpdateValue::Literal(bytes) => {
+                zerompk::from_msgpack(bytes).map_err(|e| LiteError::Serialization {
+                    detail: format!("merge insert decode column '{col}': {e}"),
+                })?
+            }
+            UpdateValue::Expr(expr) => expr.eval(&source_ndb),
+        };
+        map.insert(col.clone(), resolved);
     }
     Ok(map)
 }
@@ -560,7 +573,7 @@ async fn apply_merge_action<S: StorageEngine>(
             point_delete(engine, collection, doc_id).await?;
         }
         MergeActionOp::Insert { columns, values } => {
-            let map = build_insert_map(columns, values)?;
+            let map = build_insert_map(columns, values, source_val)?;
             let bytes = zerompk::to_msgpack_vec(&Value::Object(map)).map_err(|e| {
                 LiteError::Serialization {
                     detail: format!("merge action insert serialize: {e}"),

@@ -241,7 +241,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                 async move { meta_ops::handle_cancel(&registry, rid) },
             ))
         }
-        MetaOp::TransactionBatch { plans } => {
+        MetaOp::TransactionBatch { plans, txn_id: _ } => {
             let plans = plans.clone();
             Ok(Box::pin(async move {
                 meta_ops::handle_txn_batch(engine, &plans).await
@@ -291,5 +291,61 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                 meta_ops::handle_purge_tenant(&*storage, tid).await
             }))
         }
+
+        // Per-core transaction staging overlay. These address the Origin Data
+        // Plane's `CoreLoop`-owned `TxnOverlay`, which buffers not-yet-durable
+        // writes per shard core. Lite executes transactions directly against
+        // its single local store (see `nodedb/collection/transaction.rs`) and
+        // has no per-core overlay to stage into, mark, or roll back, so its
+        // planner never emits these.
+        MetaOp::StageWrite { .. } => Err(LiteError::Unsupported {
+            detail: "StageWrite targets the Data Plane per-core transaction overlay; \
+                     unsupported on the single-node Lite engine"
+                .into(),
+        }),
+        MetaOp::DropTxnOverlay { .. } => Err(LiteError::Unsupported {
+            detail: "DropTxnOverlay releases a Data Plane per-core transaction overlay; \
+                     unsupported on the single-node Lite engine"
+                .into(),
+        }),
+        MetaOp::MarkSavepoint { .. } => Err(LiteError::Unsupported {
+            detail: "MarkSavepoint marks the Data Plane per-core overlay undo journals; \
+                     unsupported on the single-node Lite engine"
+                .into(),
+        }),
+        MetaOp::RollbackToSavepoint { .. } => Err(LiteError::Unsupported {
+            detail: "RollbackToSavepoint replays Data Plane per-core overlay undo journals; \
+                     unsupported on the single-node Lite engine"
+                .into(),
+        }),
+        MetaOp::ResolveTxn { .. } => Err(LiteError::Unsupported {
+            detail: "ResolveTxn folds staged Data Plane write plans into one redo record; \
+                     unsupported on the single-node Lite engine"
+                .into(),
+        }),
+
+        // Calvin deterministic-scheduling ops. Calvin sequences transactions
+        // across a replicated log; Lite has no sequencer, Raft group, or
+        // cross-core write-version registry, so these are unreachable here.
+        MetaOp::CalvinFlush { .. } => Err(LiteError::Unsupported {
+            detail: "CalvinFlush is a deterministic-scheduler op; \
+                     unsupported on the single-node Lite engine"
+                .into(),
+        }),
+        MetaOp::CalvinResolve { .. } => Err(LiteError::Unsupported {
+            detail: "CalvinResolve is a deterministic-scheduler op; \
+                     unsupported on the single-node Lite engine"
+                .into(),
+        }),
+        MetaOp::CalvinDrop { .. } => Err(LiteError::Unsupported {
+            detail: "CalvinDrop is a deterministic-scheduler op; \
+                     unsupported on the single-node Lite engine"
+                .into(),
+        }),
+        MetaOp::RecordCalvinWriteVersions { .. } => Err(LiteError::Unsupported {
+            detail: "RecordCalvinWriteVersions maintains the cluster write-version registry; \
+                     unsupported on the single-node Lite engine"
+                .into(),
+        }),
     }
 }

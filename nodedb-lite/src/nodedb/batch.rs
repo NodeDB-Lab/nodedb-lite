@@ -176,12 +176,17 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 match indices.get(&name) {
                     Some(idx) => {
                         if seg_ext.is_some() {
-                            let graph_bytes = idx.graph_checkpoint_to_bytes();
+                            let graph_bytes = idx.graph_checkpoint_to_bytes().map_err(|e| {
+                                NodeDbError::serialization("hnsw-graph-checkpoint", e)
+                            })?;
                             let (vectors, surrogates) = idx.extract_vectors_and_surrogates();
                             let dim = idx.dim();
                             (graph_bytes, Some((dim, vectors, surrogates)))
                         } else {
-                            (idx.checkpoint_to_bytes(), None)
+                            let blob = idx
+                                .checkpoint_to_bytes()
+                                .map_err(|e| NodeDbError::serialization("hnsw-checkpoint", e))?;
+                            (blob, None)
                         }
                     }
                     None => continue,
@@ -191,7 +196,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
             let blob = {
                 let indices = self.vector_state.hnsw_indices.lock_or_recover();
                 match indices.get(&name) {
-                    Some(idx) => idx.checkpoint_to_bytes(),
+                    Some(idx) => idx
+                        .checkpoint_to_bytes()
+                        .map_err(|e| NodeDbError::serialization("hnsw-checkpoint", e))?,
                     None => continue,
                 }
             };

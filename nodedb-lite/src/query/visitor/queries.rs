@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use nodedb_physical::PhysicalTaskVisitor;
 use nodedb_physical::physical_plan::document::DocumentOp;
 use nodedb_physical::physical_plan::query::{AggregateSpec, JoinProjection};
+use nodedb_query::expr::GroupKeySpec;
 use nodedb_sql::temporal::TemporalScope;
 use nodedb_sql::types::SqlPlan;
 use nodedb_sql::types::filter::Filter;
@@ -18,6 +19,7 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
+use crate::query::expr_convert::convert_sql_expr;
 use crate::query::filter_convert::{sql_filters_to_metadata, sql_value_to_value};
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
 use crate::query::query_ops::aggregate::execute_aggregate;
@@ -131,13 +133,28 @@ pub(super) fn lower_aggregate<'a, S: StorageEngine + 'a>(
     sort_keys: &[SortKey],
 ) -> Result<LiteFut<'a>, LiteError> {
     let input = input.clone();
-    let group_cols: Vec<String> = group_by
+    // A bare column groups by field extraction; anything else is a computed key
+    // (e.g. `GROUP BY date_trunc('day', ts)`) that must be evaluated per row.
+    // Its output name is the SQL text the planner assigned, so HAVING/ORDER BY
+    // and the result columns all agree on one label.
+    let group_cols: Vec<GroupKeySpec> = group_by
         .iter()
-        .map(|e| match e {
-            SqlExpr::Column { name, .. } => name.clone(),
-            other => format!("{other:?}"),
+        .enumerate()
+        .map(|(i, e)| match e {
+            SqlExpr::Column { name, .. } => Ok(GroupKeySpec::column(name.clone())),
+            other => {
+                let expr = convert_sql_expr(other)?;
+                // `SqlPlan::Aggregate` carries `group_by_aliases`, but the
+                // upstream dispatcher discards them before the visitor sees
+                // them, so the positional label is the stable name available.
+                Ok(GroupKeySpec {
+                    output_name: format!("group_key_{i}"),
+                    field: None,
+                    expr: Some(expr),
+                })
+            }
         })
-        .collect();
+        .collect::<Result<Vec<_>, LiteError>>()?;
     let agg_specs = convert_aggregates(aggregates);
     // Build aggregate-function → alias lookup for HAVING post-filter.
     let agg_alias_map = make_agg_alias_map(aggregates);

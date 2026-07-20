@@ -6,6 +6,7 @@
 //! projection are applied after the join.
 
 use nodedb_physical::physical_plan::query::{AggregateSpec, JoinProjection};
+use nodedb_query::expr::GroupKeySpec;
 use nodedb_types::result::QueryResult;
 
 use crate::error::LiteError;
@@ -87,7 +88,10 @@ pub async fn execute_hash_join<S: StorageEngine>(
                 expr: None,
             })
             .collect();
-        return execute_aggregate(joined, post_group_by, &agg_specs, &[], &[], &[], &[]);
+        // Post-join grouping is by bare output column name, so the lift is lossless.
+        let group_specs: Vec<GroupKeySpec> =
+            post_group_by.iter().map(GroupKeySpec::column).collect();
+        return execute_aggregate(joined, &group_specs, &agg_specs, &[], &[], &[], &[]);
     }
 
     Ok(maps_to_result(joined))
