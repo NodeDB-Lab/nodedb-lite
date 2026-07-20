@@ -6,6 +6,7 @@ pub mod fts;
 pub mod graph;
 pub mod htap;
 pub mod index_integration;
+pub mod sparse_vector;
 pub mod spatial;
 pub mod strict;
 pub mod timeseries;

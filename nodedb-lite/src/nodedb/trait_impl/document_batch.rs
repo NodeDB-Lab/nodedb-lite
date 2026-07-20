@@ -138,6 +138,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             }
 
             self.index_document_text(item.doc_collection, doc_id, &item.doc.fields);
+            self.index_document_sparse(item.doc_collection, doc_id, &item.doc.fields);
 
             if let Some(embedding) = item.embedding
                 && !embedding.is_empty()

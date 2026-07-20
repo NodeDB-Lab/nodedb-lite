@@ -298,6 +298,21 @@ impl<S: StorageEngine> NodeDbLite<S> {
         .await
         .map_err(|e| NodeDbError::storage(format!("fts flush: {e}")))?;
 
+        // ── Persist sparse-vector inverted indices ────────────────────────────
+        // Same shape as the FTS block: serialize synchronously under the lock,
+        // then perform the storage write after releasing it.
+        let sparse_ops = {
+            let sparse = self.sparse_state.manager.lock_or_recover();
+            crate::engine::sparse_vector::checkpoint::serialize_sparse(sparse.checkpoint_data())
+                .map_err(|e| NodeDbError::storage(format!("sparse serialize: {e}")))?
+        };
+        crate::engine::sparse_vector::checkpoint::write_serialized_sparse(
+            self.storage.as_ref(),
+            sparse_ops,
+        )
+        .await
+        .map_err(|e| NodeDbError::storage(format!("sparse flush: {e}")))?;
+
         // ── Spill FTS + spatial staging buffers to durable queues ────────────
         // These queues accumulate sync entries written synchronously by
         // `index_document_text`, `remove_document_text`, `spatial_insert`, and

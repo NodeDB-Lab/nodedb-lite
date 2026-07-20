@@ -10,6 +10,7 @@ use crate::engine::crdt::CrdtEngine;
 use crate::engine::fts::FtsState;
 use crate::engine::graph::index::CsrIndex;
 use crate::engine::htap::HtapBridge;
+use crate::engine::sparse_vector::SparseVectorState;
 use crate::engine::strict::StrictEngine;
 use crate::engine::vector::VectorState;
 use crate::memory::MemoryGovernor;
@@ -45,6 +46,8 @@ pub struct NodeDbLite<S: StorageEngine> {
     pub(crate) query_engine: crate::query::LiteQueryEngine<S>,
     /// Shared FTS runtime state.
     pub(crate) fts_state: Arc<FtsState>,
+    /// Shared sparse-vector inverted index state.
+    pub(crate) sparse_state: Arc<SparseVectorState>,
     /// Spatial R-tree indexes for geometry fields.
     pub(crate) spatial: Arc<Mutex<crate::engine::spatial::SpatialIndexManager>>,
     /// Per-column secondary B-tree indexes for strict collections.

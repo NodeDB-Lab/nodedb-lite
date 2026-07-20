@@ -15,6 +15,7 @@ use crate::engine::crdt::CrdtEngine;
 use crate::engine::fts::FtsState;
 use crate::engine::graph::index::CsrIndex;
 use crate::engine::htap::HtapBridge;
+use crate::engine::sparse_vector::SparseVectorState;
 use crate::engine::spatial::SpatialIndexManager;
 use crate::engine::strict::StrictEngine;
 use crate::engine::vector::VectorState;
@@ -36,6 +37,8 @@ pub struct LiteQueryEngine<S: StorageEngine> {
     pub(crate) vector_state: Arc<VectorState<S>>,
     pub(crate) array_state: Arc<tokio::sync::Mutex<crate::engine::array::engine::ArrayEngineState>>,
     pub(crate) fts_state: Arc<FtsState>,
+    /// Sparse-vector inverted index state, shared with the owning `NodeDbLite`.
+    pub(crate) sparse_state: Arc<SparseVectorState>,
     pub(in crate::query) spatial: Arc<Mutex<SpatialIndexManager>>,
     pub(crate) cancellation: CancellationRegistry,
     /// Per-collection CSR graph indices shared with the owning NodeDbLite.
@@ -60,6 +63,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         vector_state: Arc<VectorState<S>>,
         array_state: Arc<tokio::sync::Mutex<crate::engine::array::engine::ArrayEngineState>>,
         fts_state: Arc<FtsState>,
+        sparse_state: Arc<SparseVectorState>,
         spatial: Arc<Mutex<SpatialIndexManager>>,
         csr: Arc<Mutex<HashMap<String, CsrIndex>>>,
     ) -> Self {
@@ -73,6 +77,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             vector_state,
             array_state,
             fts_state,
+            sparse_state,
             spatial,
             cancellation: CancellationRegistry::new(),
             csr,
@@ -333,7 +338,6 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             _ => Ok(QueryResult::empty()),
         }
     }
-
 }
 
 pub(super) fn sql_value_to_string(v: &SqlValue) -> String {

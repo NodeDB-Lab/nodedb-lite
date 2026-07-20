@@ -4,6 +4,7 @@ mod flush;
 mod open;
 mod ops;
 mod rebuild;
+mod sparse_ops;
 mod types;
 
 pub use types::{NodeDbLite, SyncGate};

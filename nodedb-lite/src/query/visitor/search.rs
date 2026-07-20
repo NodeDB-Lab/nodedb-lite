@@ -74,6 +74,30 @@ pub(super) fn lower_multi_vector_search<'a, S: StorageEngine + 'a>(
     Ok(Box::pin(fut))
 }
 
+// ── SparseSearch ─────────────────────────────────────────────────────────────
+
+/// Lower `SqlPlan::SparseSearch` to `VectorOp::SparseSearch`.
+///
+/// Scoring is a dot product over the sparse inverted index; results come back
+/// as `["id", "score"]` ordered by score descending.
+pub(super) fn lower_sparse_search<'a, S: StorageEngine + 'a>(
+    engine: &'a LiteQueryEngine<S>,
+    collection: &str,
+    field: &str,
+    query_entries: &[(u32, f32)],
+    top_k: usize,
+) -> Result<LiteFut<'a>, LiteError> {
+    let op = VectorOp::SparseSearch {
+        collection: collection.to_string(),
+        field_name: field.to_string(),
+        query_entries: query_entries.to_vec(),
+        top_k,
+    };
+    let mut phys = LiteDataPlaneVisitor { engine };
+    let fut = phys.vector(&op)?;
+    Ok(Box::pin(fut))
+}
+
 // ── HybridSearch ─────────────────────────────────────────────────────────────
 
 /// Lower `SqlPlan::HybridSearch` to `TextOp::HybridSearch`.
@@ -239,6 +263,7 @@ mod tests {
             vector_state,
             array_state,
             fts_state,
+            Arc::new(crate::engine::sparse_vector::SparseVectorState::new()),
             spatial,
             Arc::new(Mutex::new(std::collections::HashMap::new())),
         )

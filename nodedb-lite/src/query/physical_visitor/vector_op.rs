@@ -9,11 +9,13 @@
 use std::sync::Arc;
 
 use nodedb_physical::physical_plan::VectorOp;
+use nodedb_types::SparseVector;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
 use crate::engine::vector::search::run_vector_search;
 use crate::error::LiteError;
+use crate::nodedb::lock_ext::LockExt;
 use crate::query::engine::LiteQueryEngine;
 use crate::storage::engine::StorageEngine;
 
@@ -228,23 +230,92 @@ where
                 .to_string(),
         }),
 
-        VectorOp::SparseInsert { .. } => Err(LiteError::BadRequest {
-            detail: "SparseInsert: Lite has no sparse inverted index implementation; \
-                     sparse vector operations are unsupported on Lite."
-                .to_string(),
-        }),
+        // ── E. Sparse inverted index ──────────────────────────────────────────
+        VectorOp::SparseInsert {
+            collection,
+            field_name,
+            doc_id,
+            entries,
+        } => {
+            let vector =
+                SparseVector::from_entries(entries.clone()).map_err(|e| LiteError::BadRequest {
+                    detail: format!("SparseInsert: {e}"),
+                })?;
+            let sparse_state = Arc::clone(&engine.sparse_state);
+            let collection = collection.clone();
+            let field_name = field_name.clone();
+            let doc_id = doc_id.clone();
+            Ok(Box::pin(async move {
+                sparse_state.manager.lock_or_recover().index_document(
+                    &collection,
+                    &field_name,
+                    &doc_id,
+                    &vector,
+                );
+                Ok(QueryResult {
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                    rows_affected: 1,
+                })
+            }))
+        }
 
-        VectorOp::SparseSearch { .. } => Err(LiteError::BadRequest {
-            detail: "SparseSearch: Lite has no sparse inverted index implementation; \
-                     sparse vector operations are unsupported on Lite."
-                .to_string(),
-        }),
+        VectorOp::SparseSearch {
+            collection,
+            field_name,
+            query_entries,
+            top_k,
+        } => {
+            let query = SparseVector::from_entries(query_entries.clone()).map_err(|e| {
+                LiteError::BadRequest {
+                    detail: format!("SparseSearch: {e}"),
+                }
+            })?;
+            let sparse_state = Arc::clone(&engine.sparse_state);
+            let collection = collection.clone();
+            let field_name = field_name.clone();
+            let k = *top_k;
+            Ok(Box::pin(async move {
+                let hits = sparse_state.manager.lock_or_recover().search(
+                    &collection,
+                    &field_name,
+                    &query,
+                    k,
+                );
+                let rows: Vec<Vec<Value>> = hits
+                    .into_iter()
+                    .map(|h| vec![Value::String(h.doc_id), Value::Float(h.score as f64)])
+                    .collect();
+                Ok(QueryResult {
+                    columns: vec!["id".to_string(), "score".to_string()],
+                    rows,
+                    rows_affected: 0,
+                })
+            }))
+        }
 
-        VectorOp::SparseDelete { .. } => Err(LiteError::BadRequest {
-            detail: "SparseDelete: Lite has no sparse inverted index implementation; \
-                     sparse vector operations are unsupported on Lite."
-                .to_string(),
-        }),
+        VectorOp::SparseDelete {
+            collection,
+            field_name,
+            doc_id,
+        } => {
+            let sparse_state = Arc::clone(&engine.sparse_state);
+            let collection = collection.clone();
+            let field_name = field_name.clone();
+            let doc_id = doc_id.clone();
+            Ok(Box::pin(async move {
+                let removed = sparse_state.manager.lock_or_recover().remove_document(
+                    &collection,
+                    &field_name,
+                    &doc_id,
+                );
+                Ok(QueryResult {
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                    rows_affected: u64::from(removed),
+                })
+            }))
+        }
 
         VectorOp::MultiVectorInsert { .. } => Err(LiteError::BadRequest {
             detail: "MultiVectorInsert: Lite has no multi-vector (ColBERT-style) HNSW; \
@@ -272,6 +343,8 @@ mod tests {
 
     use nodedb_physical::physical_plan::VectorOp;
     use nodedb_types::Surrogate;
+    use nodedb_types::result::QueryResult;
+    use nodedb_types::value::Value;
 
     use crate::PagedbStorageMem;
     use crate::engine::array::ArrayEngineState;
@@ -318,6 +391,7 @@ mod tests {
             vector_state,
             array_state,
             fts_state,
+            Arc::new(crate::engine::sparse_vector::SparseVectorState::new()),
             spatial,
             Arc::new(Mutex::new(std::collections::HashMap::new())),
         )
@@ -342,21 +416,103 @@ mod tests {
         }
     }
 
+    async fn run_op(engine: &LiteQueryEngine<PagedbStorageMem>, op: VectorOp) -> QueryResult {
+        super::execute_vector_op(engine, &op)
+            .unwrap_or_else(|e| panic!("execute_vector_op failed synchronously: {e}"))
+            .await
+            .unwrap_or_else(|e| panic!("vector op future failed: {e}"))
+    }
+
+    fn sparse_insert(doc_id: &str, entries: Vec<(u32, f32)>) -> VectorOp {
+        VectorOp::SparseInsert {
+            collection: "col".to_string(),
+            field_name: "sparse".to_string(),
+            doc_id: doc_id.to_string(),
+            entries,
+        }
+    }
+
     #[tokio::test]
-    async fn vector_op_sparse_insert_returns_bad_request() {
+    async fn vector_op_sparse_insert_then_search_ranks_by_dot_product() {
         let engine = make_engine().await;
-        let op = VectorOp::SparseInsert {
+        assert_eq!(
+            run_op(&engine, sparse_insert("low", vec![(1, 0.5)]))
+                .await
+                .rows_affected,
+            1
+        );
+        run_op(&engine, sparse_insert("high", vec![(1, 4.0)])).await;
+        run_op(&engine, sparse_insert("disjoint", vec![(99, 9.0)])).await;
+
+        let result = run_op(
+            &engine,
+            VectorOp::SparseSearch {
+                collection: "col".to_string(),
+                field_name: "sparse".to_string(),
+                query_entries: vec![(1, 1.0)],
+                top_k: 10,
+            },
+        )
+        .await;
+
+        assert_eq!(result.columns, vec!["id".to_string(), "score".to_string()]);
+        assert_eq!(result.rows.len(), 2, "disjoint document must be excluded");
+        assert_eq!(result.rows[0][0], Value::String("high".to_string()));
+        assert_eq!(result.rows[1][0], Value::String("low".to_string()));
+    }
+
+    #[tokio::test]
+    async fn vector_op_sparse_delete_removes_document() {
+        let engine = make_engine().await;
+        run_op(&engine, sparse_insert("d1", vec![(1, 1.0)])).await;
+
+        let delete = VectorOp::SparseDelete {
             collection: "col".to_string(),
             field_name: "sparse".to_string(),
             doc_id: "d1".to_string(),
-            entries: vec![(0, 1.0)],
         };
-        match super::execute_vector_op(&engine, &op) {
+        assert_eq!(run_op(&engine, delete.clone()).await.rows_affected, 1);
+        assert_eq!(
+            run_op(&engine, delete).await.rows_affected,
+            0,
+            "deleting an absent document affects no rows"
+        );
+
+        let result = run_op(
+            &engine,
+            VectorOp::SparseSearch {
+                collection: "col".to_string(),
+                field_name: "sparse".to_string(),
+                query_entries: vec![(1, 1.0)],
+                top_k: 10,
+            },
+        )
+        .await;
+        assert!(result.rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn vector_op_sparse_search_on_missing_index_is_empty_not_error() {
+        let engine = make_engine().await;
+        let result = run_op(
+            &engine,
+            VectorOp::SparseSearch {
+                collection: "never_written".to_string(),
+                field_name: "sparse".to_string(),
+                query_entries: vec![(1, 1.0)],
+                top_k: 10,
+            },
+        )
+        .await;
+        assert!(result.rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn vector_op_sparse_insert_rejects_non_finite_weight() {
+        let engine = make_engine().await;
+        match super::execute_vector_op(&engine, &sparse_insert("d1", vec![(1, f32::NAN)])) {
             Err(LiteError::BadRequest { detail }) => {
-                assert!(
-                    detail.contains("inverted index") || detail.contains("Lite"),
-                    "expected inverted index message, got: {detail}"
-                );
+                assert!(detail.contains("SparseInsert"), "got: {detail}");
             }
             Err(other) => panic!("expected BadRequest, got Err({other})"),
             Ok(_) => panic!("expected BadRequest, got Ok"),

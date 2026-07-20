@@ -48,6 +48,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             let crdt = self.crdt.lock_or_recover();
             let collections = crdt.collection_names();
             let mut fts = self.fts_state.manager.lock_or_recover();
+            let mut sparse = self.sparse_state.manager.lock_or_recover();
 
             for collection in &collections {
                 if collection.starts_with("__") {
@@ -71,6 +72,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                             .collect::<Vec<_>>()
                             .join(" ");
                         fts.index_document(collection, id, &text);
+                        sparse.index_document_fields(collection, id, &doc.fields);
                         indexed.insert((collection.clone(), id.clone()));
                     }
                 }
@@ -131,6 +133,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
                         .manager
                         .lock_or_recover()
                         .index_document(collection, doc_id, &text);
+                    self.sparse_state
+                        .manager
+                        .lock_or_recover()
+                        .index_document_fields(collection, doc_id, &fields);
                 }
             }
         }

@@ -137,10 +137,12 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 let doc = crate::nodedb::convert::loro_value_to_document(doc_id, &loro_val);
                 drop(crdt);
                 self.index_document_text(collection, doc_id, &doc.fields);
+                self.index_document_sparse(collection, doc_id, &doc.fields);
             }
         }
         for &(collection, doc_id) in &delete_ops {
             self.remove_document_text(collection, doc_id);
+            self.remove_document_sparse(collection, doc_id);
         }
 
         Ok(count)

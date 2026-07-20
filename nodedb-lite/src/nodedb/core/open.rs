@@ -14,6 +14,7 @@ use crate::engine::crdt::CrdtEngine;
 use crate::engine::fts::FtsState;
 use crate::engine::graph::index::CsrIndex;
 use crate::engine::htap::HtapBridge;
+use crate::engine::sparse_vector::SparseVectorState;
 use crate::engine::strict::StrictEngine;
 use crate::engine::vector::VectorState;
 use crate::engine::vector::graph::HnswIndex;
@@ -220,6 +221,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // ── Restore FTS indices ──
         let fts_manager = Self::restore_fts_indices(&storage).await?;
 
+        // ── Restore sparse-vector inverted indices ──
+        let (sparse_manager, sparse_checkpoint_present) =
+            Self::restore_sparse_indices(&storage).await;
+
         // ── Restore per-collection CSR indices ──
         let csr = Self::restore_csr_indices(&storage).await?;
 
@@ -334,6 +339,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             hnsw_id_map,
         ));
         let fts_state = Arc::new(FtsState::from_restored(fts_manager));
+        let sparse_state = Arc::new(SparseVectorState::from_restored(sparse_manager));
         let array_engine = crate::engine::array::ArrayEngineState::open(&storage)
             .await
             .map_err(NodeDbError::storage)?;
@@ -351,6 +357,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             Arc::clone(&vector_state),
             Arc::clone(&array_state),
             Arc::clone(&fts_state),
+            Arc::clone(&sparse_state),
             Arc::clone(&spatial),
             Arc::clone(&csr_arc),
         );
@@ -437,6 +444,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             governor,
             query_engine,
             fts_state,
+            sparse_state,
             spatial,
             secondary_indices: Mutex::new(HashMap::new()),
             strict,
@@ -481,9 +489,13 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // When a checkpoint is present, `restore_fts_indices` has already loaded
         // the full index without re-tokenizing source documents.
         {
-            let fts = db.fts_state.manager.lock_or_recover();
-            if fts.is_empty() {
-                drop(fts);
+            // `sparse_checkpoint_present` covers databases written before the
+            // sparse index existed: they have a valid FTS checkpoint but no
+            // sparse one, so emptiness alone cannot distinguish "no sparse
+            // columns" from "never checkpointed". The first flush writes the
+            // sparse catalog key even when empty, so this rebuild runs once.
+            let fts_empty = db.fts_state.manager.lock_or_recover().is_empty();
+            if fts_empty || !sparse_checkpoint_present {
                 db.rebuild_text_indices().await;
             }
         }
@@ -735,6 +747,34 @@ impl<S: StorageEngine> NodeDbLite<S> {
                      will rebuild from CRDT state on cold open"
                 );
                 crate::engine::spatial::SpatialIndexManager::new()
+            }
+        }
+    }
+
+    /// Restore sparse-vector inverted indices from a persistent checkpoint.
+    ///
+    /// Returns the restored manager plus whether a checkpoint was found. The
+    /// caller uses the flag to decide whether a rebuild from source documents
+    /// is needed — an empty manager from a real checkpoint means "no sparse
+    /// columns", which needs no rebuild. A restore failure is logged and
+    /// reported as "no checkpoint" so the rebuild path repopulates the index
+    /// rather than leaving searches silently empty.
+    async fn restore_sparse_indices(
+        storage: &Arc<S>,
+    ) -> (crate::engine::sparse_vector::SparseVectorManager, bool) {
+        let mut mgr = crate::engine::sparse_vector::SparseVectorManager::new();
+        match crate::engine::sparse_vector::checkpoint::restore_sparse(storage.as_ref()).await {
+            Ok(Some(indices)) => {
+                mgr.load_checkpoint(indices);
+                (mgr, true)
+            }
+            Ok(None) => (mgr, false),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "sparse vector checkpoint restore failed — rebuilding from source documents"
+                );
+                (mgr, false)
             }
         }
     }
