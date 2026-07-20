@@ -1,10 +1,54 @@
+# Manual distribution workflow. Push a v* tag first; `Release Prepare` runs the
+# test suites and builds the FFI libraries + npm package. Then run this workflow
+# with that tag and the successful prepare run ID.
+#
+# The npm publish and the GitHub Release consume the prepare run's artifacts by
+# run ID — nothing is recompiled to fix a crates.io timeout, an npm hiccup, or a
+# bad release body. A failed stage is retried by re-dispatching with only that
+# stage enabled.
+#
+# Stages, in dependency order:
+#   publish_crates  -> crates.io, 2 tiers (nodedb-lite, then -ffi + -wasm)
+#   publish_npm     -> @nodedb/lite on npm (from the prepared pkg/)
+#   github_release  -> GitHub Release with the FFI archives attached
+#
+# Each stage is idempotent: crates already indexed are skipped, an existing npm
+# version is skipped, and the release is overwritten in place. Re-running the
+# whole thing is safe; the toggles exist to save time, not to prevent
+# double-publishing.
+#
+# Required secrets: CARGO_REGISTRY_TOKEN, NPM_TOKEN.
+
 name: Release
-run-name: Release ${{ github.ref_name }}
+run-name: Release ${{ inputs.tag }}
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, e.g. v0.1.0"
+        required: true
+        type: string
+      prepare_run_id:
+        description: "Successful Release Prepare run ID holding the artifacts"
+        required: true
+        type: string
+      ref:
+        description: "Ref to take workflow/scripts from. Defaults to the tag; override to pick up a distribution-only fix without re-tagging."
+        required: false
+        type: string
+      publish_crates:
+        description: "Publish crates to crates.io"
+        type: boolean
+        default: true
+      publish_npm:
+        description: "Publish @nodedb/lite to npm"
+        type: boolean
+        default: true
+      github_release:
+        description: "Create the GitHub Release"
+        type: boolean
+        default: true
 
 concurrency:
   group: release
@@ -17,82 +61,29 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # ── Validate tag ─────────────────────────────────────────────────────────────
+  # Always runs. Cheap, and it guarantees the dispatched tag still means what the
+  # prepare run assumed it meant.
   validate-version:
-    name: Validate Version Tag
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      is_full_release: ${{ steps.version.outputs.is_full_release }}
-    steps:
-      - uses: actions/checkout@v6
+    uses: ./.github/workflows/release-validate.yml
+    with:
+      ref: ${{ inputs.tag }}
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Validate tag against Cargo.toml
-        id: version
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          TAG_VERSION="${TAG#v}"
-
-          CARGO_VERSION=$(cargo metadata --no-deps --format-version=1 \
-            | jq -r '.packages[] | select(.name == "nodedb-lite") | .version')
-          CARGO_BASE=$(echo "$CARGO_VERSION" | grep -oP '^\d+\.\d+\.\d+')
-
-          echo "Tag version:        $TAG_VERSION"
-          echo "Cargo.toml version: $CARGO_VERSION"
-          echo "Cargo.toml base:    $CARGO_BASE"
-
-          if [[ ! "$TAG_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)(-[a-zA-Z]+\.[0-9]+)?$ ]]; then
-            echo "::error::Invalid tag format '$TAG'. Expected: vX.Y.Z or vX.Y.Z-label.N"
-            exit 1
-          fi
-
-          TAG_BASE="${BASH_REMATCH[1]}"
-
-          if [[ "$TAG_BASE" != "$CARGO_BASE" ]]; then
-            echo "::error::Base version mismatch! Tag '$TAG_BASE' != Cargo.toml '$CARGO_BASE'"
-            exit 1
-          fi
-
-          # Full release = no hyphen suffix (v0.1.0, not v0.1.0-beta.1)
-          if [[ "$TAG_VERSION" == *-* ]]; then
-            echo "is_full_release=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_full_release=true" >> "$GITHUB_OUTPUT"
-          fi
-
-          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
-
-  # ── CI gate ──────────────────────────────────────────────────────────────────
-  ci:
-    name: CI Gate
-    needs: validate-version
-    uses: ./.github/workflows/ci.yml
-
-  # ── WASM gate ────────────────────────────────────────────────────────────────
-  wasm:
-    name: WASM Gate
-    needs: validate-version
-    uses: ./.github/workflows/wasm.yml
-
-  # ── Publish crates to crates.io ──────────────────────────────────────────────
-  # Requires secret: CARGO_REGISTRY_TOKEN
+  # ── crates.io ────────────────────────────────────────────────────────────────
   # Tier 1: nodedb-lite (no internal Lite deps).
   # Tier 2: nodedb-lite-ffi, nodedb-lite-wasm (both depend on nodedb-lite).
-  # is_published / wait_for polling mirrors the nodedb workspace pattern so
-  # a re-run after a failed publish never double-publishes an already-indexed
-  # crate.
+  # is_published / wait_for polling means a re-run never double-publishes an
+  # already-indexed crate and never races the index for the tier-1 dep it just
+  # pushed.
   publish-crates:
     name: Publish to crates.io
-    needs: [validate-version, ci, wasm]
+    needs: validate-version
+    if: inputs.publish_crates
     runs-on: ubuntu-latest
     environment: crates.io
-    permissions:
-      contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -104,24 +95,7 @@ jobs:
             cmake clang libclang-dev pkg-config protobuf-compiler perl
 
       - name: Set version from tag
-        run: |
-          VERSION="${{ needs.validate-version.outputs.version }}"
-          CURRENT=$(cargo metadata --no-deps --format-version=1 \
-            | jq -r '.packages[] | select(.name == "nodedb-lite") | .version')
-          if [[ "$VERSION" != "$CURRENT" ]]; then
-            sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml
-
-            # For pre-release versions, pin internal dep requirements so
-            # semver "0.1.0" doesn't fail to match "0.1.0-beta.1".
-            if [[ "$VERSION" == *-* ]]; then
-              sed -i -E 's/(nodedb-lite = \{ [^}]*version = )"[^"]*"/\1"='"$VERSION"'"/' Cargo.toml
-              echo "Updated internal dep versions to =$VERSION"
-            fi
-
-            echo "Updated workspace version: $CURRENT -> $VERSION"
-          else
-            echo "Version already matches, no change needed"
-          fi
+        run: bash scripts/ci/stamp_version.sh "${{ needs.validate-version.outputs.version }}"
 
       - name: Publish crates
         env:
@@ -174,76 +148,89 @@ jobs:
             echo "::endgroup::"
           }
 
-          publish_tier "1 (no internal Lite deps)" $TIER1
+          publish_tier "1 (no internal Lite deps)"  $TIER1
           publish_tier "2 (depends on nodedb-lite)" $TIER2
 
-  # ── Publish npm package ──────────────────────────────────────────────────────
-  # Requires secret: NPM_TOKEN
+  # ── npm ──────────────────────────────────────────────────────────────────────
+  # Publishes the pkg/ the prepare run already built — no wasm recompile. Skips
+  # cleanly if the version is already on npm, so a re-run is safe.
   publish-npm:
     name: Publish to npm
-    needs: [validate-version, ci, wasm, publish-crates]
+    needs: validate-version
+    if: inputs.publish_npm
     runs-on: ubuntu-latest
     environment: npm
     permissions:
       contents: read
+      actions: read
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Download prepared npm package
+        uses: actions/download-artifact@v8
         with:
-          targets: wasm32-unknown-unknown
-
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+          name: npm-pkg
+          run-id: ${{ inputs.prepare_run_id }}
+          github-token: ${{ github.token }}
+          path: ./pkg
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           registry-url: https://registry.npmjs.org
 
-      - name: Build WASM release
-        run: wasm-pack build --target web --release nodedb-lite-wasm
-
-      - name: Rewrite pkg/package.json metadata
-        working-directory: nodedb-lite-wasm/pkg
-        run: |
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            pkg.name = '@nodedb/lite';
-            pkg.version = '${{ needs.validate-version.outputs.version }}';
-            pkg.license = 'Apache-2.0';
-            pkg.repository = { type: 'git', url: 'https://github.com/NodeDB-Lab/nodedb-lite' };
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-
       - name: Publish to npm
-        working-directory: nodedb-lite-wasm/pkg
+        working-directory: ./pkg
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          IS_FULL: ${{ needs.validate-version.outputs.is_full_release }}
         run: |
-          if [[ "${{ needs.validate-version.outputs.is_full_release }}" == "true" ]]; then
+          set -euo pipefail
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+
+          if npm view "${NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "${NAME}@${VERSION} already published — skipping"
+            exit 0
+          fi
+
+          if [[ "$IS_FULL" == "true" ]]; then
             npm publish --access public
           else
             npm publish --access public --tag beta
           fi
 
-  # ── Create GitHub Release ─────────────────────────────────────────────────────
+  # ── GitHub Release ───────────────────────────────────────────────────────────
+  # Independent of the publish stages: a registry outage must not block cutting
+  # the release, and re-running this stage alone is the fix for a bad release
+  # body. Attaches every FFI archive built by the prepare run.
   github-release:
     name: Create GitHub Release
-    needs: [validate-version, publish-crates, publish-npm]
+    needs: validate-version
+    if: inputs.github_release
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || inputs.tag }}
+
+      - name: Download FFI artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: "ffi-*"
+          run-id: ${{ inputs.prepare_run_id }}
+          github-token: ${{ github.token }}
+          path: ./artifacts
+          merge-multiple: true
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
-          tag_name: v${{ needs.validate-version.outputs.version }}
+          tag_name: ${{ inputs.tag }}
           name: NodeDB Lite ${{ needs.validate-version.outputs.version }}
           generate_release_notes: true
           draft: false
-          prerelease: ${{ contains(needs.validate-version.outputs.version, '-') }}
+          prerelease: ${{ needs.validate-version.outputs.is_full_release != 'true' }}
+          files: artifacts/*
+          fail_on_unmatched_files: true

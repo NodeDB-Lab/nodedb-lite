@@ -1,0 +1,323 @@
+# Tag gate for a releasable build. Pushing a v* tag validates the tag, runs the
+# native + wasm test suites, and builds every distributable once — the FFI
+# native libraries (Linux desktop, Android jniLibs, iOS XCFramework) and the
+# wasm npm package. Nothing is published and nothing leaves the repo.
+#
+# The manual `Release` workflow then consumes THIS run's artifacts by run ID —
+# for both crates.io/npm publishing and the GitHub Release — so a failure in any
+# distribution stage can be fixed and retried without repeating the tests or the
+# compile.
+#
+# Artifacts are retained 14 days: that is the window in which a `Release` run can
+# still resume from this prepare run.
+
+name: Release Prepare
+run-name: Release Prepare ${{ github.ref_name }}
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-prepare-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate-version:
+    uses: ./.github/workflows/release-validate.yml
+    with:
+      ref: ${{ github.ref_name }}
+
+  # Native lint + test suite. Calls test.yml directly rather than ci.yml, whose
+  # draft-PR gate skips the run under workflow_call.
+  ci:
+    name: CI Gate
+    needs: validate-version
+    uses: ./.github/workflows/test.yml
+
+  # wasm build + node/browser tests.
+  wasm:
+    name: WASM Gate
+    needs: validate-version
+    uses: ./.github/workflows/wasm.yml
+
+  # ── FFI: Linux desktop / server libraries ────────────────────────────────────
+  # cdylib + staticlib + the cbindgen-generated C header + the Kotlin bindings,
+  # for JVM-desktop and direct-C consumers. cbindgen runs in build.rs, writing
+  # the header into nodedb-lite-ffi/include during the build.
+  build-ffi-linux:
+    name: Build FFI (${{ matrix.label }})
+    needs: [validate-version, ci, wasm]
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs-on: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            label: linux-x64
+          - runs-on: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            label: linux-arm64
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust + target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ffi-${{ matrix.target }}
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake clang libclang-dev pkg-config protobuf-compiler perl
+
+      - name: Set version from tag
+        run: bash scripts/ci/stamp_version.sh "${{ needs.validate-version.outputs.version }}"
+
+      - name: Build FFI libraries
+        run: cargo build -p nodedb-lite-ffi --release --target ${{ matrix.target }}
+
+      - name: Package
+        env:
+          VERSION: ${{ needs.validate-version.outputs.version }}
+          LABEL: ${{ matrix.label }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          PKG="nodedb-lite-ffi-${VERSION}-${LABEL}"
+          mkdir -p "dist/${PKG}/lib" "dist/${PKG}/include"
+          cp target/${TARGET}/release/libnodedb_lite_ffi.so "dist/${PKG}/lib/"
+          cp target/${TARGET}/release/libnodedb_lite_ffi.a  "dist/${PKG}/lib/"
+          cp nodedb-lite-ffi/include/nodedb_lite.h "dist/${PKG}/include/"
+          cp -r nodedb-lite-ffi/kotlin "dist/${PKG}/kotlin"
+          tar -C dist -czf "dist/${PKG}.tar.gz" "${PKG}"
+          ls -lh "dist/${PKG}.tar.gz"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ffi-${{ matrix.label }}
+          path: dist/nodedb-lite-ffi-*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── FFI: Android jniLibs (AAR-ready) ─────────────────────────────────────────
+  # cargo-ndk cross-compiles the cdylib per ABI into a jniLibs/<abi>/ tree that
+  # drops straight into an Android module. Build scripts (cbindgen included) run
+  # on the Linux host, so the same apt deps apply.
+  build-ffi-android:
+    name: Build FFI (android)
+    needs: [validate-version, ci, wasm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust + Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ffi-android
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake clang libclang-dev pkg-config protobuf-compiler perl
+
+      - name: Install Android NDK
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - name: Set version from tag
+        run: bash scripts/ci/stamp_version.sh "${{ needs.validate-version.outputs.version }}"
+
+      - name: Build jniLibs
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          cargo ndk \
+            -t arm64-v8a -t armeabi-v7a -t x86_64 -t x86 \
+            -o ./jniLibs \
+            build -p nodedb-lite-ffi --release
+
+      - name: Package
+        env:
+          VERSION: ${{ needs.validate-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          PKG="nodedb-lite-ffi-${VERSION}-android"
+          mkdir -p "dist/${PKG}/include"
+          cp -r jniLibs "dist/${PKG}/jniLibs"
+          cp nodedb-lite-ffi/include/nodedb_lite.h "dist/${PKG}/include/"
+          cp -r nodedb-lite-ffi/kotlin "dist/${PKG}/kotlin"
+          tar -C dist -czf "dist/${PKG}.tar.gz" "${PKG}"
+          ls -lh "dist/${PKG}.tar.gz"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ffi-android
+          path: dist/nodedb-lite-ffi-*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── FFI: iOS XCFramework ─────────────────────────────────────────────────────
+  # Device (aarch64-apple-ios) + simulator (aarch64-apple-ios-sim) static libs
+  # combined into an XCFramework consumable by Swift Package Manager / Xcode.
+  build-ffi-ios:
+    name: Build FFI (ios)
+    needs: [validate-version, ci, wasm]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust + iOS targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ffi-ios
+
+      - name: Install build tools
+        run: brew install cmake protobuf
+
+      - name: Set version from tag
+        run: bash scripts/ci/stamp_version.sh "${{ needs.validate-version.outputs.version }}"
+
+      - name: Build static libs
+        run: |
+          cargo build -p nodedb-lite-ffi --release --target aarch64-apple-ios
+          cargo build -p nodedb-lite-ffi --release --target aarch64-apple-ios-sim
+
+      - name: Assemble XCFramework
+        env:
+          VERSION: ${{ needs.validate-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          xcodebuild -create-xcframework \
+            -library target/aarch64-apple-ios/release/libnodedb_lite_ffi.a \
+              -headers nodedb-lite-ffi/include \
+            -library target/aarch64-apple-ios-sim/release/libnodedb_lite_ffi.a \
+              -headers nodedb-lite-ffi/include \
+            -output NodeDbLite.xcframework
+          PKG="nodedb-lite-ffi-${VERSION}-ios"
+          mkdir -p "dist/${PKG}"
+          cp -r NodeDbLite.xcframework "dist/${PKG}/NodeDbLite.xcframework"
+          cp -r nodedb-lite-ffi/kotlin "dist/${PKG}/kotlin"
+          (cd dist && zip -ry "${PKG}.zip" "${PKG}")
+          ls -lh "dist/${PKG}.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ffi-ios
+          path: dist/nodedb-lite-ffi-*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── npm package (@nodedb/lite) ───────────────────────────────────────────────
+  # Build the wasm-pack `web` bundle once, stamp package.json metadata to the tag
+  # version, and hand the finished `pkg/` to the Release workflow. Nothing is
+  # recompiled at publish time — npm publish just uploads this directory.
+  build-npm:
+    name: Build npm package
+    needs: [validate-version, ci, wasm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust + wasm target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: npm-wasm
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Set version from tag
+        run: bash scripts/ci/stamp_version.sh "${{ needs.validate-version.outputs.version }}"
+
+      - name: Build WASM release
+        run: wasm-pack build --target web --release nodedb-lite-wasm
+
+      - name: Rewrite pkg/package.json metadata
+        working-directory: nodedb-lite-wasm/pkg
+        env:
+          VERSION: ${{ needs.validate-version.outputs.version }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.name = '@nodedb/lite';
+            pkg.version = process.env.VERSION;
+            pkg.license = 'Apache-2.0';
+            pkg.repository = { type: 'git', url: 'https://github.com/NodeDB-Lab/nodedb-lite' };
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm-pkg
+          path: nodedb-lite-wasm/pkg
+          if-no-files-found: error
+          retention-days: 14
+
+  summary:
+    name: Release instructions
+    needs:
+      [
+        validate-version,
+        build-ffi-linux,
+        build-ffi-android,
+        build-ffi-ios,
+        build-npm,
+      ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write summary
+        env:
+          VERSION: ${{ needs.validate-version.outputs.version }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          {
+            echo "## Prepared v${VERSION}"
+            echo
+            echo "Tests passed and all distributables are built (FFI Linux/Android/iOS + npm). Publish with:"
+            echo
+            echo '```sh'
+            echo "gh workflow run release.yml -R ${REPO} \\"
+            echo "  -f tag=v${VERSION} \\"
+            echo "  -f prepare_run_id=${RUN_ID}"
+            echo '```'
+            echo
+            echo "If one stage fails, re-run the same command with only the"
+            echo "remaining stages enabled (\`-f publish_crates=false\`, etc.)."
+            echo "Nothing is recompiled."
+          } >> "$GITHUB_STEP_SUMMARY"
