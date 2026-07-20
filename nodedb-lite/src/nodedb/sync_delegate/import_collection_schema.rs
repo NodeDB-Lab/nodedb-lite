@@ -85,6 +85,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             config_json,
             descriptor_json: Some(descriptor_json),
             bitemporal: descriptor.bitemporal,
+            crdt: descriptor.crdt,
         };
         let bytes = sonic_rs::to_vec(&meta).map_err(|e| NodeDbError::storage(e.to_string()))?;
         self.storage
@@ -117,6 +118,7 @@ mod tests {
             name: name.into(),
             collection_type: ct,
             bitemporal,
+            crdt: false,
             fields: vec![("email".into(), "TEXT".into())],
             primary: PrimaryEngine::Document,
             vector_primary: None,

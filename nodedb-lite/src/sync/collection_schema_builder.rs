@@ -57,6 +57,7 @@ pub(crate) fn descriptor_from_meta(meta: &CollectionMeta) -> Option<CollectionDe
         name: meta.name.clone(),
         collection_type,
         bitemporal: meta.bitemporal,
+        crdt: meta.crdt,
         fields: meta.fields.clone(),
         primary,
         vector_primary: None,
@@ -141,6 +142,7 @@ mod tests {
             config_json: None,
             descriptor_json: None,
             bitemporal: false,
+            crdt: false,
         }
     }
 
@@ -152,6 +154,7 @@ mod tests {
             name: "widgets".into(),
             collection_type: CollectionType::document(),
             bitemporal: true,
+            crdt: false,
             fields: vec![("email".into(), "string".into())],
             primary: PrimaryEngine::Document,
             vector_primary: None,

@@ -173,6 +173,46 @@ impl CrdtEngine {
         Ok(mutation_id)
     }
 
+    /// Partial-merge write: set exactly the provided scalar fields on a row,
+    /// leaving untouched keys intact.
+    ///
+    /// This is `upsert` without its full-projection prune — the UPDATE SET
+    /// semantic behind `CrdtOp::DocUpsert { partial: true }`. Delta export and
+    /// pending-sync accounting are identical to `upsert`.
+    pub fn set_fields(
+        &mut self,
+        collection: &str,
+        doc_id: &str,
+        fields: &[(&str, LoroValue)],
+    ) -> Result<u64, LiteError> {
+        let version_before = self.state.doc().oplog_vv();
+
+        self.state
+            .set_fields(collection, doc_id, fields)
+            .map_err(|e| LiteError::Storage {
+                detail: format!("CRDT set_fields failed: {e}"),
+            })?;
+
+        let delta_bytes = self
+            .state
+            .doc()
+            .export(loro::ExportMode::updates(&version_before))
+            .map_err(|e| LiteError::Storage {
+                detail: format!("delta export failed: {e}"),
+            })?;
+
+        let mutation_id = self.next_mutation_id.fetch_add(1, Ordering::Relaxed);
+        self.pending_deltas.push(PendingDelta {
+            mutation_id,
+            collection: collection.to_string(),
+            document_id: doc_id.to_string(),
+            delta_bytes,
+            seq: 0,
+        });
+
+        Ok(mutation_id)
+    }
+
     /// Delete a document/row.
     pub fn delete(&mut self, collection: &str, doc_id: &str) -> Result<u64, LiteError> {
         let version_before = self.state.doc().oplog_vv();

@@ -394,6 +394,7 @@ async fn dispatch_collection_schema() {
             name: "users".into(),
             collection_type: nodedb_types::collection::CollectionType::document(),
             bitemporal: false,
+            crdt: false,
             fields: Vec::new(),
             primary: nodedb_types::PrimaryEngine::Document,
             vector_primary: None,
@@ -433,6 +434,7 @@ async fn collection_schema_announced_before_first_delta_and_deduped() {
             config_json: None,
             descriptor_json: None,
             bitemporal: false,
+            crdt: false,
         },
     );
     mock.set_pending(vec![PendingDelta {

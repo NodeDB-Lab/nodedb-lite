@@ -27,6 +27,14 @@ pub struct CollectionMeta {
     /// Whether the collection tracks system-time + valid-time versions.
     #[serde(default)]
     pub bitemporal: bool,
+    /// Whether the collection was declared with `WITH (crdt=true)`, i.e. its
+    /// DML is routed through the CRDT (Loro) path rather than the plain
+    /// document path. Announced to Origin in the collection descriptor so the
+    /// peer applies the same routing. A declared property, not an inferred one:
+    /// Lite's schemaless store happens to be Loro-backed, but that alone does
+    /// NOT make a collection CRDT-declared.
+    #[serde(default)]
+    pub crdt: bool,
 }
 
 impl<S: StorageEngine> NodeDbLite<S> {
@@ -47,6 +55,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             config_json: None,
             descriptor_json: None,
             bitemporal: false,
+            crdt: false,
         };
         let key = format!("collection:{name}");
         let bytes = sonic_rs::to_vec(&meta).map_err(|e| NodeDbError::storage(e.to_string()))?;
@@ -83,6 +92,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             config_json: Some(config_json),
             descriptor_json: None,
             bitemporal: false,
+            crdt: false,
         };
         let key = format!("collection:{name}");
         let bytes = sonic_rs::to_vec(&meta).map_err(|e| NodeDbError::storage(e.to_string()))?;
@@ -120,6 +130,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             config_json: None,
             descriptor_json: None,
             bitemporal: false,
+            crdt: false,
         })
     }
 
@@ -175,6 +186,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                     config_json: None,
                     descriptor_json: None,
                     bitemporal: false,
+                    crdt: false,
                 });
             }
         }

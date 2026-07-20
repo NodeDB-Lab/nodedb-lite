@@ -378,6 +378,7 @@ mod tests {
             name: name.into(),
             collection_type: ct,
             bitemporal,
+            crdt: false,
             fields: vec![("v".into(), "BIGINT".into())],
             primary: PrimaryEngine::Document,
             vector_primary: None,

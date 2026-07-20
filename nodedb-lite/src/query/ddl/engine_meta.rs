@@ -50,6 +50,9 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             name: name.to_string(),
             collection_type: collection_type.clone(),
             bitemporal,
+            // Columnar-family engine collections are never CRDT-declared;
+            // `WITH (crdt=true)` is only accepted on document collections.
+            crdt: false,
             fields: fields.clone(),
             primary: PrimaryEngine::Document,
             vector_primary: None,
@@ -69,6 +72,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             config_json: None,
             descriptor_json: Some(descriptor_json),
             bitemporal,
+            crdt: false,
         };
 
         let key = format!("collection:{name}");

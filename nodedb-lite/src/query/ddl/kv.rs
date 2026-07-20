@@ -72,6 +72,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             config_json: sonic_rs::to_string(&config).ok(),
             descriptor_json: None,
             bitemporal: false,
+            crdt: false,
         };
         let key = format!("collection:{name}");
         let bytes =

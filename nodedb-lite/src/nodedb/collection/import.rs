@@ -155,7 +155,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
 }
 
 /// Convert serde_json::Value to LoroValue for COPY FROM import.
-fn json_to_loro(v: &serde_json::Value) -> loro::LoroValue {
+///
+/// Also used by the CRDT document-row ops, which receive their fields as a
+/// Control-Plane-built JSON object.
+pub(crate) fn json_to_loro(v: &serde_json::Value) -> loro::LoroValue {
     match v {
         serde_json::Value::Null => loro::LoroValue::Null,
         serde_json::Value::Bool(b) => loro::LoroValue::Bool(*b),

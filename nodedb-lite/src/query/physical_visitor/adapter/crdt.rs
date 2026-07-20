@@ -189,5 +189,46 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                 crdt_ops::list::handle_list_move(engine, &col, &doc_id, &path, from, to).await
             }))
         }
+
+        CrdtOp::DocUpsert {
+            collection,
+            document_id,
+            fields_json,
+            partial,
+            returning,
+            ..
+        } => {
+            let col = collection.clone();
+            let doc_id = document_id.clone();
+            let fields = fields_json.clone();
+            let partial = *partial;
+            let returning = returning.clone();
+            Ok(Box::pin(async move {
+                crdt_ops::doc_row::handle_doc_upsert(
+                    engine,
+                    &col,
+                    &doc_id,
+                    &fields,
+                    partial,
+                    returning.as_ref(),
+                )
+                .await
+            }))
+        }
+
+        CrdtOp::DocDelete {
+            collection,
+            document_id,
+            returning,
+            ..
+        } => {
+            let col = collection.clone();
+            let doc_id = document_id.clone();
+            let returning = returning.clone();
+            Ok(Box::pin(async move {
+                crdt_ops::doc_row::handle_doc_delete(engine, &col, &doc_id, returning.as_ref())
+                    .await
+            }))
+        }
     }
 }

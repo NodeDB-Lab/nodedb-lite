@@ -164,6 +164,43 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
             .await
     }
 
+    // ─── CRDT List Operations (Movable List) ───────────────────────────
+
+    async fn list_insert(
+        &self,
+        collection: &str,
+        document_id: &str,
+        list_path: &str,
+        index: usize,
+        fields: &Value,
+    ) -> NodeDbResult<()> {
+        self.list_insert_impl(collection, document_id, list_path, index, fields)
+            .await
+    }
+
+    async fn list_delete(
+        &self,
+        collection: &str,
+        document_id: &str,
+        list_path: &str,
+        index: usize,
+    ) -> NodeDbResult<()> {
+        self.list_delete_impl(collection, document_id, list_path, index)
+            .await
+    }
+
+    async fn list_move(
+        &self,
+        collection: &str,
+        document_id: &str,
+        list_path: &str,
+        from_index: usize,
+        to_index: usize,
+    ) -> NodeDbResult<()> {
+        self.list_move_impl(collection, document_id, list_path, from_index, to_index)
+            .await
+    }
+
     // ─── Document Operations ─────────────────────────────────────────
 
     async fn document_get(&self, collection: &str, id: &str) -> NodeDbResult<Option<Document>> {
