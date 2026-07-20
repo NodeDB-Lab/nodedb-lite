@@ -142,6 +142,7 @@ impl NodeDbLiteWasm {
                 .map_err(|e| JsError::new(&e.to_string()))?,
         );
         db.start_auto_flush(LiteConfig::default().auto_flush_ms);
+        db.start_auto_compact(LiteConfig::default().auto_compact_ms);
         Ok(Self {
             inner: NodeDbLiteWasmInner::InMemory(db),
         })
@@ -166,6 +167,7 @@ impl NodeDbLiteWasm {
     ) -> Result<NodeDbLiteWasm, JsError> {
         let config = config_from_memory_mb(memory_mb);
         let auto_flush_ms = config.auto_flush_ms;
+        let auto_compact_ms = config.auto_compact_ms;
         let storage = PagedbStorageMem::open_in_memory()
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
@@ -175,6 +177,7 @@ impl NodeDbLiteWasm {
                 .map_err(|e| JsError::new(&e.to_string()))?,
         );
         db.start_auto_flush(auto_flush_ms);
+        db.start_auto_compact(auto_compact_ms);
         Ok(Self {
             inner: NodeDbLiteWasmInner::InMemory(db),
         })
@@ -228,6 +231,7 @@ impl NodeDbLiteWasm {
                 .map_err(|e| JsError::new(&e.to_string()))?,
         );
         db.start_auto_flush(LiteConfig::default().auto_flush_ms);
+        db.start_auto_compact(LiteConfig::default().auto_compact_ms);
         Ok(Self {
             inner: NodeDbLiteWasmInner::Persistent(db),
         })
@@ -260,6 +264,7 @@ impl NodeDbLiteWasm {
         };
         let config = config_from_memory_mb(memory_mb);
         let auto_flush_ms = config.auto_flush_ms;
+        let auto_compact_ms = config.auto_compact_ms;
         let storage = PagedbStorageOpfs::open_opfs(filename, worker_url, enc)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
@@ -269,6 +274,7 @@ impl NodeDbLiteWasm {
                 .map_err(|e| JsError::new(&e.to_string()))?,
         );
         db.start_auto_flush(auto_flush_ms);
+        db.start_auto_compact(auto_compact_ms);
         Ok(Self {
             inner: NodeDbLiteWasmInner::Persistent(db),
         })
@@ -551,6 +557,23 @@ impl NodeDbLiteWasm {
     pub async fn flush(&self) -> Result<(), JsError> {
         dispatch!(self, db, {
             db.flush().await.map_err(|e| JsError::new(&e.to_string()))
+        })
+    }
+
+    /// Compact the backing store, reclaiming dead pages and truncating the
+    /// OPFS file to bound on-disk growth.
+    ///
+    /// Returns a `{ reclaimedPages, segmentsRepacked, fileBytesFreed }` object.
+    /// Useful for one-commit-per-entry workloads where the file would otherwise
+    /// grow without bound; a no-op for the in-memory backend.
+    #[wasm_bindgen]
+    pub async fn compact(&self) -> Result<JsValue, JsError> {
+        dispatch!(self, db, {
+            let outcome = db
+                .compact()
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))?;
+            serde_wasm_bindgen::to_value(&outcome).map_err(|e| JsError::new(&e.to_string()))
         })
     }
 

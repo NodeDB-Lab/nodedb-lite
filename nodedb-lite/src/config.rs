@@ -10,6 +10,7 @@
 //! |-------------------------------|----------------------------------------------------|---------|
 //! | `NODEDB_LITE_MEMORY_MB`          | Total memory budget in mebibytes                   | 100     |
 //! | `NODEDB_LITE_AUTO_FLUSH_MS`      | Auto-flush interval in milliseconds (0 = disabled) | 1000    |
+//! | `NODEDB_LITE_AUTO_COMPACT_MS`    | Auto-compact interval in milliseconds (0 = disabled) | 0     |
 //! | `NODEDB_LITE_OUTBOUND_QUEUE_CAP` | Max pending entries per durable outbound queue     | 100000  |
 
 use nodedb_types::error::{NodeDbError, NodeDbResult};
@@ -110,6 +111,23 @@ pub struct LiteConfig {
     /// background task; call `flush()` explicitly to guarantee durability.
     #[serde(default = "default_auto_flush_ms")]
     pub auto_flush_ms: u64,
+
+    /// Interval between automatic background compactions, in milliseconds.
+    /// Default: 0 (disabled).
+    ///
+    /// When non-zero, a background task calls the global `compact()` every
+    /// `auto_compact_ms` milliseconds, reclaiming dead pages and truncating the
+    /// backing file to bound on-disk growth. Unlike auto-flush this is
+    /// **opt-in**: compaction is a heavier operation (it repacks B+ trees and
+    /// truncates the file, and no-ops while a reader pins the reclaimable
+    /// range), so it is not imposed on every embedder by default.
+    ///
+    /// Enable it when writing one commit per entry (where the deferred-free
+    /// list would otherwise grow unbounded). A much larger interval than
+    /// `auto_flush_ms` is appropriate — e.g. minutes, not seconds. Set to 0 to
+    /// leave compaction fully manual via `compact()`.
+    #[serde(default = "default_auto_compact_ms")]
+    pub auto_compact_ms: u64,
 }
 
 fn default_outbound_queue_cap() -> usize {
@@ -122,6 +140,10 @@ fn default_kv_cache_capacity() -> usize {
 
 fn default_auto_flush_ms() -> u64 {
     1_000
+}
+
+fn default_auto_compact_ms() -> u64 {
+    0
 }
 
 fn default_sync_enabled() -> bool {
@@ -155,6 +177,7 @@ impl Default for LiteConfig {
             argon2_p_cost: default_argon2_p_cost(),
             kv_cache_capacity: default_kv_cache_capacity(),
             auto_flush_ms: default_auto_flush_ms(),
+            auto_compact_ms: default_auto_compact_ms(),
         }
     }
 }
@@ -167,6 +190,8 @@ impl LiteConfig {
     /// - `NODEDB_LITE_MEMORY_MB` — total memory budget in mebibytes (parsed as `usize`)
     /// - `NODEDB_LITE_AUTO_FLUSH_MS` — auto-flush interval in milliseconds (parsed as `u64`;
     ///   0 = disabled)
+    /// - `NODEDB_LITE_AUTO_COMPACT_MS` — auto-compact interval in milliseconds (parsed as `u64`;
+    ///   0 = disabled, the default)
     /// - `NODEDB_LITE_OUTBOUND_QUEUE_CAP` — max pending entries per durable outbound queue
     ///   (parsed as `usize`; must be > 0)
     pub fn from_env() -> Self {
@@ -243,6 +268,27 @@ impl LiteConfig {
             }
         }
 
+        if let Ok(val) = std::env::var("NODEDB_LITE_AUTO_COMPACT_MS") {
+            match val.trim().parse::<u64>() {
+                Ok(ms) => {
+                    tracing::info!(
+                        env_var = "NODEDB_LITE_AUTO_COMPACT_MS",
+                        value = ms,
+                        "environment variable override applied"
+                    );
+                    cfg.auto_compact_ms = ms;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        env_var = "NODEDB_LITE_AUTO_COMPACT_MS",
+                        value = %val,
+                        "ignoring malformed environment variable (expected unsigned integer), \
+                         using default 0 (disabled)"
+                    );
+                }
+            }
+        }
+
         cfg
     }
 
@@ -298,6 +344,8 @@ mod tests {
         assert_eq!(cfg.argon2_t_cost, 2);
         assert_eq!(cfg.argon2_p_cost, 1);
         assert_eq!(cfg.auto_flush_ms, 1_000);
+        // Auto-compaction is opt-in: disabled by default.
+        assert_eq!(cfg.auto_compact_ms, 0);
     }
 
     #[test]
@@ -385,6 +433,32 @@ mod tests {
 
         // Cleanup.
         unsafe { std::env::remove_var("NODEDB_LITE_AUTO_FLUSH_MS") };
+
+        // NODEDB_LITE_AUTO_COMPACT_MS cases.
+
+        // Case A: var absent → default 0 (disabled).
+        unsafe { std::env::remove_var("NODEDB_LITE_AUTO_COMPACT_MS") };
+        let cfg = LiteConfig::from_env();
+        assert_eq!(
+            cfg.auto_compact_ms, 0,
+            "absent var should give default 0 (disabled)"
+        );
+
+        // Case B: valid integer → applied.
+        unsafe { std::env::set_var("NODEDB_LITE_AUTO_COMPACT_MS", "300000") };
+        let cfg = LiteConfig::from_env();
+        assert_eq!(cfg.auto_compact_ms, 300_000, "300000 ms should be applied");
+
+        // Case C: malformed → fallback to default 0.
+        unsafe { std::env::set_var("NODEDB_LITE_AUTO_COMPACT_MS", "not_a_number") };
+        let cfg = LiteConfig::from_env();
+        assert_eq!(
+            cfg.auto_compact_ms, 0,
+            "malformed var should fall back to default 0"
+        );
+
+        // Cleanup.
+        unsafe { std::env::remove_var("NODEDB_LITE_AUTO_COMPACT_MS") };
     }
 
     #[test]

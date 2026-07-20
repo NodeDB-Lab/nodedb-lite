@@ -24,7 +24,8 @@ pub type KvPair = (Vec<u8>, Vec<u8>);
 /// non-pagedb impls. The pagedb-backed engine maps `pagedb::CompactStats` into
 /// this; other engines return the `Default` (all-zero) value from the trait's
 /// default no-op `compact`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CompactionOutcome {
     /// Number of underlying pages reclaimed (moved to free-list or freed by
     /// repacking). Zero for engines with nothing to compact.

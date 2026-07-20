@@ -133,9 +133,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// drains the deferred-free list and truncates `main.db`; for in-memory or
     /// test engines it is a no-op returning a zero
     /// [`CompactionOutcome`](crate::storage::engine::CompactionOutcome).
-    pub async fn compact(
-        &self,
-    ) -> NodeDbResult<crate::storage::engine::CompactionOutcome> {
+    pub async fn compact(&self) -> NodeDbResult<crate::storage::engine::CompactionOutcome> {
         Ok(self.storage.compact().await?)
     }
 

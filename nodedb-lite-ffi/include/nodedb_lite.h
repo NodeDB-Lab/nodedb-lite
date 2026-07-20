@@ -87,6 +87,25 @@ void nodedb_close(struct NodeDbNodeDbHandle *handle);
 int32_t nodedb_flush(struct NodeDbNodeDbHandle *handle);
 
 /**
+ * Compact the backing store, reclaiming dead pages and truncating the file to
+ * bound on-disk growth.
+ *
+ * The three `out_*` pointers receive the compaction outcome; any of them may
+ * be NULL to ignore that field. On error they are left untouched.
+ *
+ * Returns `NODEDB_OK` on success, `NODEDB_ERR_NULL` if `handle` is NULL, or
+ * `NODEDB_ERR_FAILED` on a compaction error.
+ *
+ * # Safety
+ * `handle` must be a valid pointer returned by `nodedb_open`. Each non-NULL
+ * `out_*` pointer must be writable and correctly aligned.
+ */
+int32_t nodedb_compact(struct NodeDbNodeDbHandle *handle,
+                       uint64_t *out_reclaimed_pages,
+                       uint32_t *out_segments_repacked,
+                       uint64_t *out_file_bytes_freed);
+
+/**
  * Start background CRDT sync to an Origin server.
  *
  * Connects via WebSocket to the given URL, authenticates with the JWT token,

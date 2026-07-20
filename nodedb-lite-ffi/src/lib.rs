@@ -150,9 +150,12 @@ pub unsafe extern "C" fn nodedb_open(
             Err(_) => return std::ptr::null_mut(),
         };
 
-        let auto_flush_ms = LiteConfig::default().auto_flush_ms;
+        let defaults = LiteConfig::default();
+        let auto_flush_ms = defaults.auto_flush_ms;
+        let auto_compact_ms = defaults.auto_compact_ms;
         let _guard = rt.enter();
         db.start_auto_flush(auto_flush_ms);
+        db.start_auto_compact(auto_compact_ms);
 
         handle_registry::insert(NodeDbHandle {
             db,
@@ -226,6 +229,7 @@ pub unsafe extern "C" fn nodedb_open_with_config(
         };
 
         let auto_flush_ms = config.auto_flush_ms;
+        let auto_compact_ms = config.auto_compact_ms;
         let db = match rt.block_on(NodeDbLite::open_with_config(storage, peer_id, config)) {
             Ok(db) => Arc::new(db),
             Err(_) => return std::ptr::null_mut(),
@@ -233,6 +237,7 @@ pub unsafe extern "C" fn nodedb_open_with_config(
 
         let _guard = rt.enter();
         db.start_auto_flush(auto_flush_ms);
+        db.start_auto_compact(auto_compact_ms);
 
         handle_registry::insert(NodeDbHandle {
             db,
@@ -268,6 +273,47 @@ pub unsafe extern "C" fn nodedb_flush(handle: *mut NodeDbHandle) -> i32 {
         };
         match h.rt.block_on(h.db.flush()) {
             Ok(()) => NODEDB_OK,
+            Err(_) => NODEDB_ERR_FAILED,
+        }
+    })
+}
+
+/// Compact the backing store, reclaiming dead pages and truncating the file to
+/// bound on-disk growth.
+///
+/// The three `out_*` pointers receive the compaction outcome; any of them may
+/// be NULL to ignore that field. On error they are left untouched.
+///
+/// Returns `NODEDB_OK` on success, `NODEDB_ERR_NULL` if `handle` is NULL, or
+/// `NODEDB_ERR_FAILED` on a compaction error.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by `nodedb_open`. Each non-NULL
+/// `out_*` pointer must be writable and correctly aligned.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nodedb_compact(
+    handle: *mut NodeDbHandle,
+    out_reclaimed_pages: *mut u64,
+    out_segments_repacked: *mut u32,
+    out_file_bytes_freed: *mut u64,
+) -> i32 {
+    ffi_guard(NODEDB_ERR_FAILED, || {
+        let Some(h) = handle_ref(handle) else {
+            return NODEDB_ERR_NULL;
+        };
+        match h.rt.block_on(h.db.compact()) {
+            Ok(outcome) => {
+                if !out_reclaimed_pages.is_null() {
+                    unsafe { *out_reclaimed_pages = outcome.reclaimed_pages };
+                }
+                if !out_segments_repacked.is_null() {
+                    unsafe { *out_segments_repacked = outcome.segments_repacked };
+                }
+                if !out_file_bytes_freed.is_null() {
+                    unsafe { *out_file_bytes_freed = outcome.file_bytes_freed };
+                }
+                NODEDB_OK
+            }
             Err(_) => NODEDB_ERR_FAILED,
         }
     })

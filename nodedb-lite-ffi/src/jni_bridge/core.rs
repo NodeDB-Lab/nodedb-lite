@@ -105,6 +105,25 @@ pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_nativeFlush(
     })
 }
 
+/// Compact the backing store, returning the number of bytes truncated from the
+/// backing file, or `-1` on error (a null handle or a compaction failure).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_nativeCompact(
+    _env: JNIEnv,
+    _obj: JObject,
+    handle: jlong,
+) -> jlong {
+    ffi_guard(-1, || {
+        let Some(h) = get_handle(handle) else {
+            return -1;
+        };
+        match h.rt.block_on(h.db.compact()) {
+            Ok(outcome) => i64::try_from(outcome.file_bytes_freed).unwrap_or(i64::MAX),
+            Err(_) => -1,
+        }
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_nativeVectorInsert(
     mut env: JNIEnv,

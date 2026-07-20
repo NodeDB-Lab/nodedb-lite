@@ -54,6 +54,22 @@ class NodeDbLite private constructor(private var handle: Long) : Closeable {
     }
 
     /**
+     * Compact the backing store, reclaiming dead pages and truncating the
+     * database file to bound on-disk growth.
+     *
+     * Useful for one-commit-per-entry workloads where the file would otherwise
+     * grow without bound. No-ops while a reader pins the reclaimable range.
+     *
+     * @return the number of bytes truncated from the database file.
+     */
+    fun compact(): Long {
+        checkOpen()
+        val freed = nativeCompact(handle)
+        if (freed < 0) throw NodeDbException("compact failed")
+        return freed
+    }
+
+    /**
      * Close the database and release all resources.
      * Safe to call multiple times.
      */
@@ -166,6 +182,7 @@ class NodeDbLite private constructor(private var handle: Long) : Closeable {
     // ── JNI Native Methods ──
 
     private external fun nativeFlush(handle: Long): Int
+    private external fun nativeCompact(handle: Long): Long
     private external fun nativeClose(handle: Long)
     private external fun nativeVectorInsert(
         handle: Long, collection: String, id: String,
