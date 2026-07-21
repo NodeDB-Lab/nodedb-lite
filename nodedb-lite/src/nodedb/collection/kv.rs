@@ -269,7 +269,14 @@ impl<S: StorageEngine> NodeDbLite<S> {
     }
 
     /// KV DELETE: remove a key.
+    ///
+    /// Returns `true` when a live value was present and removed, `false` when
+    /// the key was absent (or already expired) — mirroring `HashMap::remove`.
     pub async fn kv_delete(&self, collection: &str, key: &str) -> NodeDbResult<bool> {
+        // Capture prior presence so the returned bool means "a live value was
+        // removed" rather than an unconditional `true`.
+        let existed = self.kv_get(collection, key).await?.is_some();
+
         let rkey = kv_key(collection, key.as_bytes());
 
         let should_flush = {
@@ -300,7 +307,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             crdt_err.map_err(NodeDbError::storage)?;
         }
 
-        Ok(true)
+        Ok(existed)
     }
 
     /// KV RANGE SCAN: ordered key scan with optional bounds and limit.
