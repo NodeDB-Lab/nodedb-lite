@@ -145,7 +145,7 @@ async fn delete_on_bitemporal_appends_tombstone_not_hard_delete() {
         .unwrap();
 
     // Append a tombstone at t=200 via storage to simulate a timed delete.
-    versioned_tombstone(&storage, "bt_delete", "doc1", 200)
+    versioned_tombstone(&storage, "bt_delete", "doc1", 200, None)
         .await
         .unwrap();
 

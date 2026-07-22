@@ -261,7 +261,7 @@ mod tests {
         versioned_put(&s, "c", "d1", b"hello", 100, None, None)
             .await
             .unwrap();
-        versioned_tombstone(&s, "c", "d1", 200).await.unwrap();
+        versioned_tombstone(&s, "c", "d1", 200, None).await.unwrap();
 
         // Pointer must be absent after tombstone.
         let ptr_key = latest_version_key("c", "d1");
@@ -290,7 +290,7 @@ mod tests {
         versioned_put(&s, "c", "d1", b"v3", 300, None, None)
             .await
             .unwrap();
-        versioned_tombstone(&s, "c", "d1", 400).await.unwrap();
+        versioned_tombstone(&s, "c", "d1", 400, None).await.unwrap();
 
         // No current version.
         assert!(
@@ -329,7 +329,7 @@ mod tests {
         versioned_put(&s, "c", "d1", b"hello", 100, None, None)
             .await
             .unwrap();
-        versioned_tombstone(&s, "c", "d1", 200).await.unwrap();
+        versioned_tombstone(&s, "c", "d1", 200, None).await.unwrap();
         assert!(
             versioned_get_current(&s, "c", "d1")
                 .await
@@ -349,7 +349,7 @@ mod tests {
         versioned_put(&s, "c", "dead", b"body", 100, None, None)
             .await
             .unwrap();
-        versioned_tombstone(&s, "c", "dead", 200).await.unwrap();
+        versioned_tombstone(&s, "c", "dead", 200, None).await.unwrap();
 
         let mut docs = scan_live_documents(&s, "c").await.unwrap();
         docs.sort();

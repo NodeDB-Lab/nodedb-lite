@@ -299,7 +299,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .map_err(NodeDbError::storage)?
         {
             let now_ms = monotonic_millis_i64();
-            versioned_tombstone(&*self.storage, collection, id, now_ms)
+            // Monotonic system-time key; wall-clock valid_from so the deletion is
+            // visible to "valid as-of now" queries immediately (see versioned_put).
+            versioned_tombstone(&*self.storage, collection, id, now_ms, Some(now_millis_i64()))
                 .await
                 .map_err(NodeDbError::storage)?;
             // FTS removal still applies — the document is logically gone now.

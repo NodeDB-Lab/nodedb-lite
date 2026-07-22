@@ -56,6 +56,12 @@ pub async fn versioned_put<S: StorageEngine>(
 /// Writing a tombstone marks the document as deleted in system time from
 /// `system_from_ms` onward. The body is left empty.
 ///
+/// `valid_from_ms` defaults to `system_from_ms` when `None`. Callers that pass a
+/// monotonic (uniqueness-guaranteed) `system_from_ms` for the version key should
+/// pass the true wall-clock time as `valid_from_ms` so a "valid as-of now" query
+/// sees the deletion immediately (the monotonic system time can sit a few ms
+/// ahead of wall-clock under burst).
+///
 /// Atomically removes the `LatestVersion` pointer so `versioned_get_current`
 /// returns `None` without scanning history.
 pub async fn versioned_tombstone<S: StorageEngine>(
@@ -63,9 +69,11 @@ pub async fn versioned_tombstone<S: StorageEngine>(
     collection: &str,
     doc_id: &str,
     system_from_ms: i64,
+    valid_from_ms: Option<i64>,
 ) -> Result<(), LiteError> {
     let history_key = versioned_doc_key(collection, doc_id, system_from_ms)?;
-    let history_value = encode_value(VersionTag::Tombstone, system_from_ms, i64::MAX, &[]);
+    let vf = valid_from_ms.unwrap_or(system_from_ms);
+    let history_value = encode_value(VersionTag::Tombstone, vf, i64::MAX, &[]);
 
     let pointer_key = latest_version_key(collection, doc_id);
 
