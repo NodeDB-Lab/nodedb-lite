@@ -79,9 +79,17 @@ serde-wasm-bindgen = "0.6"
 
 [profile.dev]
 debug = "line-tables-only"
+# Strip symbol tables from dev/test binaries to keep target/ small. This
+# unsymbolises ordinary dev builds; use `--profile debugging` for full symbols.
+strip = true
 
 [profile.dev.package."*"]
 debug = false
+
+[profile.debugging]
+inherits = "dev"
+debug = true
+strip = false
 
 [profile.ci]
 inherits = "dev"
