@@ -28,6 +28,11 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             tenant_id,
             name,
             purge_lsn,
+            // Lite is single-process/single-core: it always owns and reclaims
+            // its own on-disk L1 files, so the Control-Plane fan-out flag
+            // (which selects exactly one core to unlink the shared files) does
+            // not apply here — this core always fully reclaims.
+            reclaim_l1_files: _,
         } => {
             let tid = *tenant_id;
             let n = name.clone();
