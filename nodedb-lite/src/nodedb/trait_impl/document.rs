@@ -23,7 +23,7 @@ use crate::engine::document::history::value::DecodedVersion;
 use crate::nodedb::LockExt;
 use crate::nodedb::NodeDbLite;
 use crate::nodedb::convert::{document_to_msgpack, loro_value_to_document, value_to_loro};
-use crate::runtime::now_millis_i64;
+use crate::runtime::{monotonic_millis_i64, now_millis_i64};
 use crate::storage::engine::StorageEngine;
 
 impl<S: StorageEngine> NodeDbLite<S> {
@@ -102,7 +102,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .await
             .map_err(NodeDbError::storage)?
         {
-            let now_ms = now_millis_i64();
+            let now_ms = monotonic_millis_i64();
             let body = document_to_msgpack(&doc);
             versioned_put(
                 &*self.storage,
@@ -110,7 +110,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 &doc_id,
                 &body,
                 now_ms,
-                None,
+                // system-time (`now_ms`) is monotonic for a unique history key;
+                // valid_from must stay true wall-clock so "valid as-of now"
+                // queries see the row immediately (no monotonic future-skew).
+                Some(now_millis_i64()),
                 None,
             )
             .await
@@ -190,7 +193,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .await
             .map_err(NodeDbError::storage)?
         {
-            let now_ms = now_millis_i64();
+            let now_ms = monotonic_millis_i64();
             let body = document_to_msgpack(&doc);
             versioned_put(
                 &*self.storage,
@@ -198,7 +201,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 &doc_id,
                 &body,
                 now_ms,
-                None,
+                // See note above: monotonic system-time key, wall-clock valid_from.
+                Some(now_millis_i64()),
                 None,
             )
             .await
@@ -294,7 +298,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .await
             .map_err(NodeDbError::storage)?
         {
-            let now_ms = now_millis_i64();
+            let now_ms = monotonic_millis_i64();
             versioned_tombstone(&*self.storage, collection, id, now_ms)
                 .await
                 .map_err(NodeDbError::storage)?;
@@ -388,7 +392,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 .map_err(NodeDbError::storage)?;
         }
 
-        let now_ms = now_millis_i64();
+        let now_ms = monotonic_millis_i64();
         let body = document_to_msgpack(&doc);
         versioned_put(
             &*self.storage,
@@ -396,7 +400,11 @@ impl<S: StorageEngine> NodeDbLite<S> {
             &doc_id,
             &body,
             now_ms,
-            valid_from_ms,
+            // Monotonic system-time key; an unspecified valid_from means "valid
+            // from now", which must be true wall-clock (not the monotonic
+            // system time) so it never lands ahead of a concurrent
+            // valid_until = now (which would invert the window).
+            valid_from_ms.or_else(|| Some(now_millis_i64())),
             valid_until_ms,
         )
         .await

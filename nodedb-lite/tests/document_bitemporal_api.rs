@@ -345,3 +345,55 @@ async fn sql_ddl_bitemporal_collection_is_queryable_and_persists_meta() {
         "SELECT id FROM entries must return the three inserted documents"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test — same_millisecond_writes_keep_distinct_versions
+// ---------------------------------------------------------------------------
+
+/// Two writes to the same document with no artificial spacing — a `document_put`
+/// immediately followed by a valid-time close — land in the same wall-clock
+/// millisecond on a fast machine. Each must still produce a DISTINCT history
+/// row: the version key derives from a strictly-monotonic system clock, so the
+/// second write cannot collide with and silently overwrite the first.
+///
+/// Regression test: previously the key used raw millisecond wall-clock time, so
+/// same-millisecond writes produced an identical key and the second silently
+/// overwrote the first, collapsing the history to a single version.
+#[tokio::test]
+async fn same_millisecond_writes_keep_distinct_versions() {
+    use nodedb_lite::storage::engine::StorageEngine;
+    use nodedb_types::Namespace;
+
+    let (db, storage) = open_db_with_storage().await;
+
+    db.execute_sql("CREATE COLLECTION bt_samems WITH (bitemporal=true)", &[])
+        .await
+        .unwrap();
+
+    // Initial live version.
+    let mut doc = Document::new("doc1");
+    doc.set("state", Value::String("open".into()));
+    db.document_put("bt_samems", doc).await.unwrap();
+
+    // Immediately close its valid-time window — back-to-back, no delay, so both
+    // writes capture the same wall-clock millisecond.
+    let mut closed = Document::new("doc1");
+    closed.set("state", Value::String("open".into()));
+    db.document_put_with_valid_time("bt_samems", closed, Some(1), Some(1_000))
+        .await
+        .unwrap();
+
+    // Both versions must survive in the history table.
+    let prefix = b"bt_samems:doc1\x00".to_vec();
+    let rows = storage
+        .scan_prefix(Namespace::DocumentHistory, &prefix)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        2,
+        "same-millisecond put + valid-time close must retain 2 distinct history \
+         versions, got {}",
+        rows.len()
+    );
+}

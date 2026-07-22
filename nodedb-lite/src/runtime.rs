@@ -148,6 +148,37 @@ pub fn now_millis_i64() -> i64 {
     now_millis() as i64
 }
 
+/// Last system-time millisecond handed out by [`monotonic_millis_i64`].
+static LAST_SYS_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Get a strictly-monotonic system timestamp in milliseconds since Unix epoch.
+///
+/// Like [`now_millis_i64`] but guarantees the returned value is strictly greater
+/// than any value previously returned **within this process**. When the
+/// wall-clock has not advanced since the last call (or moves backwards), the
+/// previous value `+ 1` is returned instead.
+///
+/// The bitemporal document history keys each version by `system_from_ms`
+/// (`{collection}:{doc_id}\0{system_from_ms:020}`). Two writes landing in the
+/// same wall-clock millisecond — e.g. a `put` immediately followed by a
+/// valid-time close — would otherwise derive the identical version key and the
+/// second write would silently overwrite the first (the storage layer is plain
+/// last-write-wins KV). This clock gives every version a distinct, ordered key.
+/// The sub-millisecond forward skew under burst is bounded by the write rate and
+/// self-corrects once wall-clock time catches up.
+pub fn monotonic_millis_i64() -> i64 {
+    use std::sync::atomic::Ordering;
+    let now = now_millis_i64();
+    loop {
+        let last = LAST_SYS_MS.load(Ordering::Relaxed);
+        let next = if now > last { now } else { last + 1 };
+        match LAST_SYS_MS.compare_exchange_weak(last, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(_) => continue,
+        }
+    }
+}
+
 /// Get the current timestamp in seconds since Unix epoch.
 pub fn now_secs() -> u64 {
     now_millis() / 1000
