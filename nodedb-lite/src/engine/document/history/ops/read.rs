@@ -349,7 +349,9 @@ mod tests {
         versioned_put(&s, "c", "dead", b"body", 100, None, None)
             .await
             .unwrap();
-        versioned_tombstone(&s, "c", "dead", 200, None).await.unwrap();
+        versioned_tombstone(&s, "c", "dead", 200, None)
+            .await
+            .unwrap();
 
         let mut docs = scan_live_documents(&s, "c").await.unwrap();
         docs.sort();

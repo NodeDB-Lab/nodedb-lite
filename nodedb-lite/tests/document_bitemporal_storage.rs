@@ -86,7 +86,9 @@ async fn put_then_tombstone_then_get_current_returns_none() {
     versioned_put(&s, "docs", "d1", b"body", 100, None, None)
         .await
         .unwrap();
-    versioned_tombstone(&s, "docs", "d1", 200, None).await.unwrap();
+    versioned_tombstone(&s, "docs", "d1", 200, None)
+        .await
+        .unwrap();
 
     let result = versioned_get_current(&s, "docs", "d1").await.unwrap();
     assert!(result.is_none(), "tombstoned document must not be returned");
