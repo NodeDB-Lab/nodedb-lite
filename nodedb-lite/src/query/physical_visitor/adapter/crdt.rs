@@ -230,5 +230,16 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                     .await
             }))
         }
+
+        // Speculative preview-apply (apply a delta to a fork for preview,
+        // committed or discarded later) is an Origin-plane concept: it needs
+        // the fork/pending-check machinery Lite does not run locally. Applying
+        // it as an ordinary delta would silently commit a write meant to stay
+        // speculative, so reject it explicitly rather than misapply it.
+        CrdtOp::PreviewApply { .. } => Err(LiteError::Unsupported {
+            detail: "PreviewApply requires the CRDT preview/fork subsystem, \
+                     which Lite does not implement locally"
+                .into(),
+        }),
     }
 }
