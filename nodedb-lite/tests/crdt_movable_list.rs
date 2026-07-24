@@ -110,11 +110,13 @@ async fn list_insert_move_delete_round_trip_on_fresh_row() {
         .expect("list_delete removes the trailing block");
 
     let replay = replay_deltas(&db);
-    let len = nodedb_crdt::list_ops::list_length(replay.doc(), "pages", "page-1", "blocks")
+    let len = replay
+        .list_length("pages", "page-1", "blocks")
         .expect("list_length on replayed state");
     assert_eq!(len, 1, "exactly one block should remain");
 
-    let value = nodedb_crdt::list_ops::list_get(replay.doc(), "pages", "page-1", "blocks", 0)
+    let value = replay
+        .list_get("pages", "page-1", "blocks", 0)
         .expect("list_get on replayed state")
         .expect("block at index 0 must exist");
 
@@ -154,7 +156,8 @@ async fn list_insert_auto_vivifies_nested_path() {
     .expect("list_insert auto-vivifies intermediate maps and the list");
 
     let replay = replay_deltas(&db);
-    let len = nodedb_crdt::list_ops::list_length(replay.doc(), "pages", "page-2", "content.blocks")
+    let len = replay
+        .list_length("pages", "page-2", "content.blocks")
         .expect("list_length on replayed nested state");
     assert_eq!(len, 1);
 }

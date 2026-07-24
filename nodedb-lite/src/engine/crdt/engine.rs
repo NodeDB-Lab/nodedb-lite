@@ -144,7 +144,7 @@ impl CrdtEngine {
         fields: &[(&str, LoroValue)],
     ) -> Result<u64, LiteError> {
         // Snapshot before mutation for delta extraction.
-        let version_before = self.state.doc().oplog_vv();
+        let version_before = self.state.oplog_version_vector();
 
         self.state
             .upsert(collection, doc_id, fields)
@@ -155,8 +155,7 @@ impl CrdtEngine {
         // Extract the delta (operations since version_before).
         let delta_bytes = self
             .state
-            .doc()
-            .export(loro::ExportMode::updates(&version_before))
+            .export_updates_since(&version_before)
             .map_err(|e| LiteError::Storage {
                 detail: format!("delta export failed: {e}"),
             })?;
@@ -185,7 +184,7 @@ impl CrdtEngine {
         doc_id: &str,
         fields: &[(&str, LoroValue)],
     ) -> Result<u64, LiteError> {
-        let version_before = self.state.doc().oplog_vv();
+        let version_before = self.state.oplog_version_vector();
 
         self.state
             .set_fields(collection, doc_id, fields)
@@ -195,8 +194,7 @@ impl CrdtEngine {
 
         let delta_bytes = self
             .state
-            .doc()
-            .export(loro::ExportMode::updates(&version_before))
+            .export_updates_since(&version_before)
             .map_err(|e| LiteError::Storage {
                 detail: format!("delta export failed: {e}"),
             })?;
@@ -215,7 +213,7 @@ impl CrdtEngine {
 
     /// Delete a document/row.
     pub fn delete(&mut self, collection: &str, doc_id: &str) -> Result<u64, LiteError> {
-        let version_before = self.state.doc().oplog_vv();
+        let version_before = self.state.oplog_version_vector();
 
         self.state
             .delete(collection, doc_id)
@@ -225,8 +223,7 @@ impl CrdtEngine {
 
         let delta_bytes = self
             .state
-            .doc()
-            .export(loro::ExportMode::updates(&version_before))
+            .export_updates_since(&version_before)
             .map_err(|e| LiteError::Storage {
                 detail: format!("delta export failed: {e}"),
             })?;
@@ -252,7 +249,7 @@ impl CrdtEngine {
             return Ok(0);
         }
 
-        let version_before = self.state.doc().oplog_vv();
+        let version_before = self.state.oplog_version_vector();
 
         for &(collection, doc_id, fields) in ops {
             self.state
@@ -264,8 +261,7 @@ impl CrdtEngine {
 
         let delta_bytes = self
             .state
-            .doc()
-            .export(loro::ExportMode::updates(&version_before))
+            .export_updates_since(&version_before)
             .map_err(|e| LiteError::Storage {
                 detail: format!("batch delta export failed: {e}"),
             })?;
@@ -306,7 +302,7 @@ impl CrdtEngine {
     ) -> Result<(), LiteError> {
         // Capture version before if this is the first deferred op.
         if self.deferred_version.is_none() {
-            self.deferred_version = Some(self.state.doc().oplog_vv());
+            self.deferred_version = Some(self.state.oplog_version_vector());
         }
 
         self.state
@@ -321,7 +317,7 @@ impl CrdtEngine {
     /// Delete without generating a delta. Use `flush_deltas()` later.
     pub fn delete_deferred(&mut self, collection: &str, doc_id: &str) -> Result<(), LiteError> {
         if self.deferred_version.is_none() {
-            self.deferred_version = Some(self.state.doc().oplog_vv());
+            self.deferred_version = Some(self.state.oplog_version_vector());
         }
 
         self.state
@@ -351,8 +347,7 @@ impl CrdtEngine {
 
         let delta_bytes = self
             .state
-            .doc()
-            .export(loro::ExportMode::updates(&version_before))
+            .export_updates_since(&version_before)
             .map_err(|e| LiteError::Storage {
                 detail: format!("flush delta export failed: {e}"),
             })?;
@@ -400,7 +395,7 @@ impl CrdtEngine {
     /// Delete all documents in a collection in a single batch.
     /// Returns the number of documents deleted. Generates one delta.
     pub fn clear_collection(&mut self, collection: &str) -> Result<usize, LiteError> {
-        let version_before = self.state.doc().oplog_vv();
+        let version_before = self.state.oplog_version_vector();
 
         let count = self
             .state
@@ -412,8 +407,7 @@ impl CrdtEngine {
         if count > 0 {
             let delta_bytes = self
                 .state
-                .doc()
-                .export(loro::ExportMode::updates(&version_before))
+                .export_updates_since(&version_before)
                 .map_err(|e| LiteError::Storage {
                     detail: format!("delta export after clear: {e}"),
                 })?;
@@ -588,7 +582,7 @@ impl CrdtEngine {
     ///
     /// Format: `{ peer_id_hex: counter }` — matches the Loro version vector.
     pub fn export_vector_clock(&self) -> HashMap<String, u64> {
-        let vv = self.state.doc().oplog_vv();
+        let vv = self.state.oplog_version_vector();
         let mut clock = HashMap::new();
         // Loro's VersionVector maps PeerID → Counter.
         // We encode PeerID as hex string for wire compatibility.
@@ -734,14 +728,13 @@ impl CrdtEngine {
         body: F,
     ) -> Result<(), LiteError>
     where
-        F: FnOnce(&loro::LoroDoc) -> Result<(), LiteError>,
+        F: FnOnce(&CrdtState) -> Result<(), LiteError>,
     {
-        let version_before = self.state.doc().oplog_vv();
-        body(self.state.doc())?;
+        let version_before = self.state.oplog_version_vector();
+        body(&self.state)?;
         let delta_bytes = self
             .state
-            .doc()
-            .export(loro::ExportMode::updates(&version_before))
+            .export_updates_since(&version_before)
             .map_err(|e| LiteError::Storage {
                 detail: format!("{op_name} delta export: {e}"),
             })?;
@@ -771,28 +764,21 @@ impl CrdtEngine {
     ) -> Result<(), LiteError> {
         use sonic_rs::JsonContainerTrait as _;
 
-        self.with_delta_capture(collection, document_id, "list_insert", |doc| {
-            let block = nodedb_crdt::list_ops::list_insert_container(
-                doc,
-                collection,
-                document_id,
-                list_path,
-                index,
-            )
-            .map_err(|e| LiteError::Storage {
-                detail: format!("list_insert container: {e}"),
-            })?;
-
-            if let Some(obj) = fields.as_object() {
-                for (k, v) in obj {
-                    block
-                        .insert(k, sonic_value_to_loro(v))
-                        .map_err(|e| LiteError::Storage {
-                            detail: format!("list_insert field '{k}': {e}"),
-                        })?;
-                }
+        // Convert the JSON object to the scalar-field slice CrdtState expects.
+        // The raw LoroDoc handle stays encapsulated inside CrdtState.
+        let mut field_values: Vec<(String, loro::LoroValue)> = Vec::new();
+        if let Some(obj) = fields.as_object() {
+            for (k, v) in obj {
+                field_values.push((k.to_string(), sonic_value_to_loro(v)));
             }
-            Ok(())
+        }
+
+        self.with_delta_capture(collection, document_id, "list_insert", |state| {
+            state
+                .list_insert_fields(collection, document_id, list_path, index, &field_values)
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("list_insert: {e}"),
+                })
         })
     }
 
@@ -804,8 +790,9 @@ impl CrdtEngine {
         list_path: &str,
         index: usize,
     ) -> Result<(), LiteError> {
-        self.with_delta_capture(collection, document_id, "list_delete", |doc| {
-            nodedb_crdt::list_ops::list_delete(doc, collection, document_id, list_path, index)
+        self.with_delta_capture(collection, document_id, "list_delete", |state| {
+            state
+                .list_delete(collection, document_id, list_path, index)
                 .map_err(|e| LiteError::Storage {
                     detail: format!("list_delete: {e}"),
                 })
@@ -821,18 +808,12 @@ impl CrdtEngine {
         from_index: usize,
         to_index: usize,
     ) -> Result<(), LiteError> {
-        self.with_delta_capture(collection, document_id, "list_move", |doc| {
-            nodedb_crdt::list_ops::list_move(
-                doc,
-                collection,
-                document_id,
-                list_path,
-                from_index,
-                to_index,
-            )
-            .map_err(|e| LiteError::Storage {
-                detail: format!("list_move: {e}"),
-            })
+        self.with_delta_capture(collection, document_id, "list_move", |state| {
+            state
+                .list_move(collection, document_id, list_path, from_index, to_index)
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("list_move: {e}"),
+                })
         })
     }
 }
