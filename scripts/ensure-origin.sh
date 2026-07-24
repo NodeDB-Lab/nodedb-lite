@@ -70,9 +70,24 @@ if ! cargo build --manifest-path "$origin_root/Cargo.toml" -p nodedb --bin noded
     exit 1
 fi
 
-bin="$origin_root/target/debug/nodedb"
+# Locate the built binary via the workspace's ACTUAL target directory, not a
+# hardcoded `<root>/target`. The Origin workspace may redirect its output with a
+# `target-dir` in `.cargo/config.toml`, a `CARGO_TARGET_DIR` env var, or a shared
+# target dir — all of which move the binary out from under `<root>/target`. Ask
+# cargo where it actually put things (`cargo metadata`'s `target_directory`),
+# falling back to the default layout when metadata can't be read.
+origin_target="$(cargo metadata --format-version 1 --no-deps \
+    --manifest-path "$origin_root/Cargo.toml" 2>/dev/null \
+    | grep -o '"target_directory":"[^"]*"' \
+    | head -n1 \
+    | sed 's/.*"target_directory":"//; s/"$//')"
+if [ -z "$origin_target" ]; then
+    origin_target="$origin_root/target"
+fi
+
+bin="$origin_target/debug/nodedb"
 if [ ! -x "$bin" ]; then
-    echo "ensure-origin: Origin build reported success but binary not found at $bin; failing the interop suite" >&2
+    echo "ensure-origin: Origin build reported success but binary not found at $bin (target dir: $origin_target); failing the interop suite" >&2
     exit 1
 fi
 
