@@ -135,4 +135,22 @@ impl<'a, S: StorageEngine + 'a> PhysicalTaskVisitor for LiteDataPlaneVisitor<'a,
              cluster_enabled so its SQL planner cannot produce this variant"
         )
     }
+
+    fn cluster_event(
+        &mut self,
+        _op: &nodedb_physical::physical_plan::ClusterEventOp,
+    ) -> Result<LitePhysicalFut<'a>, LiteError> {
+        // ClusterEvent (topic publish / stream consume) is a coordinator-only
+        // cluster operation constructed by the event/CDC/topic subsystem — not
+        // just the SQL planner — so unlike `cluster_array` it is not provably
+        // unreachable here. Lite is single-node and links to Origin via Loro; it
+        // never runs cluster event plans, so reject it explicitly (matching every
+        // other unsupported-in-Lite op) rather than panic on a reachable path.
+        Err(LiteError::Unsupported {
+            detail: "ClusterEvent (topic publish / stream consume) is a \
+                     coordinator-only cluster operation; unsupported on the \
+                     single-node Lite engine"
+                .into(),
+        })
+    }
 }
