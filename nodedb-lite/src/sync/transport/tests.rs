@@ -497,3 +497,59 @@ async fn collection_schema_announced_before_first_delta_and_deduped() {
         "collection must be announced only once per session"
     );
 }
+
+/// A `Gap` ack means Origin did NOT apply the delta — it expected a different
+/// sequence number and skipped this frame entirely. Acknowledging it discards
+/// the pending delta, so the write is lost with only a warning logged.
+///
+/// A non-applied ack must not retire the delta from the pending queue.
+#[tokio::test]
+async fn gap_ack_does_not_retire_the_unapplied_delta() {
+    let client = make_client();
+    let mock = Arc::new(MockDelegate::new());
+    let delegate: Arc<dyn SyncDelegate> = Arc::clone(&mock) as _;
+
+    let ack = nodedb_types::sync::wire::DeltaAckMsg {
+        mutation_id: 42,
+        lsn: 100,
+        clock_skew_warning_ms: None,
+        applied_seq: 0,
+        status: nodedb_types::sync::wire::AckStatus::Gap { expected: 41 },
+    };
+    let frame = SyncFrame::try_encode(SyncMessageType::DeltaAck, &ack).expect("test frame encode");
+
+    dispatch_frame(&client, &delegate, &frame).await;
+
+    assert_eq!(
+        mock.acked_up_to.load(Ordering::Relaxed),
+        0,
+        "a Gap ack retired a delta Origin never applied; the write is lost"
+    );
+}
+
+/// A `Fenced` ack means this producer's epoch was rejected — the delta was not
+/// applied and the client must re-establish its producer identity, not throw
+/// the write away.
+#[tokio::test]
+async fn fenced_ack_does_not_retire_the_unapplied_delta() {
+    let client = make_client();
+    let mock = Arc::new(MockDelegate::new());
+    let delegate: Arc<dyn SyncDelegate> = Arc::clone(&mock) as _;
+
+    let ack = nodedb_types::sync::wire::DeltaAckMsg {
+        mutation_id: 7,
+        lsn: 0,
+        clock_skew_warning_ms: None,
+        applied_seq: 0,
+        status: nodedb_types::sync::wire::AckStatus::Fenced,
+    };
+    let frame = SyncFrame::try_encode(SyncMessageType::DeltaAck, &ack).expect("test frame encode");
+
+    dispatch_frame(&client, &delegate, &frame).await;
+
+    assert_eq!(
+        mock.acked_up_to.load(Ordering::Relaxed),
+        0,
+        "a Fenced ack retired a delta Origin never applied; the write is lost"
+    );
+}

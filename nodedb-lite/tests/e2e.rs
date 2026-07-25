@@ -143,13 +143,20 @@ async fn e2e_delta_acknowledge_clears_pending() {
     let deltas = db.pending_crdt_deltas().unwrap();
     assert_eq!(deltas.len(), 3);
 
-    // ACK the first two.
-    let ack_id = deltas[1].mutation_id;
-    db.acknowledge_deltas(ack_id).unwrap();
+    // ACK only the second delta. Acks are per-mutation, so the first stays
+    // queued — retiring it here would drop a write Origin never acknowledged.
+    db.acknowledge_deltas(deltas[1].mutation_id).unwrap();
 
-    let remaining = db.pending_crdt_deltas().unwrap();
-    assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0].mutation_id, deltas[2].mutation_id);
+    let remaining: Vec<u64> = db
+        .pending_crdt_deltas()
+        .unwrap()
+        .iter()
+        .map(|d| d.mutation_id)
+        .collect();
+    assert_eq!(
+        remaining,
+        vec![deltas[0].mutation_id, deltas[2].mutation_id]
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════

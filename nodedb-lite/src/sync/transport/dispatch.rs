@@ -73,21 +73,37 @@ pub(super) async fn dispatch_frame(
                         // collection field.
                         delegate.acknowledge(ack.mutation_id);
                     }
+                    AckStatus::Accepted => {
+                        // Provisional: Origin admitted the delta but has not
+                        // applied it. Keep it queued until a terminal status
+                        // arrives.
+                        tracing::trace!(
+                            mutation_id = ack.mutation_id,
+                            "DeltaAck: accepted, awaiting apply outcome"
+                        );
+                    }
                     AckStatus::Fenced => {
+                        // Origin did NOT apply this delta — the producer epoch
+                        // was rejected. Retiring it here would drop the write;
+                        // it stays queued for re-push after the producer
+                        // identity is re-established.
                         tracing::error!(
                             mutation_id = ack.mutation_id,
-                            "DeltaAck: producer fenced by Origin; halting push"
+                            "DeltaAck: producer fenced by Origin; halting push, \
+                             delta retained for re-send"
                         );
                         client.set_fenced();
-                        delegate.acknowledge(ack.mutation_id);
                     }
                     AckStatus::Gap { expected } => {
+                        // Origin did NOT apply this delta — it expected a
+                        // different sequence number. The delta stays queued so
+                        // the push loop re-sends it at its stable seq.
                         tracing::warn!(
                             mutation_id = ack.mutation_id,
                             expected,
-                            "DeltaAck: sequence gap detected by Origin"
+                            "DeltaAck: sequence gap detected by Origin; delta \
+                             retained for re-send"
                         );
-                        delegate.acknowledge(ack.mutation_id);
                     }
                 }
                 client.handle_delta_ack(&ack).await;

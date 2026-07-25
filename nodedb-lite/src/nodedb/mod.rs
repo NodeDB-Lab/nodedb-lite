@@ -236,8 +236,12 @@ mod tests {
         let deltas = db.pending_crdt_deltas().unwrap();
         assert_eq!(deltas.len(), 2);
 
-        let max_id = deltas.iter().map(|d| d.mutation_id).max().unwrap();
-        db.acknowledge_deltas(max_id).unwrap();
+        // Acks are per-mutation: each acknowledged delta retires on its own
+        // ack, and an un-acknowledged delta is never retired as a side effect
+        // of a later one.
+        for id in deltas.iter().map(|d| d.mutation_id) {
+            db.acknowledge_deltas(id).unwrap();
+        }
 
         let deltas = db.pending_crdt_deltas().unwrap();
         assert!(deltas.is_empty());

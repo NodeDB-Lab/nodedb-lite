@@ -33,6 +33,10 @@ pub(super) async fn handle_columnar_insert_ack(
             // Delete-on-ack: remove the in-flight record and delete the durable entry.
             delegate.ack_columnar_batch_in_flight(ack.batch_id).await;
         }
+        AckStatus::Accepted => {
+            // Provisional admission, not a terminal outcome: the entry
+            // stays in flight until Origin reports whether it applied.
+        }
         AckStatus::Fenced => {
             tracing::error!(
                 collection = %ack.collection,
@@ -79,6 +83,10 @@ pub(super) async fn handle_vector_insert_ack(
             delegate.record_stream_ack(stream_id, ack.applied_seq).await;
             // Delete-on-ack: remove the in-flight record and delete the durable entry.
             delegate.ack_vector_insert_in_flight(ack.batch_id).await;
+        }
+        AckStatus::Accepted => {
+            // Provisional admission, not a terminal outcome: the entry
+            // stays in flight until Origin reports whether it applied.
         }
         AckStatus::Fenced => {
             tracing::error!(
@@ -131,6 +139,10 @@ pub(super) async fn handle_vector_delete_ack(
             // Delete-on-ack: remove the in-flight record and delete the durable entry.
             delegate.ack_vector_delete_in_flight(ack.batch_id).await;
         }
+        AckStatus::Accepted => {
+            // Provisional admission, not a terminal outcome: the entry
+            // stays in flight until Origin reports whether it applied.
+        }
         AckStatus::Fenced => {
             tracing::error!(
                 collection = %ack.collection,
@@ -174,6 +186,10 @@ pub(super) async fn handle_fts_index_ack(
             // Delete-on-ack: remove the in-flight record and delete the durable entry.
             delegate.ack_fts_index_in_flight(ack.batch_id).await;
         }
+        AckStatus::Accepted => {
+            // Provisional admission, not a terminal outcome: the entry
+            // stays in flight until Origin reports whether it applied.
+        }
         AckStatus::Fenced => {
             tracing::error!(
                 collection = %ack.collection,
@@ -216,6 +232,10 @@ pub(super) async fn handle_fts_delete_ack(
             delegate.record_stream_ack(stream_id, ack.applied_seq).await;
             // Delete-on-ack: remove the in-flight record and delete the durable entry.
             delegate.ack_fts_delete_in_flight(ack.batch_id).await;
+        }
+        AckStatus::Accepted => {
+            // Provisional admission, not a terminal outcome: the entry
+            // stays in flight until Origin reports whether it applied.
         }
         AckStatus::Fenced => {
             tracing::error!(
@@ -261,6 +281,10 @@ pub(super) async fn handle_spatial_insert_ack(
             // Delete-on-ack: remove the in-flight record and delete the durable entry.
             delegate.ack_spatial_insert_in_flight(ack.batch_id).await;
         }
+        AckStatus::Accepted => {
+            // Provisional admission, not a terminal outcome: the entry
+            // stays in flight until Origin reports whether it applied.
+        }
         AckStatus::Fenced => {
             tracing::error!(
                 collection = %ack.collection,
@@ -304,6 +328,10 @@ pub(super) async fn handle_spatial_delete_ack(
             delegate.record_stream_ack(stream_id, ack.applied_seq).await;
             // Delete-on-ack: remove the in-flight record and delete the durable entry.
             delegate.ack_spatial_delete_in_flight(ack.batch_id).await;
+        }
+        AckStatus::Accepted => {
+            // Provisional admission, not a terminal outcome: the entry
+            // stays in flight until Origin reports whether it applied.
         }
         AckStatus::Fenced => {
             tracing::error!(
@@ -349,6 +377,10 @@ pub(super) async fn handle_timeseries_ack(
             delegate
                 .ack_timeseries_batches_through_seq(ack.applied_seq)
                 .await;
+        }
+        AckStatus::Accepted => {
+            // Provisional admission, not a terminal outcome: the entry
+            // stays in flight until Origin reports whether it applied.
         }
         AckStatus::Fenced => {
             tracing::error!(
