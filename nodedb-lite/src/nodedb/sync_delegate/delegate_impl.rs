@@ -103,176 +103,92 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         Vec<u8>,
         crate::sync::outbound::columnar::PendingColumnarBatch,
     )> {
-        match &self.columnar_outbound {
-            Some(q) => q
-                .drain_batch(crate::sync::PUSH_DRAIN_LIMIT)
-                .await
-                .unwrap_or_default(),
-            None => Vec::new(),
-        }
+        super::columnar_handlers::pending_columnar_batches_impl(self).await
     }
 
     async fn mark_columnar_batch_in_flight(&self, batch_id: u64, durable_key: Vec<u8>) {
-        if let Some(q) = &self.columnar_outbound {
-            q.mark_in_flight(batch_id, durable_key).await;
-        }
+        super::columnar_handlers::mark_columnar_batch_in_flight_impl(self, batch_id, durable_key)
+            .await
     }
 
     async fn ack_columnar_batch_in_flight(&self, batch_id: u64) {
-        if let Some(q) = &self.columnar_outbound
-            && let Some(key) = q.ack_in_flight(batch_id).await
-            && let Err(e) = q.ack_keys(&[key]).await
-        {
-            tracing::warn!(batch_id, error = %e, "columnar in-flight ack_keys failed");
-        }
+        super::columnar_handlers::ack_columnar_batch_in_flight_impl(self, batch_id).await
     }
 
     async fn acknowledge_columnar_batch(&self, durable_key: Vec<u8>) {
-        if let Some(q) = &self.columnar_outbound
-            && let Err(e) = q.ack_keys(&[durable_key]).await
-        {
-            tracing::warn!(error = %e, "columnar outbound ack_keys failed");
-        }
+        super::columnar_handlers::acknowledge_columnar_batch_impl(self, durable_key).await
     }
 
     async fn pending_vector_inserts(
         &self,
     ) -> Vec<(Vec<u8>, crate::sync::outbound::vector::PendingVectorInsert)> {
-        match &self.vector_outbound {
-            Some(q) => q
-                .drain_inserts(crate::sync::PUSH_DRAIN_LIMIT)
-                .await
-                .unwrap_or_default(),
-            None => Vec::new(),
-        }
+        super::vector_handlers::pending_vector_inserts_impl(self).await
     }
 
     async fn mark_vector_insert_in_flight(&self, batch_id: u64, durable_key: Vec<u8>) {
-        if let Some(q) = &self.vector_outbound {
-            q.mark_insert_in_flight(batch_id, durable_key).await;
-        }
+        super::vector_handlers::mark_vector_insert_in_flight_impl(self, batch_id, durable_key).await
     }
 
     async fn ack_vector_insert_in_flight(&self, batch_id: u64) {
-        if let Some(q) = &self.vector_outbound
-            && let Some(key) = q.ack_insert_in_flight(batch_id).await
-            && let Err(e) = q.ack_insert_keys(&[key]).await
-        {
-            tracing::warn!(batch_id, error = %e, "vector insert in-flight ack_keys failed");
-        }
+        super::vector_handlers::ack_vector_insert_in_flight_impl(self, batch_id).await
     }
 
     async fn acknowledge_vector_insert(&self, durable_key: Vec<u8>) {
-        if let Some(q) = &self.vector_outbound
-            && let Err(e) = q.ack_insert_keys(&[durable_key]).await
-        {
-            tracing::warn!(error = %e, "vector insert outbound ack_keys failed");
-        }
+        super::vector_handlers::acknowledge_vector_insert_impl(self, durable_key).await
     }
 
     async fn pending_vector_deletes(
         &self,
     ) -> Vec<(Vec<u8>, crate::sync::outbound::vector::PendingVectorDelete)> {
-        match &self.vector_outbound {
-            Some(q) => q
-                .drain_deletes(crate::sync::PUSH_DRAIN_LIMIT)
-                .await
-                .unwrap_or_default(),
-            None => Vec::new(),
-        }
+        super::vector_handlers::pending_vector_deletes_impl(self).await
     }
 
     async fn mark_vector_delete_in_flight(&self, batch_id: u64, durable_key: Vec<u8>) {
-        if let Some(q) = &self.vector_outbound {
-            q.mark_delete_in_flight(batch_id, durable_key).await;
-        }
+        super::vector_handlers::mark_vector_delete_in_flight_impl(self, batch_id, durable_key).await
     }
 
     async fn ack_vector_delete_in_flight(&self, batch_id: u64) {
-        if let Some(q) = &self.vector_outbound
-            && let Some(key) = q.ack_delete_in_flight(batch_id).await
-            && let Err(e) = q.ack_delete_keys(&[key]).await
-        {
-            tracing::warn!(batch_id, error = %e, "vector delete in-flight ack_keys failed");
-        }
+        super::vector_handlers::ack_vector_delete_in_flight_impl(self, batch_id).await
     }
 
     async fn acknowledge_vector_delete(&self, durable_key: Vec<u8>) {
-        if let Some(q) = &self.vector_outbound
-            && let Err(e) = q.ack_delete_keys(&[durable_key]).await
-        {
-            tracing::warn!(error = %e, "vector delete outbound ack_keys failed");
-        }
+        super::vector_handlers::acknowledge_vector_delete_impl(self, durable_key).await
     }
 
     async fn pending_fts_indexes(
         &self,
     ) -> Vec<(Vec<u8>, crate::sync::outbound::fts::PendingFtsIndex)> {
-        match &self.fts_outbound {
-            Some(q) => q
-                .drain_indexes(crate::sync::PUSH_DRAIN_LIMIT)
-                .await
-                .unwrap_or_default(),
-            None => Vec::new(),
-        }
+        super::fts_handlers::pending_fts_indexes_impl(self).await
     }
 
     async fn mark_fts_index_in_flight(&self, batch_id: u64, durable_key: Vec<u8>) {
-        if let Some(q) = &self.fts_outbound {
-            q.mark_index_in_flight(batch_id, durable_key).await;
-        }
+        super::fts_handlers::mark_fts_index_in_flight_impl(self, batch_id, durable_key).await
     }
 
     async fn ack_fts_index_in_flight(&self, batch_id: u64) {
-        if let Some(q) = &self.fts_outbound
-            && let Some(key) = q.ack_index_in_flight(batch_id).await
-            && let Err(e) = q.ack_index_keys(&[key]).await
-        {
-            tracing::warn!(batch_id, error = %e, "fts index in-flight ack_keys failed");
-        }
+        super::fts_handlers::ack_fts_index_in_flight_impl(self, batch_id).await
     }
 
     async fn acknowledge_fts_index(&self, durable_key: Vec<u8>) {
-        if let Some(q) = &self.fts_outbound
-            && let Err(e) = q.ack_index_keys(&[durable_key]).await
-        {
-            tracing::warn!(error = %e, "fts index outbound ack_keys failed");
-        }
+        super::fts_handlers::acknowledge_fts_index_impl(self, durable_key).await
     }
 
     async fn pending_fts_deletes(
         &self,
     ) -> Vec<(Vec<u8>, crate::sync::outbound::fts::PendingFtsDelete)> {
-        match &self.fts_outbound {
-            Some(q) => q
-                .drain_deletes(crate::sync::PUSH_DRAIN_LIMIT)
-                .await
-                .unwrap_or_default(),
-            None => Vec::new(),
-        }
+        super::fts_handlers::pending_fts_deletes_impl(self).await
     }
 
     async fn mark_fts_delete_in_flight(&self, batch_id: u64, durable_key: Vec<u8>) {
-        if let Some(q) = &self.fts_outbound {
-            q.mark_delete_in_flight(batch_id, durable_key).await;
-        }
+        super::fts_handlers::mark_fts_delete_in_flight_impl(self, batch_id, durable_key).await
     }
 
     async fn ack_fts_delete_in_flight(&self, batch_id: u64) {
-        if let Some(q) = &self.fts_outbound
-            && let Some(key) = q.ack_delete_in_flight(batch_id).await
-            && let Err(e) = q.ack_delete_keys(&[key]).await
-        {
-            tracing::warn!(batch_id, error = %e, "fts delete in-flight ack_keys failed");
-        }
+        super::fts_handlers::ack_fts_delete_in_flight_impl(self, batch_id).await
     }
 
     async fn acknowledge_fts_delete(&self, durable_key: Vec<u8>) {
-        if let Some(q) = &self.fts_outbound
-            && let Err(e) = q.ack_delete_keys(&[durable_key]).await
-        {
-            tracing::warn!(error = %e, "fts delete outbound ack_keys failed");
-        }
+        super::fts_handlers::acknowledge_fts_delete_impl(self, durable_key).await
     }
 
     async fn pending_spatial_inserts(
@@ -281,36 +197,20 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         Vec<u8>,
         crate::sync::outbound::spatial::PendingSpatialInsert,
     )> {
-        match &self.spatial_outbound {
-            Some(q) => q
-                .drain_inserts(crate::sync::PUSH_DRAIN_LIMIT)
-                .await
-                .unwrap_or_default(),
-            None => Vec::new(),
-        }
+        super::spatial_handlers::pending_spatial_inserts_impl(self).await
     }
 
     async fn mark_spatial_insert_in_flight(&self, batch_id: u64, durable_key: Vec<u8>) {
-        if let Some(q) = &self.spatial_outbound {
-            q.mark_insert_in_flight(batch_id, durable_key).await;
-        }
+        super::spatial_handlers::mark_spatial_insert_in_flight_impl(self, batch_id, durable_key)
+            .await
     }
 
     async fn ack_spatial_insert_in_flight(&self, batch_id: u64) {
-        if let Some(q) = &self.spatial_outbound
-            && let Some(key) = q.ack_insert_in_flight(batch_id).await
-            && let Err(e) = q.ack_insert_keys(&[key]).await
-        {
-            tracing::warn!(batch_id, error = %e, "spatial insert in-flight ack_keys failed");
-        }
+        super::spatial_handlers::ack_spatial_insert_in_flight_impl(self, batch_id).await
     }
 
     async fn acknowledge_spatial_insert(&self, durable_key: Vec<u8>) {
-        if let Some(q) = &self.spatial_outbound
-            && let Err(e) = q.ack_insert_keys(&[durable_key]).await
-        {
-            tracing::warn!(error = %e, "spatial insert outbound ack_keys failed");
-        }
+        super::spatial_handlers::acknowledge_spatial_insert_impl(self, durable_key).await
     }
 
     async fn pending_spatial_deletes(
@@ -319,36 +219,20 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         Vec<u8>,
         crate::sync::outbound::spatial::PendingSpatialDelete,
     )> {
-        match &self.spatial_outbound {
-            Some(q) => q
-                .drain_deletes(crate::sync::PUSH_DRAIN_LIMIT)
-                .await
-                .unwrap_or_default(),
-            None => Vec::new(),
-        }
+        super::spatial_handlers::pending_spatial_deletes_impl(self).await
     }
 
     async fn mark_spatial_delete_in_flight(&self, batch_id: u64, durable_key: Vec<u8>) {
-        if let Some(q) = &self.spatial_outbound {
-            q.mark_delete_in_flight(batch_id, durable_key).await;
-        }
+        super::spatial_handlers::mark_spatial_delete_in_flight_impl(self, batch_id, durable_key)
+            .await
     }
 
     async fn ack_spatial_delete_in_flight(&self, batch_id: u64) {
-        if let Some(q) = &self.spatial_outbound
-            && let Some(key) = q.ack_delete_in_flight(batch_id).await
-            && let Err(e) = q.ack_delete_keys(&[key]).await
-        {
-            tracing::warn!(batch_id, error = %e, "spatial delete in-flight ack_keys failed");
-        }
+        super::spatial_handlers::ack_spatial_delete_in_flight_impl(self, batch_id).await
     }
 
     async fn acknowledge_spatial_delete(&self, durable_key: Vec<u8>) {
-        if let Some(q) = &self.spatial_outbound
-            && let Err(e) = q.ack_delete_keys(&[durable_key]).await
-        {
-            tracing::warn!(error = %e, "spatial delete outbound ack_keys failed");
-        }
+        super::spatial_handlers::acknowledge_spatial_delete_impl(self, durable_key).await
     }
 
     async fn pending_timeseries_batches(
@@ -357,38 +241,24 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         Vec<u8>,
         crate::sync::outbound::timeseries::PendingTimeseriesBatch,
     )> {
-        match &self.timeseries_outbound {
-            Some(q) => q
-                .drain_batch(crate::sync::PUSH_DRAIN_LIMIT)
-                .await
-                .unwrap_or_default(),
-            None => Vec::new(),
-        }
+        super::timeseries_handlers::pending_timeseries_batches_impl(self).await
     }
 
     async fn mark_timeseries_batch_in_flight(&self, stream_seq: u64, durable_key: Vec<u8>) {
-        if let Some(q) = &self.timeseries_outbound {
-            q.mark_in_flight_by_seq(stream_seq, durable_key).await;
-        }
+        super::timeseries_handlers::mark_timeseries_batch_in_flight_impl(
+            self,
+            stream_seq,
+            durable_key,
+        )
+        .await
     }
 
     async fn ack_timeseries_batches_through_seq(&self, applied_seq: u64) {
-        if let Some(q) = &self.timeseries_outbound {
-            let keys = q.ack_in_flight_through_seq(applied_seq).await;
-            for key in keys {
-                if let Err(e) = q.ack_keys(&[key]).await {
-                    tracing::warn!(applied_seq, error = %e, "timeseries in-flight ack_keys failed");
-                }
-            }
-        }
+        super::timeseries_handlers::ack_timeseries_batches_through_seq_impl(self, applied_seq).await
     }
 
     async fn acknowledge_timeseries_batch(&self, durable_key: Vec<u8>) {
-        if let Some(q) = &self.timeseries_outbound
-            && let Err(e) = q.ack_keys(&[durable_key]).await
-        {
-            tracing::warn!(error = %e, "timeseries outbound ack_keys failed");
-        }
+        super::timeseries_handlers::acknowledge_timeseries_batch_impl(self, durable_key).await
     }
 
     async fn clear_engine_in_flight(&self) {
@@ -528,10 +398,7 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         key: &[u8],
         batch: &crate::sync::outbound::columnar::PendingColumnarBatch,
     ) -> Result<(), crate::error::LiteError> {
-        match &self.columnar_outbound {
-            Some(q) => q.update_entry(key, batch).await,
-            None => Ok(()),
-        }
+        super::columnar_handlers::persist_columnar_seq_impl(self, key, batch).await
     }
 
     async fn persist_timeseries_seq(
@@ -539,10 +406,7 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         key: &[u8],
         batch: &crate::sync::outbound::timeseries::PendingTimeseriesBatch,
     ) -> Result<(), crate::error::LiteError> {
-        match &self.timeseries_outbound {
-            Some(q) => q.update_entry(key, batch).await,
-            None => Ok(()),
-        }
+        super::timeseries_handlers::persist_timeseries_seq_impl(self, key, batch).await
     }
 
     async fn persist_vector_insert_seq(
@@ -550,10 +414,7 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         key: &[u8],
         insert: &crate::sync::outbound::vector::PendingVectorInsert,
     ) -> Result<(), crate::error::LiteError> {
-        match &self.vector_outbound {
-            Some(q) => q.update_insert_entry(key, insert).await,
-            None => Ok(()),
-        }
+        super::vector_handlers::persist_vector_insert_seq_impl(self, key, insert).await
     }
 
     async fn persist_vector_delete_seq(
@@ -561,10 +422,7 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         key: &[u8],
         delete: &crate::sync::outbound::vector::PendingVectorDelete,
     ) -> Result<(), crate::error::LiteError> {
-        match &self.vector_outbound {
-            Some(q) => q.update_delete_entry(key, delete).await,
-            None => Ok(()),
-        }
+        super::vector_handlers::persist_vector_delete_seq_impl(self, key, delete).await
     }
 
     async fn persist_fts_index_seq(
@@ -572,10 +430,7 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         key: &[u8],
         entry: &crate::sync::outbound::fts::PendingFtsIndex,
     ) -> Result<(), crate::error::LiteError> {
-        match &self.fts_outbound {
-            Some(q) => q.update_index_entry(key, entry).await,
-            None => Ok(()),
-        }
+        super::fts_handlers::persist_fts_index_seq_impl(self, key, entry).await
     }
 
     async fn persist_fts_delete_seq(
@@ -583,10 +438,7 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         key: &[u8],
         entry: &crate::sync::outbound::fts::PendingFtsDelete,
     ) -> Result<(), crate::error::LiteError> {
-        match &self.fts_outbound {
-            Some(q) => q.update_delete_entry(key, entry).await,
-            None => Ok(()),
-        }
+        super::fts_handlers::persist_fts_delete_seq_impl(self, key, entry).await
     }
 
     async fn persist_spatial_insert_seq(
@@ -594,10 +446,7 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         key: &[u8],
         insert: &crate::sync::outbound::spatial::PendingSpatialInsert,
     ) -> Result<(), crate::error::LiteError> {
-        match &self.spatial_outbound {
-            Some(q) => q.update_insert_entry(key, insert).await,
-            None => Ok(()),
-        }
+        super::spatial_handlers::persist_spatial_insert_seq_impl(self, key, insert).await
     }
 
     async fn persist_spatial_delete_seq(
@@ -605,9 +454,6 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         key: &[u8],
         delete: &crate::sync::outbound::spatial::PendingSpatialDelete,
     ) -> Result<(), crate::error::LiteError> {
-        match &self.spatial_outbound {
-            Some(q) => q.update_delete_entry(key, delete).await,
-            None => Ok(()),
-        }
+        super::spatial_handlers::persist_spatial_delete_seq_impl(self, key, delete).await
     }
 }
