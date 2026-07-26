@@ -10,8 +10,8 @@ use crate::engine::crdt::CrdtEngine;
 use crate::nodedb::lock_ext::LockExt;
 
 use super::types::{
-    META_CRDT_DELTAS, META_CRDT_SNAPSHOT, META_CSR_COLLECTIONS, META_HNSW_COLLECTIONS,
-    META_LAST_FLUSHED_MID, NodeDbLite,
+    META_CRDT_DELTAS, META_CSR_COLLECTIONS, META_HNSW_COLLECTIONS, META_LAST_FLUSHED_MID,
+    NodeDbLite,
 };
 
 impl<S: StorageEngine> NodeDbLite<S> {
@@ -24,15 +24,20 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         let mut ops = Vec::new();
 
-        // ── Persist CRDT snapshot (CRC32C wrapped) ──
+        // ── Persist one CRDT snapshot per collection (CRC32C wrapped) ──
+        // Each collection owns its own Loro document, so each gets its own
+        // storage entry under `loro_snapshot:<collection>`.
         {
             let crdt = self.crdt.lock_or_recover();
-            let snapshot = crdt.export_snapshot().map_err(NodeDbError::storage)?;
-            ops.push(WriteOp::Put {
-                ns: Namespace::LoroState,
-                key: META_CRDT_SNAPSHOT.to_vec(),
-                value: crate::storage::checksum::wrap(&snapshot),
-            });
+            for (collection, snapshot) in
+                crdt.export_all_snapshots().map_err(NodeDbError::storage)?
+            {
+                ops.push(WriteOp::Put {
+                    ns: Namespace::LoroState,
+                    key: CrdtEngine::snapshot_key_for(&collection),
+                    value: crate::storage::checksum::wrap(&snapshot),
+                });
+            }
 
             // Write pending deltas individually (append-only persistence).
             // Each delta is stored under `crdt:delta:{mutation_id:016x}`.

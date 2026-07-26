@@ -20,7 +20,7 @@ use crate::sync::outbound::vector::{PendingVectorDelete, PendingVectorInsert};
 struct MockDelegate {
     acked_up_to: AtomicU64,
     rejected: std::sync::Mutex<Vec<u64>>,
-    imported: std::sync::Mutex<Vec<Vec<u8>>>,
+    imported: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
     applied_rows: std::sync::Mutex<Vec<(String, String, nodedb_types::sync::wire::RowOp)>>,
     imported_schemas: std::sync::Mutex<Vec<String>>,
     pending: std::sync::Mutex<Vec<PendingDelta>>,
@@ -70,8 +70,11 @@ impl SyncDelegate for MockDelegate {
         ));
     }
 
-    fn import_remote(&self, data: &[u8]) {
-        self.imported.lock().unwrap().push(data.to_vec());
+    fn import_remote(&self, collection: &str, data: &[u8]) {
+        self.imported
+            .lock()
+            .unwrap()
+            .push((collection.to_string(), data.to_vec()));
     }
     async fn import_definition(&self, _msg: &nodedb_types::sync::wire::DefinitionSyncMsg) {}
     async fn import_collection_schema(
@@ -361,7 +364,7 @@ async fn dispatch_shape_delta_imports() {
     {
         let imported = mock.imported.lock().unwrap();
         assert_eq!(imported.len(), 1);
-        assert_eq!(imported[0], vec![1, 2, 3]);
+        assert_eq!(imported[0], ("orders".to_string(), vec![1, 2, 3]));
     }
 
     let shapes = client.shapes().lock().await;

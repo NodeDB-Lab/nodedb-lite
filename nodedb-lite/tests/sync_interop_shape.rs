@@ -309,7 +309,8 @@ async fn sequence_gap_detection_and_resync_on_real_connection() {
 ///   4. Query the local engine to confirm the document is accessible.
 ///
 /// This is the same call sequence as `dispatch_frame` → ShapeSnapshot arm:
-///   `delegate.import_remote(&snapshot.data)` then `client.handle_shape_snapshot`.
+///   `delegate.import_remote(collection, &snapshot.data)` then
+///   `client.handle_shape_snapshot`.
 /// The full SQL surface (execute_sql) is exercised in `sync_interop_delta_ack.rs`
 /// via the nodedb-client trait; here we verify the CRDT layer that backs it.
 #[tokio::test]
@@ -329,13 +330,15 @@ async fn shape_snapshot_data_queryable_after_import() {
 
     // Export a full snapshot — this is what Origin would encode into
     // ShapeSnapshotMsg::data before sending to Lite.
-    let snapshot_bytes = remote.export_snapshot().expect("export snapshot");
+    let snapshot_bytes = remote
+        .export_snapshot("query_test")
+        .expect("export snapshot");
     assert!(!snapshot_bytes.is_empty(), "snapshot must have content");
 
     // Create a fresh local engine (no prior state) and import the snapshot.
-    let local = CrdtEngine::new(9005).expect("local CRDT engine");
+    let mut local = CrdtEngine::new(9005).expect("local CRDT engine");
     local
-        .import_remote(&snapshot_bytes)
+        .import_remote("query_test", &snapshot_bytes)
         .expect("import_remote must succeed on valid snapshot bytes");
 
     // Verify the document is accessible and contains the expected data.

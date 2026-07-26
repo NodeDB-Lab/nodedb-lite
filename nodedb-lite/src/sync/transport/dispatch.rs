@@ -168,8 +168,26 @@ pub(super) async fn dispatch_frame(
             if let Some(snapshot) =
                 frame.decode_body::<nodedb_types::sync::wire::ShapeSnapshotMsg>()
             {
+                // `ShapeSnapshotMsg` carries no collection of its own, so it is
+                // resolved from the subscription the snapshot answers. A shape
+                // with no collection (graph, array) or an unknown shape_id
+                // cannot be routed to a document — importing it anywhere would
+                // merge foreign state into an unrelated collection.
                 if !snapshot.data.is_empty() {
-                    delegate.import_remote(&snapshot.data);
+                    let collection = {
+                        let shapes = client.shapes().lock().await;
+                        shapes
+                            .get(&snapshot.shape_id)
+                            .and_then(|sub| sub.definition.collection().map(str::to_string))
+                    };
+                    match collection {
+                        Some(collection) => delegate.import_remote(&collection, &snapshot.data),
+                        None => tracing::error!(
+                            shape_id = %snapshot.shape_id,
+                            "ShapeSnapshot has no resolvable collection — discarding payload \
+                             rather than importing it into an unrelated document"
+                        ),
+                    }
                 }
                 client.handle_shape_snapshot(&snapshot).await;
             }
@@ -187,7 +205,7 @@ pub(super) async fn dispatch_frame(
                     client.set_pending_resync(resync).await;
                 }
                 if !delta.delta.is_empty() {
-                    delegate.import_remote(&delta.delta);
+                    delegate.import_remote(&delta.collection, &delta.delta);
                 }
                 client.handle_shape_delta(&delta).await;
             }

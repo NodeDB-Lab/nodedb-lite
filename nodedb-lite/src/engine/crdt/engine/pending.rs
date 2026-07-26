@@ -79,10 +79,12 @@ impl CrdtEngine {
             .position(|d| d.mutation_id == mutation_id)
         {
             let delta = self.pending_deltas.remove(pos);
-            // Best-effort rollback: delete the affected document.
-            // The application should handle the CompensationHint and
-            // re-create with corrected values.
-            let _ = self.state.delete(&delta.collection, &delta.document_id);
+            // Best-effort rollback: delete the affected document from its own
+            // collection's document. The application should handle the
+            // CompensationHint and re-create with corrected values.
+            if let Some(state) = self.states.get(&delta.collection) {
+                let _ = state.delete(&delta.collection, &delta.document_id);
+            }
             Some(delta)
         } else {
             None
@@ -93,13 +95,21 @@ impl CrdtEngine {
     /// Export the current vector clock as a serializable map.
     ///
     /// Format: `{ peer_id_hex: counter }` — matches the Loro version vector.
+    ///
+    /// Each collection owns its own document (and its own derived peer ID), so
+    /// the returned clock is the merge of every collection's version vector.
+    /// Peer IDs are per-collection-derived and therefore disjoint, but the
+    /// merge takes the maximum counter so an id shared with a remote peer is
+    /// never regressed.
     pub fn export_vector_clock(&self) -> HashMap<String, u64> {
-        let vv = self.state.oplog_version_vector();
-        let mut clock = HashMap::new();
+        let mut clock: HashMap<String, u64> = HashMap::new();
         // Loro's VersionVector maps PeerID → Counter.
         // We encode PeerID as hex string for wire compatibility.
-        for (peer, counter) in vv.iter() {
-            clock.insert(format!("{peer:016x}"), *counter as u64);
+        for state in self.states.values() {
+            for (peer, counter) in state.oplog_version_vector().iter() {
+                let entry = clock.entry(format!("{peer:016x}")).or_insert(0);
+                *entry = (*entry).max(*counter as u64);
+            }
         }
         clock
     }

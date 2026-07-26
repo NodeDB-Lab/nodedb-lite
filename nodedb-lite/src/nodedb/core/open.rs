@@ -22,8 +22,8 @@ use crate::nodedb::lock_ext::LockExt;
 use crate::storage::engine::StorageEngine;
 
 use super::types::{
-    KvWriteBuffer, META_CRDT_DELTAS, META_CRDT_SNAPSHOT, META_CSR_COLLECTIONS, META_CSR_LEGACY,
-    META_HNSW_COLLECTIONS, META_LAST_FLUSHED_MID, NodeDbLite,
+    KvWriteBuffer, META_CRDT_DELTAS, META_CSR_COLLECTIONS, META_CSR_LEGACY, META_HNSW_COLLECTIONS,
+    META_LAST_FLUSHED_MID, NodeDbLite,
 };
 
 impl<S: StorageEngine> NodeDbLite<S> {
@@ -110,32 +110,39 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 .await
                 .map_err(|e| NodeDbError::storage(format!("lite identity load failed: {e}")))?;
 
-        // ── Restore CRDT state (with CRC32C validation) ──
-        let mut crdt = match storage
-            .get(Namespace::LoroState, META_CRDT_SNAPSHOT)
-            .await?
-        {
-            Some(envelope) => {
-                match crate::storage::checksum::unwrap(&envelope) {
-                    Some(snapshot) => CrdtEngine::from_snapshot(peer_id, &snapshot)
-                        .map_err(|e| NodeDbError::storage(format!("CRDT restore failed: {e}")))?,
-                    None => {
-                        tracing::error!(
-                            "CRDT snapshot CRC32C mismatch — discarding corrupted snapshot. \
-                             Will start with empty state. A full re-sync from Origin is needed."
-                        );
-                        // Delete the corrupted snapshot so we don't re-read it.
-                        let _ = storage
-                            .delete(Namespace::LoroState, META_CRDT_SNAPSHOT)
-                            .await;
-                        CrdtEngine::new(peer_id)
-                            .map_err(|e| NodeDbError::storage(format!("CRDT init failed: {e}")))?
-                    }
+        // ── Restore CRDT state, one Loro document per collection ──
+        // Snapshots are stored under `loro_snapshot:<collection>`, so the whole
+        // set is recovered with a single prefix scan. A collection whose
+        // snapshot fails its CRC32C check is dropped individually — the other
+        // collections stay intact instead of the whole engine resetting.
+        let mut crdt = CrdtEngine::new(peer_id)
+            .map_err(|e| NodeDbError::storage(format!("CRDT init failed: {e}")))?;
+        let snapshot_entries = storage
+            .scan_prefix(Namespace::LoroState, CrdtEngine::snapshot_key_prefix())
+            .await?;
+        for (key, envelope) in &snapshot_entries {
+            let Some(collection) = CrdtEngine::collection_from_snapshot_key(key) else {
+                tracing::error!(
+                    "CRDT snapshot key is not a valid `loro_snapshot:<collection>` entry — \
+                     skipping; its collection cannot be determined without guessing."
+                );
+                continue;
+            };
+            match crate::storage::checksum::unwrap(envelope) {
+                Some(snapshot) => crdt.import_snapshot(collection, &snapshot).map_err(|e| {
+                    NodeDbError::storage(format!("CRDT restore of '{collection}' failed: {e}"))
+                })?,
+                None => {
+                    tracing::error!(
+                        collection = %collection,
+                        "CRDT snapshot CRC32C mismatch — discarding corrupted snapshot for this \
+                         collection. A full re-sync from Origin is needed for it."
+                    );
+                    // Delete the corrupted snapshot so we don't re-read it.
+                    let _ = storage.delete(Namespace::LoroState, key).await;
                 }
             }
-            None => CrdtEngine::new(peer_id)
-                .map_err(|e| NodeDbError::storage(format!("CRDT init failed: {e}")))?,
-        };
+        }
 
         // Rebuild the CRDT's registered-collection set from persisted bitemporal
         // flags so that SELECT queries on bitemporal collections work immediately

@@ -55,9 +55,13 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         super::array_handlers::handle_reject_with_policy_impl(self, mutation_id, hint);
     }
 
-    fn import_remote(&self, data: &[u8]) {
-        if let Err(e) = self.import_remote_deltas(data) {
-            tracing::warn!(error = %e, "SyncDelegate: import_remote failed");
+    fn import_remote(&self, collection: &str, data: &[u8]) {
+        if let Err(e) = self.import_remote_deltas(collection, data) {
+            tracing::warn!(
+                collection = %collection,
+                error = %e,
+                "SyncDelegate: import_remote failed"
+            );
         }
     }
 

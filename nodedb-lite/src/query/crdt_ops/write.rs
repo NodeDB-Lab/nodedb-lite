@@ -7,18 +7,19 @@ use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::storage::engine::StorageEngine;
 
-/// Apply a remote CRDT delta from another peer.
+/// Apply a remote CRDT delta from another peer into `collection`'s document.
 ///
 /// Imports the raw Loro delta bytes, then acknowledges the mutation on
 /// success or rejects it on import failure.
 pub async fn handle_apply<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
+    collection: &str,
     delta: &[u8],
     mutation_id: u64,
 ) -> Result<QueryResult, LiteError> {
     let result = {
-        let crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
-        crdt.import_remote(delta)
+        let mut crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
+        crdt.import_remote(collection, delta)
     };
 
     match result {
@@ -41,18 +42,16 @@ pub async fn handle_apply<S: StorageEngine>(
 
 /// Import a per-collection Loro snapshot (durable RESTORE re-issue path).
 ///
-/// A snapshot is just a Loro-encoded update set scoped to one collection's
-/// container; `CrdtState::import` (aka `import_remote`) is a monotonic,
-/// idempotent, commutative merge that resolves the target container by name
-/// from the encoded bytes themselves (see `CrdtState`'s container-naming
-/// doc comment), so re-using the same import path used for remote deltas is
-/// correct here too — no per-collection document split is needed on Lite.
+/// The snapshot is merged into the target collection's own document. Loro's
+/// import is monotonic, idempotent and commutative, so a re-issued snapshot
+/// converges with whatever that document already holds.
 pub async fn handle_import_snapshot<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
+    collection: &str,
     bytes: &[u8],
 ) -> Result<QueryResult, LiteError> {
-    let crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
-    crdt.import_remote(bytes)?;
+    let mut crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
+    crdt.import_snapshot(collection, bytes)?;
     Ok(QueryResult {
         columns: vec![],
         rows: vec![],

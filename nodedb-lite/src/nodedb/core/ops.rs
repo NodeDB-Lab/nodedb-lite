@@ -415,10 +415,14 @@ impl<S: StorageEngine> NodeDbLite<S> {
         Ok(())
     }
 
-    /// Import remote deltas from Origin.
-    pub fn import_remote_deltas(&self, data: &[u8]) -> NodeDbResult<()> {
-        let crdt = self.crdt.lock_or_recover();
-        crdt.import_remote(data).map_err(NodeDbError::storage)
+    /// Import remote deltas from Origin into `collection`'s Loro document.
+    ///
+    /// The collection must be supplied by the caller: each collection has its
+    /// own document, and the update bytes alone do not identify which one.
+    pub fn import_remote_deltas(&self, collection: &str, data: &[u8]) -> NodeDbResult<()> {
+        let mut crdt = self.crdt.lock_or_recover();
+        crdt.import_remote(collection, data)
+            .map_err(NodeDbError::storage)
     }
 
     /// Apply a server-originated row post-image from Origin.

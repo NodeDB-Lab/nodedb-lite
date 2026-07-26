@@ -118,10 +118,10 @@ fn snapshot_and_restore() {
         )
         .unwrap();
 
-    let snapshot = engine1.export_snapshot().unwrap();
+    let snapshot = engine1.export_snapshot("docs").unwrap();
     assert!(!snapshot.is_empty());
 
-    let engine2 = CrdtEngine::from_snapshot(2, &snapshot).unwrap();
+    let engine2 = CrdtEngine::from_snapshot(2, "docs", &snapshot).unwrap();
     assert!(engine2.exists("docs", "d1"));
     assert!(engine2.exists("docs", "d2"));
 }
@@ -134,9 +134,9 @@ fn import_remote_deltas() {
         .unwrap();
 
     // Export engine1's state as a snapshot and import into engine2.
-    let snapshot = engine1.export_snapshot().unwrap();
-    let engine2 = CrdtEngine::new(2).unwrap();
-    engine2.import_remote(&snapshot).unwrap();
+    let snapshot = engine1.export_snapshot("items").unwrap();
+    let mut engine2 = CrdtEngine::new(2).unwrap();
+    engine2.import_remote("items", &snapshot).unwrap();
 
     assert!(engine2.exists("items", "i1"));
 }
@@ -173,8 +173,11 @@ fn vector_clock_export() {
 
     let clock = engine.export_vector_clock();
     assert!(!clock.is_empty());
-    // Should contain our peer_id's entry.
-    let our_key = format!("{:016x}", engine.peer_id());
+    // Each collection's document authors under its own derived peer ID.
+    let our_key = format!(
+        "{:016x}",
+        CrdtEngine::collection_peer_id(engine.peer_id(), "x")
+    );
     assert!(
         clock.contains_key(&our_key),
         "clock should contain peer {our_key}: {clock:?}"
@@ -289,4 +292,106 @@ fn acknowledge_retires_only_the_acknowledged_delta() {
     );
     assert!(remaining.contains(&third), "remaining: {remaining:?}");
     assert!(!remaining.contains(&second));
+}
+
+/// A delta must be applicable on its own. The receiver stores documents per
+/// collection, so a delta for `probe` whose causal predecessors were written
+/// to `signals` can never be applied there — those predecessors never arrive
+/// and the row is silently lost. Writing the collections interleaved and
+/// replaying only `probe`'s deltas into a fresh document reproduces exactly
+/// that: under a single shared oplog the second delta is causally incomplete
+/// and row "b" never materializes.
+#[test]
+fn interleaved_collection_writes_export_self_contained_deltas() {
+    const PEER: u64 = 7;
+
+    let mut engine = CrdtEngine::new(PEER).unwrap();
+    engine
+        .upsert("probe", "a", &[("v", LoroValue::I64(1))])
+        .unwrap();
+    engine
+        .upsert("signals", "s1", &[("v", LoroValue::I64(2))])
+        .unwrap();
+    engine
+        .upsert("probe", "b", &[("v", LoroValue::I64(3))])
+        .unwrap();
+
+    let probe_deltas: Vec<Vec<u8>> = engine
+        .pending_deltas()
+        .iter()
+        .filter(|d| d.collection == "probe")
+        .map(|d| d.delta_bytes.clone())
+        .collect();
+    assert_eq!(probe_deltas.len(), 2, "one delta per probe row");
+
+    // The receiver only ever sees this collection's deltas.
+    let receiver =
+        nodedb_crdt::CrdtState::new(CrdtEngine::collection_peer_id(PEER, "probe")).unwrap();
+    for bytes in &probe_deltas {
+        receiver.import(bytes).unwrap();
+    }
+
+    assert!(receiver.row_exists("probe", "a"));
+    assert!(
+        receiver.row_exists("probe", "b"),
+        "second probe delta was causally incomplete; row 'b' was lost"
+    );
+}
+
+/// Deferred writes must flush as one self-contained delta per row, tagged with
+/// the row's real collection and document ID — not a single coalesced blob.
+#[test]
+fn flush_deltas_emits_one_delta_per_deferred_row() {
+    const PEER: u64 = 9;
+
+    let mut engine = CrdtEngine::new(PEER).unwrap();
+    engine
+        .upsert_deferred("probe", "a", &[("v", LoroValue::I64(1))])
+        .unwrap();
+    engine
+        .upsert_deferred("signals", "s1", &[("v", LoroValue::I64(2))])
+        .unwrap();
+    engine
+        .upsert_deferred("probe", "b", &[("v", LoroValue::I64(3))])
+        .unwrap();
+
+    assert_eq!(engine.pending_count(), 0, "deferred writes export nothing");
+    assert_eq!(engine.flush_deltas().unwrap(), 3);
+    assert_eq!(engine.pending_count(), 3);
+
+    let tags: Vec<(String, String)> = engine
+        .pending_deltas()
+        .iter()
+        .map(|d| (d.collection.clone(), d.document_id.clone()))
+        .collect();
+    assert_eq!(
+        tags,
+        vec![
+            ("probe".to_string(), "a".to_string()),
+            ("signals".to_string(), "s1".to_string()),
+            ("probe".to_string(), "b".to_string()),
+        ]
+    );
+    assert!(
+        engine
+            .pending_deltas()
+            .iter()
+            .all(|d| !d.delta_bytes.is_empty())
+    );
+
+    let receiver =
+        nodedb_crdt::CrdtState::new(CrdtEngine::collection_peer_id(PEER, "probe")).unwrap();
+    for delta in engine
+        .pending_deltas()
+        .iter()
+        .filter(|d| d.collection == "probe")
+    {
+        receiver.import(&delta.delta_bytes).unwrap();
+    }
+    assert!(receiver.row_exists("probe", "a"));
+    assert!(receiver.row_exists("probe", "b"));
+
+    // A second flush with nothing deferred is a no-op.
+    assert_eq!(engine.flush_deltas().unwrap(), 0);
+    assert_eq!(engine.pending_count(), 3);
 }

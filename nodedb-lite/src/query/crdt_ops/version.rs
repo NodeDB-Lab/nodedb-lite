@@ -37,6 +37,18 @@ fn parse_version_vector(json: &str) -> Result<VersionVector, LiteError> {
     Ok(pairs.into_iter().collect())
 }
 
+/// Error for a version-history op naming a collection that has no CRDT
+/// document.
+///
+/// Version history is per collection now that each one owns its own Loro
+/// document, so "no document" cannot be answered with an empty success — that
+/// would report an empty history for a typo'd collection name.
+fn missing_collection(op: &str, collection: &str) -> LiteError {
+    LiteError::BadRequest {
+        detail: format!("{op}: CRDT collection '{collection}' does not exist"),
+    }
+}
+
 /// Read a document's state at a historical version.
 pub async fn handle_read_at_version<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
@@ -47,7 +59,9 @@ pub async fn handle_read_at_version<S: StorageEngine>(
     let vv = parse_version_vector(version_vector_json)?;
 
     let crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
-    let state = crdt.state();
+    let state = crdt
+        .state(collection)
+        .ok_or_else(|| missing_collection("ReadAtVersion", collection))?;
 
     let value = state
         .read_at_version(collection, document_id, &vv)
@@ -88,16 +102,20 @@ pub async fn handle_get_version_vector<S: StorageEngine>(
     })
 }
 
-/// Export the oplog delta from a version to current state.
+/// Export a collection's oplog delta from a version to current state.
 pub async fn handle_export_delta<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
+    collection: &str,
     from_version_json: &str,
 ) -> Result<QueryResult, LiteError> {
     let vv = parse_version_vector(from_version_json)?;
 
     let crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
+    if crdt.state(collection).is_none() {
+        return Err(missing_collection("ExportDelta", collection));
+    }
     let delta_bytes = crdt
-        .export_delta_from(&vv)
+        .export_delta_from(collection, &vv)
         .map_err(|e| LiteError::Storage {
             detail: format!("ExportDelta: {e}"),
         })?;
@@ -122,7 +140,8 @@ pub async fn handle_restore_to_version<S: StorageEngine>(
 
     let crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
     let delta_bytes = crdt
-        .state()
+        .state(collection)
+        .ok_or_else(|| missing_collection("RestoreToVersion", collection))?
         .restore_to_version(collection, document_id, &vv)
         .map_err(|e| LiteError::Storage {
             detail: format!("RestoreToVersion: {e}"),
@@ -135,15 +154,20 @@ pub async fn handle_restore_to_version<S: StorageEngine>(
     })
 }
 
-/// Compact the CRDT oplog at a specific version, discarding history before it.
+/// Compact a collection's CRDT oplog at a specific version, discarding history
+/// before it.
 pub async fn handle_compact_at_version<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
+    collection: &str,
     target_version_json: &str,
 ) -> Result<QueryResult, LiteError> {
     let vv = parse_version_vector(target_version_json)?;
 
     let mut crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
-    crdt.compact_at_version(&vv)
+    if crdt.state(collection).is_none() {
+        return Err(missing_collection("CompactAtVersion", collection));
+    }
+    crdt.compact_at_version(collection, &vv)
         .map_err(|e| LiteError::Storage {
             detail: format!("CompactAtVersion: {e}"),
         })?;

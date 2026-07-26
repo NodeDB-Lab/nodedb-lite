@@ -2,7 +2,7 @@
 
 //! CRDT engine for NodeDB-Lite.
 //!
-//! Wraps `nodedb-crdt::CrdtState` (Loro-backed) with:
+//! Wraps one `nodedb-crdt::CrdtState` (Loro-backed) per collection with:
 //! - Delta accumulation: tracks unsent mutations for sync
 //! - State persistence: save/load Loro snapshots to `StorageEngine`
 //! - Delta persistence: save/load unsent deltas to `StorageEngine`

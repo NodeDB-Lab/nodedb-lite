@@ -40,6 +40,7 @@ impl CrdtEngine {
                     detail: format!("list_insert: {e}"),
                 })
         })
+        .map(|_| ())
     }
 
     /// Delete a block from a document's movable list at `index`.
@@ -57,6 +58,7 @@ impl CrdtEngine {
                     detail: format!("list_delete: {e}"),
                 })
         })
+        .map(|_| ())
     }
 
     /// Move a block within a document's movable list from `from_index` to `to_index`.
@@ -75,6 +77,7 @@ impl CrdtEngine {
                     detail: format!("list_move: {e}"),
                 })
         })
+        .map(|_| ())
     }
 }
 

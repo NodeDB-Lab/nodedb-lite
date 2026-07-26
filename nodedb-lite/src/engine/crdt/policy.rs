@@ -121,7 +121,8 @@ impl CrdtEngine {
                 }
                 ConflictPolicy::RenameSuffix => {
                     let resolved = (|| {
-                        let loro_val = self.state.read_row(&collection, &doc_id)?;
+                        let state = self.states.get(&collection)?;
+                        let loro_val = state.read_row(&collection, &doc_id)?;
                         let loro::LoroValue::Map(map) = &loro_val else {
                             return None;
                         };
@@ -133,7 +134,7 @@ impl CrdtEngine {
                             other => format!("{other:?}"),
                         };
                         let new_val = format!("{val_str}_1");
-                        self.state
+                        state
                             .upsert(
                                 &collection,
                                 &doc_id,
@@ -185,7 +186,7 @@ impl CrdtEngine {
                 },
             },
             CompensationHint::IntegrityViolation => {
-                let _ = self.state.delete(&collection, &doc_id);
+                self.delete_local_row(&collection, &doc_id);
                 self.pending_deltas.remove(pos);
                 return Some(PolicyResolution::Escalate {
                     violations: violation_from_hint(hint),
@@ -198,7 +199,7 @@ impl CrdtEngine {
 
         match &resolution {
             PolicyResolution::Escalate { .. } => {
-                let _ = self.state.delete(&collection, &doc_id);
+                self.delete_local_row(&collection, &doc_id);
                 self.pending_deltas.remove(pos);
             }
             PolicyResolution::AutoResolved(_) => {
@@ -208,5 +209,13 @@ impl CrdtEngine {
         }
 
         Some(resolution)
+    }
+
+    /// Best-effort local removal of a row from its own collection's document.
+    /// A collection with no document has nothing to roll back.
+    fn delete_local_row(&self, collection: &str, doc_id: &str) {
+        if let Some(state) = self.states.get(collection) {
+            let _ = state.delete(collection, doc_id);
+        }
     }
 }

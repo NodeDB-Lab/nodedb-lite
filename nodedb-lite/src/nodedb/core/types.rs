@@ -22,7 +22,6 @@ pub(crate) const META_HNSW_COLLECTIONS: &[u8] = b"meta:hnsw_collections";
 pub(crate) const META_CSR_LEGACY: &[u8] = b"meta:csr_checkpoint";
 /// List of collection names that have a CSR checkpoint (MessagePack Vec<String>).
 pub(crate) const META_CSR_COLLECTIONS: &[u8] = b"meta:csr_collections";
-pub(crate) const META_CRDT_SNAPSHOT: &[u8] = b"crdt:snapshot";
 pub(crate) const META_CRDT_DELTAS: &[u8] = b"crdt:pending_deltas";
 /// Last flushed mutation_id — used for partial flush safety.
 pub(crate) const META_LAST_FLUSHED_MID: &[u8] = b"meta:last_flushed_mid";

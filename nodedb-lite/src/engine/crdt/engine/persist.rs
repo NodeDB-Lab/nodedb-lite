@@ -69,9 +69,29 @@ impl CrdtEngine {
         self.pending_deltas = deltas;
     }
 
-    /// Key for storing the Loro snapshot in `StorageEngine`.
-    pub fn snapshot_key() -> &'static [u8] {
+    /// Key for storing one collection's Loro snapshot in `StorageEngine`:
+    /// `loro_snapshot:<collection>`.
+    pub fn snapshot_key_for(collection: &str) -> Vec<u8> {
+        let mut key = Vec::with_capacity(SNAPSHOT_KEY.len() + collection.len());
+        key.extend_from_slice(SNAPSHOT_KEY);
+        key.extend_from_slice(collection.as_bytes());
+        key
+    }
+
+    /// Prefix shared by every per-collection snapshot key, for prefix scans.
+    pub fn snapshot_key_prefix() -> &'static [u8] {
         SNAPSHOT_KEY
+    }
+
+    /// Recover the collection name from a snapshot key produced by
+    /// [`Self::snapshot_key_for`].
+    ///
+    /// Returns `None` for keys that do not carry the prefix or whose suffix is
+    /// not UTF-8 — such an entry cannot be routed to a document, so the caller
+    /// must skip it rather than guess a collection.
+    pub fn collection_from_snapshot_key(key: &[u8]) -> Option<&str> {
+        let suffix = key.strip_prefix(SNAPSHOT_KEY)?;
+        std::str::from_utf8(suffix).ok().filter(|s| !s.is_empty())
     }
 
     /// Key for storing pending deltas in `StorageEngine`.

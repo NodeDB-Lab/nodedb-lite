@@ -17,8 +17,11 @@ pub type CrdtBatchOp<'a> = (&'a str, &'a str, &'a [CrdtField<'a>]);
 
 /// Key prefix for delta blobs in the `Crdt` namespace.
 pub(super) const DELTA_KEY_PREFIX: &[u8] = b"delta:";
-/// Key for the Loro state snapshot in the `LoroState` namespace.
-pub(super) const SNAPSHOT_KEY: &[u8] = b"loro_snapshot";
+/// Key prefix for per-collection Loro snapshots in the `LoroState` namespace.
+///
+/// Each collection owns its own Loro document, so each gets its own entry:
+/// `loro_snapshot:<collection>`.
+pub(super) const SNAPSHOT_KEY: &[u8] = b"loro_snapshot:";
 /// Key for the vector clock in the `Meta` namespace.
 pub(super) const VCLOCK_KEY: &[u8] = b"vector_clock";
 
@@ -27,7 +30,22 @@ pub(super) const VCLOCK_KEY: &[u8] = b"vector_clock";
 /// Not `Send` — owned by a single task. The `NodeDbLite` wrapper handles
 /// the async bridging via `spawn_blocking` or `Mutex` as needed.
 pub struct CrdtEngine {
-    pub(in crate::engine::crdt) state: CrdtState,
+    /// This device's base peer ID. Each collection's document derives its own
+    /// Loro peer ID from it (see `CrdtEngine::collection_peer_id`).
+    pub(super) peer_id: u64,
+    /// One Loro document per collection.
+    ///
+    /// A delta must be self-contained: the receiver stores documents per
+    /// collection, so it can only apply operations whose causal predecessors
+    /// live in that same collection's document. With a single shared oplog,
+    /// a delta exported for collection `A` causally depends on whatever was
+    /// written to collection `B` in between — predecessors the receiver never
+    /// gets, leaving the row permanently unapplied. Partitioning the oplog by
+    /// collection makes every exported slice causally complete on its own.
+    ///
+    /// `BTreeMap` so `collection_names()` and snapshot export are
+    /// deterministic across runs.
+    pub(in crate::engine::crdt) states: std::collections::BTreeMap<String, CrdtState>,
     /// Monotonically increasing mutation ID. Used as delta ordering key.
     pub(super) next_mutation_id: AtomicU64,
     /// Unsent deltas accumulated since last sync ACK.
@@ -39,16 +57,22 @@ pub struct CrdtEngine {
     /// Evaluated on sync when Origin rejects a delta.
     pub(in crate::engine::crdt) policies: nodedb_crdt::PolicyRegistry,
     /// Explicitly registered collection names for collections that exist in the
-    /// catalog (e.g. bitemporal document collections) but have no Loro root-map
-    /// entry yet (i.e. no document has been inserted).  Merged into
+    /// catalog (e.g. bitemporal document collections) but have no Loro document
+    /// yet (i.e. no row has been inserted).  Merged into
     /// `collection_names()` so that SQL SELECT works before the first insert.
     pub(super) registered_collections: std::collections::HashSet<String>,
-    /// Version vector captured before the first deferred mutation.
-    /// Used by `flush_deltas()` to export a single delta covering all
-    /// deferred operations.
-    pub(super) deferred_version: Option<loro::VersionVector>,
-    /// Count of deferred mutations since last `flush_deltas()`.
-    pub(super) deferred_count: usize,
+    /// Deferred writes awaiting `flush_deltas()`, in the order they were
+    /// applied.
+    pub(super) deferred: Vec<DeferredOp>,
+}
+
+/// One deferred write awaiting `flush_deltas`, with the exact counter range
+/// its operations occupy in its collection's document.
+pub(super) struct DeferredOp {
+    pub(super) collection: String,
+    pub(super) document_id: String,
+    pub(super) from_counter: i32,
+    pub(super) to_counter: i32,
 }
 
 /// A pending (unsent) delta waiting to be synced to Origin.

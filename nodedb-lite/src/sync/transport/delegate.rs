@@ -44,8 +44,11 @@ pub trait SyncDelegate: Send + Sync + 'static {
         mutation_id: u64,
         hint: &nodedb_types::sync::compensation::CompensationHint,
     );
-    /// Import remote deltas from Origin into local CRDT state.
-    fn import_remote(&self, data: &[u8]);
+    /// Import remote deltas from Origin into `collection`'s local CRDT state.
+    ///
+    /// The collection travels with the update because each collection has its
+    /// own Loro document; the update bytes alone do not identify the target.
+    fn import_remote(&self, collection: &str, data: &[u8]);
 
     /// Apply a server-originated row post-image (opcode `0x15`).
     ///

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Engine construction, snapshot export, history compaction, and
-//! direct access to the underlying CRDT state.
+//! Engine construction, per-collection state access, snapshot import/export,
+//! and history compaction.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::btree_map::Entry;
 use std::sync::atomic::AtomicU64;
 
 use nodedb_crdt::CrdtState;
@@ -15,79 +17,146 @@ use super::types::CrdtEngine;
 impl CrdtEngine {
     /// Create a new empty CRDT engine with the given peer ID.
     pub fn new(peer_id: u64) -> Result<Self, LiteError> {
-        let state = CrdtState::new(peer_id).map_err(|e| LiteError::Storage {
-            detail: format!("failed to create CrdtState: {e}"),
-        })?;
-
         Ok(Self {
-            state,
+            peer_id,
+            states: BTreeMap::new(),
             next_mutation_id: AtomicU64::new(1),
             pending_deltas: Vec::new(),
             acked_versions: HashMap::new(),
             policies: nodedb_crdt::PolicyRegistry::new(),
             registered_collections: std::collections::HashSet::new(),
-            deferred_version: None,
-            deferred_count: 0,
+            deferred: Vec::new(),
         })
     }
 
-    /// Restore from a Loro snapshot (cold start).
-    pub fn from_snapshot(peer_id: u64, snapshot: &[u8]) -> Result<Self, LiteError> {
-        let state = CrdtState::new(peer_id).map_err(|e| LiteError::Storage {
-            detail: format!("failed to create CrdtState: {e}"),
-        })?;
-        state.import(snapshot).map_err(|e| LiteError::Storage {
-            detail: format!("failed to import snapshot: {e}"),
-        })?;
-
-        Ok(Self {
-            state,
-            next_mutation_id: AtomicU64::new(1),
-            pending_deltas: Vec::new(),
-            acked_versions: HashMap::new(),
-            policies: nodedb_crdt::PolicyRegistry::new(),
-            registered_collections: std::collections::HashSet::new(),
-            deferred_version: None,
-            deferred_count: 0,
-        })
+    /// Restore a single collection from a Loro snapshot (cold start).
+    pub fn from_snapshot(
+        peer_id: u64,
+        collection: &str,
+        snapshot: &[u8],
+    ) -> Result<Self, LiteError> {
+        let mut engine = Self::new(peer_id)?;
+        engine.import_snapshot(collection, snapshot)?;
+        Ok(engine)
     }
 
-    /// The peer ID of this engine.
+    /// Derive a collection's Loro peer ID from this device's base peer ID.
+    ///
+    /// Loro operation identity is `(peer_id, counter)` and every document
+    /// counts its own counter from zero. Handing each collection's document
+    /// the same peer ID verbatim therefore mints identical operation IDs for
+    /// unrelated writes in different collections; anything that later merges
+    /// two of those collections into one document sees the second operation as
+    /// a replay of the first and silently drops a row.
+    ///
+    /// The derivation is a pure function of `(peer_id, collection)` so both
+    /// ends of a sync session compute the same ID for the same collection.
+    /// Zero is avoided because Loro reads it as "unset".
+    pub(in crate::engine::crdt) fn collection_peer_id(peer_id: u64, collection: &str) -> u64 {
+        const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
+        const FNV_PRIME: u64 = 1099511628211;
+
+        let mut hash = FNV_OFFSET_BASIS;
+        for byte in peer_id.to_le_bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        for byte in collection.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        // Loro reserves the top bit of a peer ID, and 0 reads as "unset".
+        let id = hash & ((1u64 << 63) - 1);
+        if id == 0 { 1 } else { id }
+    }
+
+    /// Get this collection's document, creating an empty one if absent.
+    pub(in crate::engine::crdt) fn state_mut(
+        &mut self,
+        collection: &str,
+    ) -> Result<&mut CrdtState, LiteError> {
+        let peer_id = Self::collection_peer_id(self.peer_id, collection);
+        match self.states.entry(collection.to_string()) {
+            Entry::Occupied(e) => Ok(e.into_mut()),
+            Entry::Vacant(e) => {
+                let state = CrdtState::new(peer_id).map_err(|err| LiteError::Storage {
+                    detail: format!("failed to create CrdtState for '{collection}': {err}"),
+                })?;
+                Ok(e.insert(state))
+            }
+        }
+    }
+
+    /// This device's base peer ID.
     pub fn peer_id(&self) -> u64 {
-        self.state.peer_id()
+        self.peer_id
     }
-    /// Import remote deltas from Origin (received via sync).
-    pub fn import_remote(&self, data: &[u8]) -> Result<(), LiteError> {
-        self.state.import(data).map_err(|e| LiteError::Storage {
-            detail: format!("remote delta import failed: {e}"),
-        })
+
+    /// Import remote deltas for a collection (received via sync).
+    pub fn import_remote(&mut self, collection: &str, data: &[u8]) -> Result<(), LiteError> {
+        self.state_mut(collection)?
+            .import(data)
+            .map_err(|e| LiteError::Storage {
+                detail: format!("remote delta import for '{collection}' failed: {e}"),
+            })
     }
+
     // ─── Snapshot & Persistence ──────────────────────────────────────
 
-    /// Export a full Loro state snapshot (for persistence to StorageEngine).
-    pub fn export_snapshot(&self) -> Result<Vec<u8>, LiteError> {
-        self.state
-            .export_snapshot()
+    /// Import a full Loro snapshot into a collection's document.
+    pub fn import_snapshot(&mut self, collection: &str, snapshot: &[u8]) -> Result<(), LiteError> {
+        self.state_mut(collection)?
+            .import(snapshot)
             .map_err(|e| LiteError::Storage {
-                detail: format!("snapshot export failed: {e}"),
+                detail: format!("snapshot import for '{collection}' failed: {e}"),
             })
     }
 
-    /// Compact Loro history to prevent unbounded growth.
+    /// Export a full Loro state snapshot for one collection.
     ///
-    /// Replaces the internal LoroDoc with a shallow snapshot. Historical
+    /// Returns an empty vector when the collection has no document yet.
+    pub fn export_snapshot(&self, collection: &str) -> Result<Vec<u8>, LiteError> {
+        let Some(state) = self.states.get(collection) else {
+            return Ok(Vec::new());
+        };
+        state.export_snapshot().map_err(|e| LiteError::Storage {
+            detail: format!("snapshot export for '{collection}' failed: {e}"),
+        })
+    }
+
+    /// Export every collection's snapshot as `(collection, snapshot_bytes)`,
+    /// in deterministic collection order.
+    pub fn export_all_snapshots(&self) -> Result<Vec<(String, Vec<u8>)>, LiteError> {
+        let mut out = Vec::with_capacity(self.states.len());
+        for (collection, state) in &self.states {
+            let bytes = state.export_snapshot().map_err(|e| LiteError::Storage {
+                detail: format!("snapshot export for '{collection}' failed: {e}"),
+            })?;
+            out.push((collection.clone(), bytes));
+        }
+        Ok(out)
+    }
+
+    /// Compact Loro history on every collection to prevent unbounded growth.
+    ///
+    /// Replaces each internal LoroDoc with a shallow snapshot. Historical
     /// operations are discarded. Current state is fully preserved.
     pub fn compact_history(&mut self) -> Result<(), LiteError> {
-        self.state
-            .compact_history()
-            .map_err(|e| LiteError::Storage {
-                detail: format!("history compaction failed: {e}"),
-            })
+        for (collection, state) in &mut self.states {
+            state.compact_history().map_err(|e| LiteError::Storage {
+                detail: format!("history compaction for '{collection}' failed: {e}"),
+            })?;
+        }
+        Ok(())
     }
 
-    /// Estimated memory usage in bytes.
+    /// Estimated memory usage in bytes across all collections.
     pub fn estimated_memory_bytes(&self) -> usize {
-        let state_bytes = self.state.estimated_memory_bytes();
+        let state_bytes: usize = self
+            .states
+            .values()
+            .map(|s| s.estimated_memory_bytes())
+            .sum();
         let delta_bytes: usize = self
             .pending_deltas
             .iter()
@@ -95,36 +164,52 @@ impl CrdtEngine {
             .sum();
         state_bytes + delta_bytes
     }
-    /// Access the underlying `CrdtState` for advanced operations.
-    pub fn state(&self) -> &CrdtState {
-        &self.state
+
+    /// Access a collection's underlying `CrdtState` for advanced operations.
+    pub fn state(&self, collection: &str) -> Option<&CrdtState> {
+        self.states.get(collection)
     }
+
     // ─── Version-History Operations ──────────────────────────────────
 
-    /// Export the oplog delta from a specific version to the current state.
+    /// Export a collection's oplog delta from a specific version to its
+    /// current state.
     ///
-    /// Returns the Loro update bytes that transform `from_version` into
-    /// the current oplog state. Used by `ExportDelta`.
+    /// Returns the Loro update bytes that transform `from_version` into the
+    /// current oplog state, or an empty vector when the collection has no
+    /// document. Used by `ExportDelta`.
     pub fn export_delta_from(
         &self,
+        collection: &str,
         from_version: &loro::VersionVector,
     ) -> Result<Vec<u8>, LiteError> {
-        self.state
+        let Some(state) = self.states.get(collection) else {
+            return Ok(Vec::new());
+        };
+        state
             .export_updates_since(from_version)
             .map_err(|e| LiteError::Storage {
-                detail: format!("export_delta_from: {e}"),
+                detail: format!("export_delta_from '{collection}': {e}"),
             })
     }
 
-    /// Compact history at a specific version, discarding oplog entries before it.
+    /// Compact a collection's history at a specific version, discarding oplog
+    /// entries before it.
     ///
     /// The current state and all versions after the target are preserved.
-    /// Used by `CompactAtVersion`.
-    pub fn compact_at_version(&mut self, version: &loro::VersionVector) -> Result<(), LiteError> {
-        self.state
+    /// Used by `CompactAtVersion`. A collection with no document is a no-op.
+    pub fn compact_at_version(
+        &mut self,
+        collection: &str,
+        version: &loro::VersionVector,
+    ) -> Result<(), LiteError> {
+        let Some(state) = self.states.get_mut(collection) else {
+            return Ok(());
+        };
+        state
             .compact_at_version(version)
             .map_err(|e| LiteError::Storage {
-                detail: format!("compact_at_version: {e}"),
+                detail: format!("compact_at_version '{collection}': {e}"),
             })
     }
 }

@@ -84,10 +84,12 @@ async fn e2e_two_lite_instances_crdt_convergence() {
 
     // Cross-import: db1 gets db2's deltas and vice versa.
     for d in &deltas2 {
-        db1.import_remote_deltas(&d.delta_bytes).unwrap();
+        db1.import_remote_deltas(&d.collection, &d.delta_bytes)
+            .unwrap();
     }
     for d in &deltas1 {
-        db2.import_remote_deltas(&d.delta_bytes).unwrap();
+        db2.import_remote_deltas(&d.collection, &d.delta_bytes)
+            .unwrap();
     }
 
     // Both should now see both fields.

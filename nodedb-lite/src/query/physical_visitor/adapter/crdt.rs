@@ -27,19 +27,26 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
         }
 
         CrdtOp::Apply {
-            delta, mutation_id, ..
+            collection,
+            delta,
+            mutation_id,
+            ..
         } => {
+            let col = collection.clone();
             let delta_bytes = delta.clone();
             let mid = *mutation_id;
             Ok(Box::pin(async move {
-                crdt_ops::write::handle_apply(engine, &delta_bytes, mid).await
+                crdt_ops::write::handle_apply(engine, &col, &delta_bytes, mid).await
             }))
         }
 
-        CrdtOp::ImportSnapshot { bytes, .. } => {
+        CrdtOp::ImportSnapshot {
+            collection, bytes, ..
+        } => {
+            let col = collection.clone();
             let bytes = bytes.clone();
             Ok(Box::pin(async move {
-                crdt_ops::write::handle_import_snapshot(engine, &bytes).await
+                crdt_ops::write::handle_import_snapshot(engine, &col, &bytes).await
             }))
         }
 
@@ -105,11 +112,13 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
         })),
 
         CrdtOp::ExportDelta {
-            from_version_json, ..
+            collection,
+            from_version_json,
         } => {
+            let col = collection.clone();
             let from_json = from_version_json.clone();
             Ok(Box::pin(async move {
-                crdt_ops::version::handle_export_delta(engine, &from_json).await
+                crdt_ops::version::handle_export_delta(engine, &col, &from_json).await
             }))
         }
 
@@ -129,12 +138,13 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
         }
 
         CrdtOp::CompactAtVersion {
+            collection,
             target_version_json,
-            ..
         } => {
+            let col = collection.clone();
             let target_json = target_version_json.clone();
             Ok(Box::pin(async move {
-                crdt_ops::version::handle_compact_at_version(engine, &target_json).await
+                crdt_ops::version::handle_compact_at_version(engine, &col, &target_json).await
             }))
         }
 

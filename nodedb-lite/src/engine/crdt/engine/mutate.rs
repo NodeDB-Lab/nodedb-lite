@@ -10,7 +10,7 @@ use nodedb_crdt::CrdtState;
 
 use crate::error::LiteError;
 
-use super::types::{CrdtBatchOp, CrdtEngine, PendingDelta};
+use super::types::{CrdtBatchOp, CrdtEngine, DeferredOp, PendingDelta};
 
 impl CrdtEngine {
     // ─── Mutations ───────────────────────────────────────────────────
@@ -24,32 +24,13 @@ impl CrdtEngine {
         doc_id: &str,
         fields: &[(&str, LoroValue)],
     ) -> Result<u64, LiteError> {
-        // Snapshot before mutation for delta extraction.
-        let version_before = self.state.oplog_version_vector();
-
-        self.state
-            .upsert(collection, doc_id, fields)
-            .map_err(|e| LiteError::Storage {
-                detail: format!("CRDT upsert failed: {e}"),
-            })?;
-
-        // Extract the delta (operations since version_before).
-        let delta_bytes = self
-            .state
-            .export_updates_since(&version_before)
-            .map_err(|e| LiteError::Storage {
-                detail: format!("delta export failed: {e}"),
-            })?;
-
-        let mutation_id = self.next_mutation_id.fetch_add(1, Ordering::Relaxed);
-        self.pending_deltas.push(PendingDelta {
-            mutation_id,
-            collection: collection.to_string(),
-            document_id: doc_id.to_string(),
-            delta_bytes,
-            seq: 0,
-        });
-
+        let (_, mutation_id) = self.with_delta_capture(collection, doc_id, "upsert", |state| {
+            state
+                .upsert(collection, doc_id, fields)
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("CRDT upsert failed: {e}"),
+                })
+        })?;
         Ok(mutation_id)
     }
 
@@ -65,113 +46,58 @@ impl CrdtEngine {
         doc_id: &str,
         fields: &[(&str, LoroValue)],
     ) -> Result<u64, LiteError> {
-        let version_before = self.state.oplog_version_vector();
-
-        self.state
-            .set_fields(collection, doc_id, fields)
-            .map_err(|e| LiteError::Storage {
-                detail: format!("CRDT set_fields failed: {e}"),
+        let (_, mutation_id) =
+            self.with_delta_capture(collection, doc_id, "set_fields", |state| {
+                state
+                    .set_fields(collection, doc_id, fields)
+                    .map_err(|e| LiteError::Storage {
+                        detail: format!("CRDT set_fields failed: {e}"),
+                    })
             })?;
-
-        let delta_bytes = self
-            .state
-            .export_updates_since(&version_before)
-            .map_err(|e| LiteError::Storage {
-                detail: format!("delta export failed: {e}"),
-            })?;
-
-        let mutation_id = self.next_mutation_id.fetch_add(1, Ordering::Relaxed);
-        self.pending_deltas.push(PendingDelta {
-            mutation_id,
-            collection: collection.to_string(),
-            document_id: doc_id.to_string(),
-            delta_bytes,
-            seq: 0,
-        });
-
         Ok(mutation_id)
     }
 
     /// Delete a document/row.
     pub fn delete(&mut self, collection: &str, doc_id: &str) -> Result<u64, LiteError> {
-        let version_before = self.state.oplog_version_vector();
-
-        self.state
-            .delete(collection, doc_id)
-            .map_err(|e| LiteError::Storage {
-                detail: format!("CRDT delete failed: {e}"),
-            })?;
-
-        let delta_bytes = self
-            .state
-            .export_updates_since(&version_before)
-            .map_err(|e| LiteError::Storage {
-                detail: format!("delta export failed: {e}"),
-            })?;
-
-        let mutation_id = self.next_mutation_id.fetch_add(1, Ordering::Relaxed);
-        self.pending_deltas.push(PendingDelta {
-            mutation_id,
-            collection: collection.to_string(),
-            document_id: doc_id.to_string(),
-            delta_bytes,
-            seq: 0,
-        });
-
+        let (_, mutation_id) = self.with_delta_capture(collection, doc_id, "delete", |state| {
+            state
+                .delete(collection, doc_id)
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("CRDT delete failed: {e}"),
+                })
+        })?;
         Ok(mutation_id)
     }
 
-    /// Batch upsert: apply N mutations with a single delta export.
+    /// Batch upsert: apply N mutations, emitting one delta per row.
     ///
-    /// This is O(1) Loro exports instead of O(N). Use for bulk inserts
-    /// (cold-start hydration, batch vector insert, graph edge loading).
+    /// Ops may span collections. Each row gets its own `PendingDelta` tagged
+    /// with its real collection and document ID — a delta covering several
+    /// rows (or several collections) is not independently applicable by the
+    /// receiver, which commits per row and stores documents per collection.
+    ///
+    /// Returns the mutation ID of the last delta enqueued, or 0 if `ops` is
+    /// empty.
     pub fn batch_upsert(&mut self, ops: &[CrdtBatchOp<'_>]) -> Result<u64, LiteError> {
-        if ops.is_empty() {
-            return Ok(0);
-        }
-
-        let version_before = self.state.oplog_version_vector();
-
+        let mut last_mutation_id = 0;
         for &(collection, doc_id, fields) in ops {
-            self.state
-                .upsert(collection, doc_id, fields)
-                .map_err(|e| LiteError::Storage {
-                    detail: format!("CRDT batch upsert failed: {e}"),
+            let (_, mutation_id) =
+                self.with_delta_capture(collection, doc_id, "batch upsert", |state| {
+                    state
+                        .upsert(collection, doc_id, fields)
+                        .map_err(|e| LiteError::Storage {
+                            detail: format!("CRDT batch upsert failed: {e}"),
+                        })
                 })?;
-        }
-
-        let delta_bytes = self
-            .state
-            .export_updates_since(&version_before)
-            .map_err(|e| LiteError::Storage {
-                detail: format!("batch delta export failed: {e}"),
-            })?;
-
-        // Use the collection from the first op. If ops span multiple collections,
-        // label it "mixed" to avoid misleading a single-collection name.
-        let collection_name = {
-            let first = ops[0].0;
-            if ops.iter().all(|&(c, _, _)| c == first) {
-                first.to_string()
-            } else {
-                "mixed".to_string()
+            if mutation_id != 0 {
+                last_mutation_id = mutation_id;
             }
-        };
-
-        let mutation_id = self.next_mutation_id.fetch_add(1, Ordering::Relaxed);
-        self.pending_deltas.push(PendingDelta {
-            mutation_id,
-            collection: collection_name,
-            document_id: format!("{}_ops", ops.len()),
-            delta_bytes,
-            seq: 0,
-        });
-
-        Ok(mutation_id)
+        }
+        Ok(last_mutation_id)
     }
 
     /// Upsert without generating a delta. Use `flush_deltas()` later
-    /// to batch-export all accumulated mutations as a single delta.
+    /// to export the accumulated mutations.
     ///
     /// This is the fast path for local-only writes (KV put, bulk insert)
     /// where per-operation delta export is prohibitively expensive.
@@ -181,97 +107,79 @@ impl CrdtEngine {
         doc_id: &str,
         fields: &[(&str, LoroValue)],
     ) -> Result<(), LiteError> {
-        // Capture version before if this is the first deferred op.
-        if self.deferred_version.is_none() {
-            self.deferred_version = Some(self.state.oplog_version_vector());
-        }
-
-        self.state
-            .upsert(collection, doc_id, fields)
-            .map_err(|e| LiteError::Storage {
-                detail: format!("CRDT upsert failed: {e}"),
-            })?;
-        self.deferred_count += 1;
-        Ok(())
+        self.defer(collection, doc_id, |state| {
+            state
+                .upsert(collection, doc_id, fields)
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("CRDT upsert failed: {e}"),
+                })
+        })
     }
 
     /// Delete without generating a delta. Use `flush_deltas()` later.
     pub fn delete_deferred(&mut self, collection: &str, doc_id: &str) -> Result<(), LiteError> {
-        if self.deferred_version.is_none() {
-            self.deferred_version = Some(self.state.oplog_version_vector());
-        }
+        self.defer(collection, doc_id, |state| {
+            state
+                .delete(collection, doc_id)
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("CRDT delete failed: {e}"),
+                })
+        })
+    }
 
-        self.state
-            .delete(collection, doc_id)
-            .map_err(|e| LiteError::Storage {
-                detail: format!("CRDT delete failed: {e}"),
-            })?;
-        self.deferred_count += 1;
+    /// Apply `body` to the collection's document and record the counter range
+    /// its operations occupy, so `flush_deltas` can export exactly that row
+    /// later.
+    fn defer<F>(&mut self, collection: &str, document_id: &str, body: F) -> Result<(), LiteError>
+    where
+        F: FnOnce(&CrdtState) -> Result<(), LiteError>,
+    {
+        let (from_counter, to_counter) = {
+            let state = self.state_mut(collection)?;
+            let from_counter = state.local_op_counter();
+            body(state)?;
+            (from_counter, state.local_op_counter())
+        };
+        self.deferred.push(DeferredOp {
+            collection: collection.to_string(),
+            document_id: document_id.to_string(),
+            from_counter,
+            to_counter,
+        });
         Ok(())
     }
 
-    /// Export a single delta covering all deferred mutations since the last
-    /// flush. Returns the number of operations included, or 0 if none.
+    /// Export one delta per deferred mutation since the last flush. Returns
+    /// the number of deferred operations processed, or 0 if none.
     ///
     /// Call this after a batch of `upsert_deferred` / `delete_deferred`
-    /// calls to produce the sync delta.
+    /// calls to produce the sync deltas. Each deferred write is exported over
+    /// its own recorded counter range so the resulting delta is applicable on
+    /// its own — a single coalesced delta spanning rows and collections is not.
     pub fn flush_deltas(&mut self) -> Result<usize, LiteError> {
-        let count = self.deferred_count;
-        if count == 0 {
-            return Ok(0);
-        }
+        let deferred = std::mem::take(&mut self.deferred);
+        let count = deferred.len();
 
-        let version_before = self
-            .deferred_version
-            .take()
-            .expect("deferred_version must be set when deferred_count > 0");
-
-        let delta_bytes = self
-            .state
-            .export_updates_since(&version_before)
-            .map_err(|e| LiteError::Storage {
-                detail: format!("flush delta export failed: {e}"),
-            })?;
-
-        let mutation_id = self.next_mutation_id.fetch_add(1, Ordering::Relaxed);
-        self.pending_deltas.push(PendingDelta {
-            mutation_id,
-            // "deferred" reflects that this delta covers multiple collections
-            // accumulated via upsert_deferred/delete_deferred calls.
-            collection: "deferred".to_string(),
-            document_id: format!("{count}_ops"),
-            delta_bytes,
-            seq: 0,
-        });
-
-        self.deferred_count = 0;
-        Ok(count)
-    }
-    /// Delete all documents in a collection in a single batch.
-    /// Returns the number of documents deleted. Generates one delta.
-    pub fn clear_collection(&mut self, collection: &str) -> Result<usize, LiteError> {
-        let version_before = self.state.oplog_version_vector();
-
-        let count = self
-            .state
-            .clear_collection(collection)
-            .map_err(|e| LiteError::Storage {
-                detail: format!("clear collection: {e}"),
-            })?;
-
-        if count > 0 {
-            let delta_bytes = self
-                .state
-                .export_updates_since(&version_before)
+        for op in deferred {
+            let Some(state) = self.states.get(&op.collection) else {
+                continue;
+            };
+            let delta_bytes = state
+                .export_local_range(op.from_counter, op.to_counter)
                 .map_err(|e| LiteError::Storage {
-                    detail: format!("delta export after clear: {e}"),
+                    detail: format!("flush delta export for '{}': {e}", op.collection),
                 })?;
+            // An empty range exports no bytes, and an empty blob is not
+            // importable — never enqueue one.
+            if delta_bytes.is_empty() {
+                continue;
+            }
 
             let mutation_id = self.next_mutation_id.fetch_add(1, Ordering::Relaxed);
             self.pending_deltas.push(PendingDelta {
                 mutation_id,
-                collection: collection.to_string(),
-                document_id: "*".to_string(),
+                collection: op.collection,
+                document_id: op.document_id,
                 delta_bytes,
                 seq: 0,
             });
@@ -279,31 +187,66 @@ impl CrdtEngine {
 
         Ok(count)
     }
-    // ─── LoroMovableList Operations ──────────────────────────────────
 
-    /// Run `body` against the doc, capture the resulting Loro delta against
-    /// the pre-mutation version vector, and push it onto the pending-deltas
-    /// queue tagged with a fresh mutation id. Used to factor the
-    /// "snapshot → mutate → export delta → enqueue" envelope shared by all
-    /// LoroMovableList helpers.
-    pub(super) fn with_delta_capture<F>(
+    /// Delete all documents in a collection in a single batch.
+    /// Returns the number of documents deleted. Generates one delta.
+    pub fn clear_collection(&mut self, collection: &str) -> Result<usize, LiteError> {
+        if !self.states.contains_key(collection) {
+            return Ok(0);
+        }
+        let (count, _) = self.with_delta_capture(collection, "*", "clear collection", |state| {
+            state
+                .clear_collection(collection)
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("clear collection: {e}"),
+                })
+        })?;
+        Ok(count)
+    }
+
+    // ─── Shared Delta-Capture Envelope ───────────────────────────────
+
+    /// Run `body` against the collection's document, capture the resulting
+    /// Loro delta against the pre-mutation version vector, and push it onto
+    /// the pending-deltas queue tagged with a fresh mutation ID.
+    ///
+    /// Returns `body`'s value alongside the assigned mutation ID; the ID is 0
+    /// when the mutation produced no operations and nothing was enqueued (an
+    /// empty delta blob is not importable by the receiver).
+    pub(super) fn with_delta_capture<F, T>(
         &mut self,
         collection: &str,
         document_id: &str,
         op_name: &str,
         body: F,
-    ) -> Result<(), LiteError>
+    ) -> Result<(T, u64), LiteError>
     where
-        F: FnOnce(&CrdtState) -> Result<(), LiteError>,
+        F: FnOnce(&CrdtState) -> Result<T, LiteError>,
     {
-        let version_before = self.state.oplog_version_vector();
-        body(&self.state)?;
-        let delta_bytes = self
-            .state
-            .export_updates_since(&version_before)
-            .map_err(|e| LiteError::Storage {
-                detail: format!("{op_name} delta export: {e}"),
-            })?;
+        let (value, delta_bytes) = {
+            let state = self.state_mut(collection)?;
+            let version_before = state.oplog_version_vector();
+            let counter_before = state.local_op_counter();
+            let value = body(state)?;
+            // A body that authored nothing (deleting an absent row, clearing an
+            // empty collection) still exports a non-empty Loro header. Enqueuing
+            // that would send the receiver a delta carrying no operations.
+            if state.local_op_counter() == counter_before {
+                return Ok((value, 0));
+            }
+            let delta_bytes =
+                state
+                    .export_updates_since(&version_before)
+                    .map_err(|e| LiteError::Storage {
+                        detail: format!("{op_name} delta export: {e}"),
+                    })?;
+            (value, delta_bytes)
+        };
+
+        if delta_bytes.is_empty() {
+            return Ok((value, 0));
+        }
+
         let mutation_id = self.next_mutation_id.fetch_add(1, Ordering::Relaxed);
         self.pending_deltas.push(PendingDelta {
             mutation_id,
@@ -312,6 +255,6 @@ impl CrdtEngine {
             delta_bytes,
             seq: 0,
         });
-        Ok(())
+        Ok((value, mutation_id))
     }
 }
