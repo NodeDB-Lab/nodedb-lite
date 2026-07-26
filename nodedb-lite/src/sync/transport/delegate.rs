@@ -46,6 +46,19 @@ pub trait SyncDelegate: Send + Sync + 'static {
     );
     /// Import remote deltas from Origin into local CRDT state.
     fn import_remote(&self, data: &[u8]);
+
+    /// Apply a server-originated row post-image (opcode `0x15`).
+    ///
+    /// Distinct from [`Self::import_remote`], which takes Loro update bytes.
+    /// Origin sends this for writes with no client-authored CRDT operation to
+    /// replicate — SQL DML, and DDL-managed system rows such as retention
+    /// policies and alerts — carrying the row's full post-image (or, for a
+    /// delete, an empty payload and [`RowOp::Delete`]).
+    ///
+    /// Async because applying the row writes through to local storage.
+    ///
+    /// [`RowOp::Delete`]: nodedb_types::sync::wire::RowOp::Delete
+    async fn apply_remote_row(&self, msg: &nodedb_types::sync::wire::RowPushMsg);
     /// Import a definition sync message (function/trigger/procedure) from Origin.
     /// Async because persisting the definition to storage involves
     /// KV store writes through `spawn_blocking`.

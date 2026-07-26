@@ -61,6 +61,20 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         }
     }
 
+    async fn apply_remote_row(&self, msg: &nodedb_types::sync::wire::RowPushMsg) {
+        let delete = matches!(msg.op, nodedb_types::sync::wire::RowOp::Delete);
+        if let Err(e) =
+            self.apply_remote_row(&msg.collection, &msg.document_id, &msg.payload, delete)
+        {
+            tracing::warn!(
+                collection = %msg.collection,
+                doc = %msg.document_id,
+                error = %e,
+                "SyncDelegate: apply_remote_row failed"
+            );
+        }
+    }
+
     fn handle_array_delta(
         &self,
         msg: &nodedb_types::sync::wire::ArrayDeltaMsg,

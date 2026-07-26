@@ -421,6 +421,50 @@ impl<S: StorageEngine> NodeDbLite<S> {
         crdt.import_remote(data).map_err(NodeDbError::storage)
     }
 
+    /// Apply a server-originated row post-image from Origin.
+    ///
+    /// Unlike [`Self::import_remote_deltas`], the payload here is a
+    /// MessagePack row image rather than Loro update bytes — Origin sends it
+    /// for writes that have no client-authored CRDT operation to replicate
+    /// (SQL DML, DDL-managed system rows). An empty payload with `delete` set
+    /// removes the row.
+    ///
+    /// The resulting local mutation is dropped from the outbound queue: the
+    /// write came FROM Origin, so pushing it back would echo it into a loop.
+    pub fn apply_remote_row(
+        &self,
+        collection: &str,
+        document_id: &str,
+        payload: &[u8],
+        delete: bool,
+    ) -> NodeDbResult<()> {
+        use crate::nodedb::convert::value_to_loro;
+        use nodedb_types::value::Value;
+
+        let mut crdt = self.crdt.lock_or_recover();
+        let mutation_id = if delete {
+            crdt.delete(collection, document_id)
+                .map_err(NodeDbError::storage)?
+        } else {
+            let value: Value = zerompk::from_msgpack(payload).map_err(|e| {
+                NodeDbError::storage(format!("remote row payload decode failed: {e}"))
+            })?;
+            let Value::Object(fields) = value else {
+                return Err(NodeDbError::storage(
+                    "remote row payload is not an object".to_string(),
+                ));
+            };
+            let loro_fields: Vec<(&str, loro::LoroValue)> = fields
+                .iter()
+                .map(|(k, v)| (k.as_str(), value_to_loro(v)))
+                .collect();
+            crdt.upsert(collection, document_id, &loro_fields)
+                .map_err(NodeDbError::storage)?
+        };
+        crdt.drop_pending(mutation_id);
+        Ok(())
+    }
+
     /// Reject a specific delta (rollback optimistic local state).
     pub fn reject_delta(&self, mutation_id: u64) -> NodeDbResult<()> {
         let mut crdt = self.crdt.lock_or_recover();

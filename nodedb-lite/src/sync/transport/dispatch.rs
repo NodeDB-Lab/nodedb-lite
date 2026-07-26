@@ -116,6 +116,18 @@ pub(super) async fn dispatch_frame(
                 );
             }
         }
+        SyncMessageType::RowPush => {
+            // Server-originated row post-image (SQL DML on Origin, or a
+            // DDL-managed system row). Applied locally; never echoed back.
+            if let Some(msg) = frame.decode_body::<nodedb_types::sync::wire::RowPushMsg>() {
+                delegate.apply_remote_row(&msg).await;
+            } else {
+                tracing::warn!(
+                    frame_len = frame.body.len(),
+                    "RowPush frame body failed to decode; row not applied"
+                );
+            }
+        }
         SyncMessageType::ResyncRequest => {
             // Origin is requesting us to re-sync. Log; the push loop re-sends
             // from the requested mutation ID on the next tick.

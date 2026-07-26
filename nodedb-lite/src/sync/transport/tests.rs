@@ -21,6 +21,7 @@ struct MockDelegate {
     acked_up_to: AtomicU64,
     rejected: std::sync::Mutex<Vec<u64>>,
     imported: std::sync::Mutex<Vec<Vec<u8>>>,
+    applied_rows: std::sync::Mutex<Vec<(String, String, nodedb_types::sync::wire::RowOp)>>,
     imported_schemas: std::sync::Mutex<Vec<String>>,
     pending: std::sync::Mutex<Vec<PendingDelta>>,
     collection_metas: std::sync::Mutex<
@@ -34,6 +35,7 @@ impl MockDelegate {
             acked_up_to: AtomicU64::new(0),
             rejected: std::sync::Mutex::new(Vec::new()),
             imported: std::sync::Mutex::new(Vec::new()),
+            applied_rows: std::sync::Mutex::new(Vec::new()),
             imported_schemas: std::sync::Mutex::new(Vec::new()),
             pending: std::sync::Mutex::new(Vec::new()),
             collection_metas: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -60,6 +62,14 @@ impl SyncDelegate for MockDelegate {
     ) {
         self.rejected.lock().unwrap().push(mutation_id);
     }
+    async fn apply_remote_row(&self, msg: &nodedb_types::sync::wire::RowPushMsg) {
+        self.applied_rows.lock().unwrap().push((
+            msg.collection.clone(),
+            msg.document_id.clone(),
+            msg.op,
+        ));
+    }
+
     fn import_remote(&self, data: &[u8]) {
         self.imported.lock().unwrap().push(data.to_vec());
     }
@@ -552,4 +562,66 @@ async fn fenced_ack_does_not_retire_the_unapplied_delta() {
         0,
         "a Fenced ack retired a delta Origin never applied; the write is lost"
     );
+}
+
+/// Origin sends server-originated writes as `RowPush`, carrying a row
+/// post-image rather than Loro update bytes. Before this path existed the
+/// frame hit the dispatcher's catch-all and was discarded as "unexpected
+/// frame type from Origin", so nothing written on the server ever reached the
+/// device.
+#[tokio::test]
+async fn dispatch_row_push_applies_the_row() {
+    let client = make_client();
+    let mock = Arc::new(MockDelegate::new());
+    let delegate: Arc<dyn SyncDelegate> = Arc::clone(&mock) as _;
+
+    let msg = nodedb_types::sync::wire::RowPushMsg {
+        collection: "orders".into(),
+        document_id: "o-1".into(),
+        payload: vec![0x80], // empty msgpack map
+        op: nodedb_types::sync::wire::RowOp::Upsert,
+        lsn: 7,
+        peer_id: 1,
+        sequence: 3,
+    };
+    let frame = SyncFrame::try_encode(SyncMessageType::RowPush, &msg).expect("test frame encode");
+
+    dispatch_frame(&client, &delegate, &frame).await;
+
+    let applied = mock.applied_rows.lock().unwrap().clone();
+    assert_eq!(
+        applied,
+        vec![(
+            "orders".to_string(),
+            "o-1".to_string(),
+            nodedb_types::sync::wire::RowOp::Upsert
+        )],
+        "a RowPush frame must be applied, not discarded as an unknown type"
+    );
+}
+
+/// A delete carries an empty payload and must be applied as a removal, not
+/// inferred from the payload being empty.
+#[tokio::test]
+async fn dispatch_row_push_carries_delete_explicitly() {
+    let client = make_client();
+    let mock = Arc::new(MockDelegate::new());
+    let delegate: Arc<dyn SyncDelegate> = Arc::clone(&mock) as _;
+
+    let msg = nodedb_types::sync::wire::RowPushMsg {
+        collection: "orders".into(),
+        document_id: "o-2".into(),
+        payload: Vec::new(),
+        op: nodedb_types::sync::wire::RowOp::Delete,
+        lsn: 8,
+        peer_id: 1,
+        sequence: 4,
+    };
+    let frame = SyncFrame::try_encode(SyncMessageType::RowPush, &msg).expect("test frame encode");
+
+    dispatch_frame(&client, &delegate, &frame).await;
+
+    let applied = mock.applied_rows.lock().unwrap().clone();
+    assert_eq!(applied.len(), 1);
+    assert_eq!(applied[0].2, nodedb_types::sync::wire::RowOp::Delete);
 }
