@@ -19,11 +19,6 @@ mod dispatch;
 mod dispatch_acks;
 mod push;
 
-#[cfg(test)]
-mod row_push_admit_tests;
-#[cfg(test)]
-mod tests;
-
 use std::sync::Arc;
 
 pub use delegate::SyncDelegate;

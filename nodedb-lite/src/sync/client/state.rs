@@ -342,4 +342,59 @@ mod tests {
         let client = SyncClient::new(make_config(), 1);
         assert_eq!(client.state().await, SyncState::Disconnected);
     }
+
+    /// A re-delivered frame at the same sequence must be admitted once, not
+    /// twice — otherwise Origin re-sending an already-applied RowPush (e.g.
+    /// after a reconnect) would re-apply a stale post-image on top of newer
+    /// local state.
+    #[tokio::test]
+    async fn duplicate_sequence_is_admitted_once() {
+        let client = SyncClient::new(make_config(), 1);
+
+        assert!(client.admit_row_push(1, "orders", 5).await);
+        assert!(
+            !client.admit_row_push(1, "orders", 5).await,
+            "duplicate sequence must be admitted exactly once"
+        );
+    }
+
+    /// A lower sequence arriving after a higher one is a stale/out-of-order
+    /// re-delivery and must be refused, or it would leave an older post-image
+    /// as the final applied state.
+    #[tokio::test]
+    async fn lower_sequence_after_higher_is_refused() {
+        let client = SyncClient::new(make_config(), 1);
+
+        assert!(client.admit_row_push(1, "orders", 10).await);
+        assert!(!client.admit_row_push(1, "orders", 3).await);
+    }
+
+    /// The watermark is keyed per `(peer_id, collection)`, not globally — two
+    /// different collections reusing the same sequence number (each has its
+    /// own monotonic counter on Origin) must both be admitted.
+    #[tokio::test]
+    async fn same_sequence_different_collections_both_admitted() {
+        let client = SyncClient::new(make_config(), 1);
+
+        assert!(client.admit_row_push(1, "orders", 1).await);
+        assert!(
+            client.admit_row_push(1, "invoices", 1).await,
+            "a shared sequence number across distinct collections must not collide in the gate"
+        );
+    }
+
+    /// `sequence == 0` is the unsequenced sentinel for DDL-managed system rows.
+    /// It carries no ordering information, so it must always be admitted and
+    /// must never move the watermark for its collection.
+    #[tokio::test]
+    async fn unsequenced_frames_always_admit_and_never_gate() {
+        let client = SyncClient::new(make_config(), 1);
+
+        assert!(client.admit_row_push(1, "system_alerts", 0).await);
+        assert!(client.admit_row_push(1, "system_alerts", 0).await);
+        assert!(
+            client.admit_row_push(1, "system_alerts", 1).await,
+            "sequence-0 frames must always admit and must not block a later sequenced frame"
+        );
+    }
 }
