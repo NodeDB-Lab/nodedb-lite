@@ -98,6 +98,25 @@ pub struct SyncClient {
     /// session re-announces every collection with pending deltas, mirroring
     /// Origin's per-session announced set in `session_handler/announce.rs`.
     pub(super) announced_collections: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Highest `RowPushMsg.sequence` applied so far, keyed by
+    /// `(peer_id, collection)`.
+    ///
+    /// Client → server writes are protected by Origin's `sync_admit` gate
+    /// (producer/epoch/seq), but nothing symmetric exists for server →
+    /// client `RowPush` frames. Without this, a re-delivered or
+    /// out-of-order frame is applied blindly: a duplicate delete-then-push
+    /// re-delivery can resurrect a row a later write already removed, and
+    /// an out-of-order pair can leave a stale post-image as the winner.
+    /// In-memory and per-connection is the right scope: Origin's fan-out
+    /// is a live mpsc channel with no replay across reconnects, so there is
+    /// nothing durable to reconcile against after a reconnect anyway.
+    ///
+    /// Nested by peer_id then collection (rather than a flat `(u64, String)`
+    /// key) so the common case — checking the mark for a collection that is
+    /// already tracked — looks it up by `&str` without allocating; a `String`
+    /// is only allocated the first time a given collection is seen.
+    pub(super) row_push_watermark:
+        Arc<Mutex<std::collections::HashMap<u64, std::collections::HashMap<String, u64>>>>,
 }
 
 impl SyncClient {
@@ -139,6 +158,7 @@ impl SyncClient {
                 crate::sync::client::token::TOKEN_REFRESH_MIN_BACKOFF_MS,
             )),
             announced_collections: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            row_push_watermark: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -259,6 +279,53 @@ impl SyncClient {
     /// `CollectionSchema` (opcode `0x13`).
     pub(crate) fn announced_collections(&self) -> &Arc<Mutex<std::collections::HashSet<String>>> {
         &self.announced_collections
+    }
+
+    /// Returns true when this row push should be applied.
+    ///
+    /// Every client → server engine path is protected by Origin's
+    /// `sync_admit` gate (producer/epoch/seq); there is no equivalent for
+    /// server → client `RowPush` frames. Without this gate, a re-delivered
+    /// frame is applied unconditionally: a duplicate delivery of a stale
+    /// post-image can resurrect a row a later, un-replayed write already
+    /// deleted, and an out-of-order pair can leave the older post-image as
+    /// the final state.
+    ///
+    /// `sequence == 0` is the unsequenced sentinel — it mirrors how Origin
+    /// treats `producer_id == 0` as unidentified in `sync_gate.rs`, marking
+    /// DDL-managed system rows (retention policies, alerts) that were never
+    /// assigned a per-collection sequence. Such a frame carries no ordering
+    /// information to dedup against, so it is always applied and never
+    /// allowed to move the watermark (doing so would let a later
+    /// legitimately-sequenced frame for the same collection be skipped as
+    /// "stale").
+    pub async fn admit_row_push(&self, peer_id: u64, collection: &str, sequence: u64) -> bool {
+        if sequence == 0 {
+            return true;
+        }
+
+        let mut watermark = self.row_push_watermark.lock().await;
+        let per_collection = watermark.entry(peer_id).or_default();
+        let mark = per_collection.get(collection).copied().unwrap_or(0);
+
+        if sequence <= mark {
+            tracing::debug!(
+                peer_id,
+                collection,
+                sequence,
+                watermark = mark,
+                "RowPush: sequence at or below high-water mark, skipping duplicate/stale frame"
+            );
+            return false;
+        }
+
+        match per_collection.get_mut(collection) {
+            Some(mark) => *mark = sequence,
+            None => {
+                per_collection.insert(collection.to_string(), sequence);
+            }
+        }
+        true
     }
 }
 

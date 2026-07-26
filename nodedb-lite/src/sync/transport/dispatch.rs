@@ -120,7 +120,16 @@ pub(super) async fn dispatch_frame(
             // Server-originated row post-image (SQL DML on Origin, or a
             // DDL-managed system row). Applied locally; never echoed back.
             if let Some(msg) = frame.decode_body::<nodedb_types::sync::wire::RowPushMsg>() {
-                delegate.apply_remote_row(&msg).await;
+                // Origin's client→server writes are protected by sync_admit
+                // (producer/epoch/seq); this is the symmetric gate for the
+                // server→client direction, without which a re-delivered or
+                // out-of-order RowPush could resurrect a deleted row.
+                if client
+                    .admit_row_push(msg.peer_id, &msg.collection, msg.sequence)
+                    .await
+                {
+                    delegate.apply_remote_row(&msg).await;
+                }
             } else {
                 tracing::warn!(
                     frame_len = frame.body.len(),

@@ -17,7 +17,11 @@ use crate::sync::outbound::timeseries::PendingTimeseriesBatch;
 use crate::sync::outbound::vector::{PendingVectorDelete, PendingVectorInsert};
 
 /// Mock delegate for testing (uses std::sync::Mutex, not tokio's).
-struct MockDelegate {
+///
+/// `pub(super)` so the sibling `row_push_admit_tests` module — pulled out to
+/// keep this file under the repo's line-count limit — can reuse it rather
+/// than duplicating a second mock delegate.
+pub(super) struct MockDelegate {
     acked_up_to: AtomicU64,
     rejected: std::sync::Mutex<Vec<u64>>,
     imported: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
@@ -30,7 +34,7 @@ struct MockDelegate {
 }
 
 impl MockDelegate {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             acked_up_to: AtomicU64::new(0),
             rejected: std::sync::Mutex::new(Vec::new()),
@@ -40,6 +44,11 @@ impl MockDelegate {
             pending: std::sync::Mutex::new(Vec::new()),
             collection_metas: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// Snapshot of rows applied so far, in application order.
+    pub(super) fn applied_rows(&self) -> Vec<(String, String, nodedb_types::sync::wire::RowOp)> {
+        self.applied_rows.lock().unwrap().clone()
     }
 }
 
@@ -284,7 +293,7 @@ impl futures::Sink<tokio_tungstenite::tungstenite::Message> for CapturingSink {
     }
 }
 
-fn make_client() -> Arc<SyncClient> {
+pub(super) fn make_client() -> Arc<SyncClient> {
     Arc::new(SyncClient::new(
         crate::sync::client::SyncConfig::new("wss://localhost/sync", "jwt"),
         1,
