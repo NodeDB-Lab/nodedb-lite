@@ -127,27 +127,22 @@ pub unsafe extern "C" fn nodedb_open(
             Err(_) => return std::ptr::null_mut(),
         };
 
-        let (storage, tmpdir) = if is_memory {
+        let (db, tmpdir) = if is_memory {
             let tmp = match OwnedTempDir::new() {
                 Some(t) => t,
                 None => return std::ptr::null_mut(),
             };
-            let s = match rt.block_on(PagedbStorageDefault::open(&tmp.0, enc)) {
-                Ok(s) => s,
+            let db = match rt.block_on(NodeDbLite::open_at_path(&tmp.0, peer_id, enc)) {
+                Ok(db) => Arc::new(db),
                 Err(_) => return std::ptr::null_mut(),
             };
-            (s, Some(tmp))
+            (db, Some(tmp))
         } else {
-            let s = match rt.block_on(PagedbStorageDefault::open(path, enc)) {
-                Ok(s) => s,
+            let db = match rt.block_on(NodeDbLite::open_at_path(path, peer_id, enc)) {
+                Ok(db) => Arc::new(db),
                 Err(_) => return std::ptr::null_mut(),
             };
-            (s, None)
-        };
-
-        let db = match rt.block_on(NodeDbLite::open(storage, peer_id)) {
-            Ok(db) => Arc::new(db),
-            Err(_) => return std::ptr::null_mut(),
+            (db, None)
         };
 
         let defaults = LiteConfig::default();
@@ -201,24 +196,6 @@ pub unsafe extern "C" fn nodedb_open_with_config(
             Err(_) => return std::ptr::null_mut(),
         };
 
-        let (storage, tmpdir) = if is_memory {
-            let tmp = match OwnedTempDir::new() {
-                Some(t) => t,
-                None => return std::ptr::null_mut(),
-            };
-            let s = match rt.block_on(PagedbStorageDefault::open(&tmp.0, enc)) {
-                Ok(s) => s,
-                Err(_) => return std::ptr::null_mut(),
-            };
-            (s, Some(tmp))
-        } else {
-            let s = match rt.block_on(PagedbStorageDefault::open(path, enc)) {
-                Ok(s) => s,
-                Err(_) => return std::ptr::null_mut(),
-            };
-            (s, None)
-        };
-
         let config = if memory_mb == 0 {
             LiteConfig::default()
         } else {
@@ -230,9 +207,27 @@ pub unsafe extern "C" fn nodedb_open_with_config(
 
         let auto_flush_ms = config.auto_flush_ms;
         let auto_compact_ms = config.auto_compact_ms;
-        let db = match rt.block_on(NodeDbLite::open_with_config(storage, peer_id, config)) {
-            Ok(db) => Arc::new(db),
-            Err(_) => return std::ptr::null_mut(),
+
+        let (db, tmpdir) = if is_memory {
+            let tmp = match OwnedTempDir::new() {
+                Some(t) => t,
+                None => return std::ptr::null_mut(),
+            };
+            let db = match rt.block_on(NodeDbLite::open_at_path_with_config(
+                &tmp.0, peer_id, enc, config,
+            )) {
+                Ok(db) => Arc::new(db),
+                Err(_) => return std::ptr::null_mut(),
+            };
+            (db, Some(tmp))
+        } else {
+            let db = match rt.block_on(NodeDbLite::open_at_path_with_config(
+                path, peer_id, enc, config,
+            )) {
+                Ok(db) => Arc::new(db),
+                Err(_) => return std::ptr::null_mut(),
+            };
+            (db, None)
         };
 
         let _guard = rt.enter();

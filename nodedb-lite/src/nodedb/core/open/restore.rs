@@ -42,7 +42,17 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let lite_identity =
             crate::engine::timeseries::identity::LiteIdentity::load_or_create(&**storage)
                 .await
-                .map_err(|e| NodeDbError::storage(format!("lite identity load failed: {e}")))?;
+                .map_err(|e| {
+                    // Preserve corruption typing so a corrupt identity read is
+                    // routed to the post-open recovery driver rather than
+                    // crash-looping as a generic storage error.
+                    let detail = format!("lite identity load failed: {e}");
+                    if crate::error::is_corruption(&e) {
+                        NodeDbError::segment_corrupted(detail)
+                    } else {
+                        NodeDbError::storage(detail)
+                    }
+                })?;
 
         // ── Restore CRDT state, one Loro document per collection ──
         // Snapshots are stored under `loro_snapshot:<collection>`, so the whole

@@ -60,10 +60,14 @@ pub type PagedbStorageOpfs = PagedbStorage<pagedb::vfs::opfs::OpfsVfs>;
 /// distinguishable at the application layer without string-matching.
 impl From<PagedbError> for LiteError {
     fn from(e: PagedbError) -> Self {
-        match e {
-            PagedbError::Corruption(_) => LiteError::Storage {
+        // Corruption-class errors are typed distinctly so the signal survives
+        // the conversion chain and reaches the open-sequence recovery driver.
+        if is_corruption(&e) {
+            return LiteError::Corrupted {
                 detail: format!("pagedb corruption: {e}"),
-            },
+            };
+        }
+        match e {
             PagedbError::Quota { .. } => LiteError::Storage {
                 detail: format!("pagedb quota exceeded: {e}"),
             },
@@ -83,12 +87,11 @@ impl From<PagedbError> for LiteError {
     }
 }
 
-/// Returns `true` when the error is a corruption-class error that should
-/// trigger the rename-and-recreate recovery path in `PagedbStorage::open`.
+/// Returns `true` when the error is a corruption-class error.
 ///
-/// Only the native `open()` uses this; OPFS has no rename, so it is compiled
-/// out on wasm32.
-#[cfg(not(target_arch = "wasm32"))]
+/// Used both by `From<PagedbError>` (all targets — to type the error as
+/// [`LiteError::Corrupted`]) and by the native `open()` rename-and-recreate
+/// recovery path.
 fn is_corruption(e: &PagedbError) -> bool {
     matches!(e, PagedbError::Corruption(_) | PagedbError::ChecksumFailure)
 }
@@ -236,39 +239,61 @@ impl PagedbStorage<DefaultVfs> {
         match Db::open(vfs, kek, 4096, realm, lite_open_options()).await {
             Ok(db) => Ok(Self { db: Arc::new(db) }),
             Err(e) if is_corruption(&e) && path.exists() => {
-                let timestamp = crate::runtime::now_secs();
-                let corrupt_path = path.with_extension(format!("corrupt.{timestamp}"));
-
                 tracing::error!(
                     path = %path.display(),
-                    corrupt_backup = %corrupt_path.display(),
                     error = %e,
-                    "pagedb database corrupted — renaming to backup and creating a fresh \
-                     database. A full re-sync from Origin is required to recover data."
+                    "pagedb open detected corruption — recovering (rename corrupt store aside, \
+                     recreate fresh). A full re-sync from Origin is required to recover data."
                 );
-
-                if let Err(rename_err) = std::fs::rename(path, &corrupt_path) {
-                    tracing::error!(error = %rename_err, "failed to rename corrupted pagedb directory");
-                    return Err(LiteError::Storage {
-                        detail: format!(
-                            "pagedb corrupted and rename failed: open={e}, rename={rename_err}"
-                        ),
-                    });
-                }
-
-                let vfs2 = pagedb::vfs::open_default(path).map_err(LiteError::from)?;
-                let db = Db::open(vfs2, kek, 4096, realm, lite_open_options())
-                    .await
-                    .map_err(|e2| LiteError::Storage {
-                        detail: format!(
-                            "pagedb corrupted, backup saved to {}, fresh create failed: {e2}",
-                            corrupt_path.display()
-                        ),
-                    })?;
-                Ok(Self { db: Arc::new(db) })
+                Self::recover_corrupt(path, &encryption).await
             }
             Err(e) => Err(LiteError::from(e)),
         }
+    }
+
+    /// Rename a corrupt database aside and recreate a fresh one at `path`.
+    ///
+    /// The corrupt store is renamed to `{path}.corrupt.{unix_secs}` (never
+    /// deleted, so the bytes remain available for offline forensics) and a fresh
+    /// database is created at `path` using the same `encryption`. Data recovery
+    /// happens via re-sync from Origin.
+    ///
+    /// Shared by [`PagedbStorage::open`]'s corruption arm and the post-open
+    /// recovery driver so the rename-and-recreate logic lives in exactly one
+    /// place.
+    pub(crate) async fn recover_corrupt(
+        path: &Path,
+        encryption: &crate::storage::encryption::Encryption,
+    ) -> Result<Self, LiteError> {
+        let kek = crate::storage::encryption::resolve_kek_native(encryption, path)?;
+        let realm = RealmId::new([0u8; 16]);
+
+        let timestamp = crate::runtime::now_secs();
+        let corrupt_path = path.with_extension(format!("corrupt.{timestamp}"));
+
+        tracing::error!(
+            path = %path.display(),
+            corrupt_backup = %corrupt_path.display(),
+            "renaming corrupted pagedb store to backup and creating a fresh database"
+        );
+
+        if let Err(rename_err) = std::fs::rename(path, &corrupt_path) {
+            tracing::error!(error = %rename_err, "failed to rename corrupted pagedb directory");
+            return Err(LiteError::Storage {
+                detail: format!("pagedb corrupted and rename failed: rename={rename_err}"),
+            });
+        }
+
+        let vfs = pagedb::vfs::open_default(path).map_err(LiteError::from)?;
+        let db = Db::open(vfs, kek, 4096, realm, lite_open_options())
+            .await
+            .map_err(|e2| LiteError::Storage {
+                detail: format!(
+                    "pagedb corrupted, backup saved to {}, fresh create failed: {e2}",
+                    corrupt_path.display()
+                ),
+            })?;
+        Ok(Self { db: Arc::new(db) })
     }
 }
 

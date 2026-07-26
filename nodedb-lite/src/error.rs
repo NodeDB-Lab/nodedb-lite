@@ -48,6 +48,21 @@ pub enum LiteError {
     /// An error during key derivation, salt I/O, or encryption setup.
     #[error("encryption error: {detail}")]
     Encryption { detail: String },
+
+    /// A corruption-class failure surfaced from the storage backend.
+    ///
+    /// Kept as a distinct variant (rather than folded into [`LiteError::Storage`])
+    /// so the corruption signal survives the error-type conversions and reaches
+    /// the open-sequence recovery driver, which renames the corrupt store aside,
+    /// recreates a fresh one, and retries the open exactly once.
+    #[error("storage corrupted: {detail}")]
+    Corrupted { detail: String },
+}
+
+/// Returns `true` when `e` is the corruption-class variant that should drive
+/// the store-recovery retry (rename the corrupt store, recreate fresh, reopen).
+pub(crate) fn is_corruption(e: &LiteError) -> bool {
+    matches!(e, LiteError::Corrupted { .. })
 }
 
 impl From<nodedb_types::columnar::SchemaError> for LiteError {
@@ -60,7 +75,11 @@ impl From<nodedb_types::columnar::SchemaError> for LiteError {
 
 impl From<LiteError> for nodedb_types::error::NodeDbError {
     fn from(e: LiteError) -> Self {
-        nodedb_types::error::NodeDbError::storage(e)
+        if is_corruption(&e) {
+            nodedb_types::error::NodeDbError::segment_corrupted(e.to_string())
+        } else {
+            nodedb_types::error::NodeDbError::storage(e)
+        }
     }
 }
 
