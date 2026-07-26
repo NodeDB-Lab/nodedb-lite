@@ -133,7 +133,7 @@ async fn vector_inserts_replicate_to_origin() {
             _ = &mut deadline => break,
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
                 let rows = pg
-                    .query(
+                    .poll_query(
                         "SELECT id FROM vec_sync_test \
                          ORDER BY vector_distance(embedding, ARRAY[0.0, 0.0, 0.0]) \
                          LIMIT 5",
@@ -193,7 +193,7 @@ async fn vector_delete_replicates_to_origin() {
             _ = &mut deadline => break,
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
                 let rows = pg
-                    .query(
+                    .poll_query(
                         "SELECT id FROM vec_sync_test \
                          ORDER BY vector_distance(embedding, ARRAY[0.0, 0.0, 0.0]) \
                          LIMIT 6",
@@ -225,7 +225,7 @@ async fn vector_delete_replicates_to_origin() {
             _ = &mut deadline => break,
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
                 let rows = pg
-                    .query(
+                    .poll_query(
                         "SELECT id FROM vec_sync_test \
                          ORDER BY vector_distance(embedding, ARRAY[0.0, 0.0, 0.0]) \
                          LIMIT 6",
@@ -281,7 +281,7 @@ async fn vector_pre_connection_inserts_sync_after_connect() {
             _ = &mut deadline => break,
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
                 let rows = pg
-                    .query(
+                    .poll_query(
                         "SELECT id FROM vec_sync_test \
                          ORDER BY vector_distance(embedding, ARRAY[0.0, 0.0, 0.0]) \
                          LIMIT 3",

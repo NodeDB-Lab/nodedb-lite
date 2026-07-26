@@ -58,10 +58,16 @@ impl OriginPgwire {
 
     /// Execute a SQL statement on Origin and return the raw rows.
     pub async fn query(&self, sql: &str) -> Vec<Row> {
-        self.client
-            .query(sql, &[])
-            .await
-            .unwrap_or_else(|e| panic!("Origin query failed: {e}\nSQL: {sql}"))
+        self.client.query(sql, &[]).await.unwrap_or_else(|e| {
+            // `tokio_postgres::Error`'s Display is just "db error" — the
+            // server's actual message lives in the attached DbError. Surface it
+            // or the failure is undiagnosable from CI output alone.
+            let detail = match e.as_db_error() {
+                Some(db) => format!("{}: {}", db.severity(), db.message()),
+                None => e.to_string(),
+            };
+            panic!("Origin query failed: {detail}\nSQL: {sql}")
+        })
     }
 
     /// Execute a query, returning the raw `tokio_postgres` error instead of
@@ -69,6 +75,32 @@ impl OriginPgwire {
     /// exist yet" is an expected transient state to be retried, not a failure.
     pub async fn try_query(&self, sql: &str) -> Result<Vec<Row>, tokio_postgres::Error> {
         self.client.query(sql, &[]).await
+    }
+
+    /// Query inside a bounded-retry poll loop, treating a transient server
+    /// state as "no rows yet" rather than a failure.
+    ///
+    /// A collection that has just arrived over sync briefly reports
+    /// `retryable schema change` (or "relation does not exist") while its
+    /// schema settles on Origin. Those are exactly the states a poll loop
+    /// exists to wait through — panicking on them turns a normal timing window
+    /// into a red test. The loop's own deadline remains the real failure
+    /// condition.
+    pub async fn poll_query(&self, sql: &str) -> Vec<Row> {
+        match self.try_query(sql).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                // Report rather than swallow. A poll loop that hides the error
+                // reports "0 rows" on timeout and gives no clue whether the
+                // data never arrived or the query never ran.
+                let detail = match e.as_db_error() {
+                    Some(db) => format!("{}: {}", db.severity(), db.message()),
+                    None => e.to_string(),
+                };
+                eprintln!("poll_query transient error: {detail}\n  SQL: {sql}");
+                Vec::new()
+            }
+        }
     }
 
     /// Execute a SQL statement that returns no rows (DDL/DML).

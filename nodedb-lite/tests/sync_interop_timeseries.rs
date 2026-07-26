@@ -142,7 +142,7 @@ async fn timeseries_inserts_replicate_to_origin() {
         tokio::select! {
             _ = &mut deadline => break,
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                let result = pg.query("SELECT time FROM ts_sync_test").await;
+                let result = pg.poll_query("SELECT time FROM ts_sync_test").await;
                 let count = result.len() as i64;
                 if count >= 3 {
                     origin_row_count = count;
@@ -208,7 +208,7 @@ async fn timeseries_pre_connection_inserts_sync_after_connect() {
         tokio::select! {
             _ = &mut deadline => break,
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                let result = pg.query("SELECT time FROM ts_sync_test").await;
+                let result = pg.poll_query("SELECT time FROM ts_sync_test").await;
                 let count = result.len() as i64;
                 if count >= 2 {
                     origin_row_count = count;

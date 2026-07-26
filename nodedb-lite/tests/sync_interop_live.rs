@@ -360,20 +360,26 @@ async fn live_concurrent_delta_push() {
         .expect("send");
     }
 
-    for i in 0..2 {
+    // Collect the two terminal responses. The connection is full-duplex and
+    // Origin also pushes server-initiated frames (the CRDT delta fan-out to
+    // subscribed sessions), which can interleave with the acks in any order.
+    // Skip anything that is not a terminal response to our pushes rather than
+    // asserting on arrival order the protocol does not guarantee.
+    let mut terminal = 0;
+    while terminal < 2 {
         let resp = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await
-            .unwrap_or_else(|_| panic!("timeout {i}"))
-            .unwrap_or_else(|| panic!("closed {i}"))
-            .unwrap_or_else(|e| panic!("error {i}: {e}"));
+            .unwrap_or_else(|_| panic!("timeout after {terminal} terminal response(s)"))
+            .unwrap_or_else(|| panic!("closed after {terminal} terminal response(s)"))
+            .unwrap_or_else(|e| panic!("error after {terminal} terminal response(s): {e}"));
         let frame = SyncFrame::from_bytes(resp.into_data().as_ref())
-            .unwrap_or_else(|| panic!("bad frame {i}"));
-        assert!(
-            frame.msg_type == SyncMessageType::DeltaAck
-                || frame.msg_type == SyncMessageType::DeltaReject,
-            "unexpected response {i}: {:?}",
-            frame.msg_type
-        );
+            .unwrap_or_else(|| panic!("bad frame after {terminal} terminal response(s)"));
+        match frame.msg_type {
+            SyncMessageType::DeltaAck | SyncMessageType::DeltaReject => terminal += 1,
+            other => {
+                eprintln!("skipping server-initiated frame while awaiting acks: {other:?}");
+            }
+        }
     }
 }
 

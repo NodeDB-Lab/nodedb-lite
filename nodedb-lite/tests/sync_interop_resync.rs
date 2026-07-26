@@ -182,22 +182,28 @@ async fn concurrent_deltas_from_two_peers() {
             .expect("send DeltaPush");
     }
 
-    for i in 0..2 {
+    // Collect the two terminal responses. The connection is full-duplex and
+    // Origin also pushes server-initiated frames (the row fan-out to
+    // subscribed sessions), which can interleave with the acks in any order.
+    // Skip anything that is not a terminal response to our pushes rather than
+    // asserting on arrival order the protocol does not guarantee.
+    let mut terminal = 0;
+    while terminal < 2 {
         let resp = tokio::time::timeout(Duration::from_secs(10), ws.next())
             .await
-            .unwrap_or_else(|_| panic!("timeout on response {i}"))
-            .unwrap_or_else(|| panic!("stream closed on response {i}"))
-            .unwrap_or_else(|e| panic!("read error on response {i}: {e}"));
+            .unwrap_or_else(|_| panic!("timeout after {terminal} terminal response(s)"))
+            .unwrap_or_else(|| panic!("stream closed after {terminal} terminal response(s)"))
+            .unwrap_or_else(|e| panic!("read error after {terminal} terminal response(s): {e}"));
 
         let frame = SyncFrame::from_bytes(resp.into_data().as_ref())
-            .unwrap_or_else(|| panic!("bad frame on response {i}"));
+            .unwrap_or_else(|| panic!("bad frame after {terminal} terminal response(s)"));
 
-        assert!(
-            frame.msg_type == SyncMessageType::DeltaAck
-                || frame.msg_type == SyncMessageType::DeltaReject,
-            "response {i} must be DeltaAck or DeltaReject, got {:?}",
-            frame.msg_type
-        );
+        match frame.msg_type {
+            SyncMessageType::DeltaAck | SyncMessageType::DeltaReject => terminal += 1,
+            other => {
+                eprintln!("skipping server-initiated frame while awaiting acks: {other:?}");
+            }
+        }
     }
 }
 

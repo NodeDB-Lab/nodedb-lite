@@ -116,29 +116,26 @@ impl OriginServer {
     fn spawn_inner(binary: PathBuf, with_pgwire: bool) -> Self {
         let data_dir = tempfile::tempdir().expect("create temp data dir for Origin");
 
-        let (mut cmd, config_dir) = if with_pgwire {
-            // Write a minimal config file that enables trust auth so the
-            // pgwire client in sql_parity tests can connect without a password.
-            let cfg_dir = tempfile::tempdir().expect("create temp config dir for Origin");
-            let cfg_path = cfg_dir.path().join("nodedb.toml");
-            let cfg_content = "[auth]\nmode = \"trust\"\nsuperuser_name = \"nodedb\"\nmin_password_length = 8\nmax_failed_logins = 10\nlockout_duration_secs = 300\nidle_timeout_secs = 0\nmax_connections_per_user = 0\npassword_expiry_days = 0\naudit_retention_days = 0\n";
-            std::fs::write(&cfg_path, cfg_content).expect("write Origin trust config file");
+        // Trust auth is required by EVERY test that talks to this server, not
+        // just the pgwire ones: the sync handshake authenticates with an empty
+        // JWT, which Origin only honours in trust mode. Without this config the
+        // server starts in its default password mode and refuses every
+        // handshake with "configured trust identity is unavailable".
+        //
+        // `with_pgwire` therefore selects only which ports we wait for, never
+        // whether the server is reachable at all.
+        let cfg_dir = tempfile::tempdir().expect("create temp config dir for Origin");
+        let cfg_path = cfg_dir.path().join("nodedb.toml");
+        let cfg_content = "[auth]\nmode = \"trust\"\nsuperuser_name = \"nodedb\"\nmin_password_length = 8\nmax_failed_logins = 10\nlockout_duration_secs = 300\nidle_timeout_secs = 0\nmax_connections_per_user = 0\npassword_expiry_days = 0\naudit_retention_days = 0\n";
+        std::fs::write(&cfg_path, cfg_content).expect("write Origin trust config file");
 
-            let mut c = Command::new(&binary);
-            c.arg(cfg_path.to_str().expect("config path is valid UTF-8"))
-                .env("NODEDB_DATA_DIR", data_dir.path())
-                .env_remove("RUST_LOG")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            (c, Some(cfg_dir))
-        } else {
-            let mut c = Command::new(&binary);
-            c.env("NODEDB_DATA_DIR", data_dir.path())
-                .env_remove("RUST_LOG")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            (c, None)
-        };
+        let mut cmd = Command::new(&binary);
+        cmd.arg(cfg_path.to_str().expect("config path is valid UTF-8"))
+            .env("NODEDB_DATA_DIR", data_dir.path())
+            .env_remove("RUST_LOG")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let config_dir = Some(cfg_dir);
 
         let child = cmd
             .spawn()

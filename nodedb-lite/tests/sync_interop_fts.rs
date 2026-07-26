@@ -132,7 +132,7 @@ async fn fts_inserts_replicate_to_origin() {
             _ = &mut deadline => break,
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
                 let rows = pg
-                    .query(
+                    .poll_query(
                         "SELECT id FROM fts_sync_test \
                          WHERE text_match(body, 'rocketengine') \
                          LIMIT 10",
@@ -196,7 +196,7 @@ async fn fts_delete_replicates_to_origin() {
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
                 // Search for terms present in ALL 3 docs: "content"
                 let rows_bg = pg
-                    .query(
+                    .poll_query(
                         "SELECT id FROM fts_sync_test \
                          WHERE text_match(body, 'content') \
                          LIMIT 10",
@@ -236,7 +236,7 @@ async fn fts_delete_replicates_to_origin() {
             _ = &mut deadline => break,
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
                 let rows = pg
-                    .query(
+                    .poll_query(
                         "SELECT id FROM fts_sync_test \
                          WHERE text_match(body, 'targetarticle') \
                          LIMIT 5",
@@ -310,7 +310,7 @@ async fn fts_pre_connection_inserts_sync_after_connect() {
             _ = &mut deadline => break,
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
                 let rows = pg
-                    .query(
+                    .poll_query(
                         "SELECT id FROM fts_sync_test \
                          WHERE text_match(body, 'stellarphysics') \
                          LIMIT 5",

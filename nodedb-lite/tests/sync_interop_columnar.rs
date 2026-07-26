@@ -123,7 +123,7 @@ async fn columnar_inserts_replicate_to_origin() {
         tokio::select! {
             _ = &mut deadline => break,
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                let rows = pg.query("SELECT id FROM col_sync_test").await;
+                let rows = pg.poll_query("SELECT id FROM col_sync_test").await;
                 let count = rows.len() as i64;
                 if count >= 3 {
                     origin_row_count = count;
@@ -197,7 +197,7 @@ async fn columnar_pre_connection_inserts_sync_after_connect() {
         tokio::select! {
             _ = &mut deadline => break,
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                let rows = pg.query("SELECT id FROM col_sync_test").await;
+                let rows = pg.poll_query("SELECT id FROM col_sync_test").await;
                 let count = rows.len() as i64;
                 if count >= 2 {
                     origin_row_count = count;
