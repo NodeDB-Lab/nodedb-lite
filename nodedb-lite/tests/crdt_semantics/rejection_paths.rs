@@ -105,6 +105,8 @@ async fn origin_rejects_crc_mismatch_with_integrity_violation() {
         producer_id: 0,
         epoch: 0,
         seq: 0,
+        device_id: 0,
+        delta_signature: [0u8; 32],
     };
 
     let reject = expect_reject(&mut ws, &msg, "INTEGRITY_VIOLATION").await;

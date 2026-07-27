@@ -91,6 +91,8 @@ async fn real_loro_delta_gets_acked() {
         producer_id: 0,
         epoch: 0,
         seq: 0,
+        device_id: 0,
+        delta_signature: [0u8; 32],
     };
 
     let frame = push_and_recv(&mut ws, &msg).await;
@@ -126,6 +128,8 @@ async fn empty_delta_is_rejected() {
         producer_id: 0,
         epoch: 0,
         seq: 0,
+        device_id: 0,
+        delta_signature: [0u8; 32],
     };
 
     let frame = push_and_recv(&mut ws, &msg).await;
@@ -161,6 +165,8 @@ async fn crc_mismatch_delta_is_rejected() {
         producer_id: 0,
         epoch: 0,
         seq: 0,
+        device_id: 0,
+        delta_signature: [0u8; 32],
     };
 
     let frame = push_and_recv(&mut ws, &msg).await;
@@ -211,6 +217,8 @@ async fn sequential_deltas_all_acked() {
             producer_id: 0,
             epoch: 0,
             seq: 0,
+            device_id: 0,
+            delta_signature: [0u8; 32],
         };
 
         let frame = push_and_recv(&mut ws, &msg).await;

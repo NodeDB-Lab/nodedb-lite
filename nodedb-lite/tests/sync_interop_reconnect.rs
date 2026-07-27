@@ -39,6 +39,8 @@ async fn push_delta(
         producer_id: 0,
         epoch: 0,
         seq: 0,
+        device_id: 0,
+        delta_signature: [0u8; 32],
     };
     let bytes = SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)
         .expect("encode DeltaPush")

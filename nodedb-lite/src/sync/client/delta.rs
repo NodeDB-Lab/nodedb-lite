@@ -38,6 +38,13 @@ impl SyncClient {
                 producer_id: 0,
                 epoch: 0,
                 seq: 0,
+                // Lite does not derive delta-signing keys yet, so these carry
+                // the wire's documented unsigned values: an all-zero signature
+                // denotes an unsigned delta. Origin's `signing_required` gate
+                // is what decides whether that is acceptable — Lite must not
+                // fabricate a signature it cannot compute.
+                device_id: 0,
+                delta_signature: [0u8; 32],
             })
             .collect()
     }

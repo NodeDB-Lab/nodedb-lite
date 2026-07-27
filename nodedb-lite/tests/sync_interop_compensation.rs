@@ -73,6 +73,8 @@ async fn empty_delta_reject_no_hint() {
         producer_id: 0,
         epoch: 0,
         seq: 0,
+        device_id: 0,
+        delta_signature: [0u8; 32],
     };
 
     let reject = push_and_recv_reject(&mut ws, &msg).await;
@@ -107,6 +109,8 @@ async fn crc_mismatch_yields_integrity_violation_hint() {
         producer_id: 0,
         epoch: 0,
         seq: 0,
+        device_id: 0,
+        delta_signature: [0u8; 32],
     };
 
     let reject = push_and_recv_reject(&mut ws, &msg).await;
@@ -143,6 +147,8 @@ async fn unauthenticated_push_yields_permission_denied() {
         producer_id: 0,
         epoch: 0,
         seq: 0,
+        device_id: 0,
+        delta_signature: [0u8; 32],
     };
 
     let bytes = SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)

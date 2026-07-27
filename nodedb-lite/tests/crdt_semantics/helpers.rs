@@ -107,6 +107,8 @@ pub fn push_msg_with_crc(
         producer_id: 0,
         epoch: 0,
         seq: 0,
+        device_id: 0,
+        delta_signature: [0u8; 32],
     }
 }
 
@@ -129,6 +131,8 @@ pub fn push_msg_no_crc(
         producer_id: 0,
         epoch: 0,
         seq: 0,
+        device_id: 0,
+        delta_signature: [0u8; 32],
     }
 }
 

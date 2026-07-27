@@ -80,6 +80,7 @@ impl MockOrigin {
             server_wire_version: WIRE_FORMAT_VERSION,
             producer_id: 1,
             accepted_epoch: 1,
+            delta_signing_key: [0u8; 32],
         };
         send_frame(&mut ws, SyncMessageType::HandshakeAck, &ack).await;
 

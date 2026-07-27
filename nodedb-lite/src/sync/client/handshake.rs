@@ -111,6 +111,8 @@ mod tests {
             server_wire_version: 1,
             producer_id: 0,
             accepted_epoch: 0,
+            // All zeros = signing unavailable for this session.
+            delta_signing_key: [0u8; 32],
         };
 
         assert!(client.handle_handshake_ack(&ack).await);
@@ -129,6 +131,8 @@ mod tests {
             server_wire_version: 1,
             producer_id: 0,
             accepted_epoch: 0,
+            // All zeros = signing unavailable for this session.
+            delta_signing_key: [0u8; 32],
         };
 
         assert!(!client.handle_handshake_ack(&ack).await);

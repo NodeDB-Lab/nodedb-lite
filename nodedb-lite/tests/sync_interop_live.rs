@@ -88,6 +88,8 @@ async fn live_delta_push() {
         producer_id: 0,
         epoch: 0,
         seq: 0,
+        device_id: 0,
+        delta_signature: [0u8; 32],
     };
     ws.send(Message::Binary(
         SyncFrame::try_encode(SyncMessageType::DeltaPush, &delta)
@@ -282,6 +284,8 @@ async fn live_real_loro_delta_push() {
         producer_id: 0,
         epoch: 0,
         seq: 0,
+        device_id: 0,
+        delta_signature: [0u8; 32],
     };
     ws.send(Message::Binary(
         SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)
@@ -349,6 +353,8 @@ async fn live_concurrent_delta_push() {
             producer_id: 0,
             epoch: 0,
             seq: 0,
+            device_id: 0,
+            delta_signature: [0u8; 32],
         };
         ws.send(Message::Binary(
             SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)
@@ -409,6 +415,8 @@ async fn live_shape_snapshot_with_wal_lsn() {
             producer_id: 0,
             epoch: 0,
             seq: 0,
+            device_id: 0,
+            delta_signature: [0u8; 32],
         };
         ws.send(Message::Binary(
             SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)

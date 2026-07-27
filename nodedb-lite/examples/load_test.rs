@@ -178,6 +178,8 @@ async fn run_client(
             producer_id: 0,
             epoch: 0,
             seq: 0,
+            device_id: 0,
+            delta_signature: [0u8; 32],
         };
         if ws
             .send(Message::Binary(

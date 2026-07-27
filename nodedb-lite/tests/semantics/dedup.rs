@@ -103,6 +103,8 @@ async fn fenced_resend_same_seq_is_deduped_by_gate() {
         producer_id: ack.producer_id,
         epoch: ack.accepted_epoch,
         seq: 1,
+        device_id: 0,
+        delta_signature: [0u8; 32],
     };
 
     // First send at seq=1: applied.

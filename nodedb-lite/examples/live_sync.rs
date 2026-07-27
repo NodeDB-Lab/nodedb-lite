@@ -154,6 +154,8 @@ async fn test_delta_push() -> Result<(), String> {
         producer_id: 0,
         epoch: 0,
         seq: 0,
+        device_id: 0,
+        delta_signature: [0u8; 32],
     };
     ws.send(Message::Binary(
         SyncFrame::try_encode(SyncMessageType::DeltaPush, &delta)
@@ -336,6 +338,8 @@ async fn test_real_loro_delta() -> Result<(), String> {
         producer_id: 0,
         epoch: 0,
         seq: 0,
+        device_id: 0,
+        delta_signature: [0u8; 32],
     };
     ws.send(Message::Binary(
         SyncFrame::try_encode(SyncMessageType::DeltaPush, &delta_msg)
@@ -404,6 +408,8 @@ async fn test_concurrent_deltas() -> Result<(), String> {
             producer_id: 0,
             epoch: 0,
             seq: 0,
+            device_id: 0,
+            delta_signature: [0u8; 32],
         };
         ws.send(Message::Binary(
             SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)
@@ -458,6 +464,8 @@ async fn test_rls_violation() -> Result<(), String> {
         producer_id: 0,
         epoch: 0,
         seq: 0,
+        device_id: 0,
+        delta_signature: [0u8; 32],
     };
     ws.send(Message::Binary(
         SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)
@@ -511,6 +519,8 @@ async fn test_shape_snapshot_lsn() -> Result<(), String> {
             producer_id: 0,
             epoch: 0,
             seq: 0,
+            device_id: 0,
+            delta_signature: [0u8; 32],
         };
         ws.send(Message::Binary(
             SyncFrame::try_encode(SyncMessageType::DeltaPush, &msg)
