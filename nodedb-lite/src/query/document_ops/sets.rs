@@ -547,7 +547,7 @@ pub(in crate::query) fn build_insert_map(
                     detail: format!("merge insert decode column '{col}': {e}"),
                 })?
             }
-            UpdateValue::Expr(expr) => expr.eval(&source_ndb),
+            UpdateValue::Expr(expr) => expr.eval(&source_ndb)?,
         };
         map.insert(col.clone(), resolved);
     }

@@ -41,7 +41,7 @@ pub fn execute_inline_hash_join(
     );
 
     let pf = decode_filters(post_filters)?;
-    let joined = apply_filters(joined, &pf);
+    let joined = apply_filters(joined, &pf)?;
     let joined = apply_projection(joined, projection);
     Ok(maps_to_result(joined))
 }

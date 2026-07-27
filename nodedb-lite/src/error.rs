@@ -65,6 +65,16 @@ pub(crate) fn is_corruption(e: &LiteError) -> bool {
     matches!(e, LiteError::Corrupted { .. })
 }
 
+/// Expression evaluation failure — currently only division/modulo by a zero
+/// divisor, which SQL requires to fail the statement (SQLSTATE `22012`) rather
+/// than fold the row to `NULL`. Mapped to [`LiteError::Query`] so it surfaces
+/// to the caller instead of silently filtering rows out.
+impl From<nodedb_query::EvalError> for LiteError {
+    fn from(e: nodedb_query::EvalError) -> Self {
+        Self::Query(e.to_string())
+    }
+}
+
 impl From<nodedb_types::columnar::SchemaError> for LiteError {
     fn from(e: nodedb_types::columnar::SchemaError) -> Self {
         Self::BadRequest {

@@ -46,10 +46,17 @@ impl LiteFilter {
 
     /// Evaluate the expression predicates against a typed `Value` row document.
     ///
-    /// Returns `true` when all expression predicates are satisfied. Always
-    /// `true` when `exprs` is empty.
-    pub fn eval_exprs(&self, doc: &Value) -> bool {
-        self.exprs.iter().all(|e| is_truthy(&e.eval(doc)))
+    /// Returns `Ok(true)` when all expression predicates are satisfied; always
+    /// `Ok(true)` when `exprs` is empty. Short-circuits on the first `false`
+    /// and on the first evaluation error, so a divide-by-zero in a predicate
+    /// fails the statement instead of silently dropping the row.
+    pub fn eval_exprs(&self, doc: &Value) -> Result<bool, LiteError> {
+        for e in &self.exprs {
+            if !is_truthy(&e.eval(doc)?) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -465,7 +472,7 @@ mod tests {
             }
             Value::Object(map)
         };
-        lf.eval_exprs(&typed)
+        lf.eval_exprs(&typed).expect("filter evaluation failed")
     }
 
     #[test]
@@ -571,7 +578,7 @@ mod tests {
             m.insert("age".to_string(), Value::Integer(30));
             m
         });
-        assert!(lf.eval_exprs(&doc_pass));
+        assert!(lf.eval_exprs(&doc_pass).expect("filter evaluation failed"));
 
         // age=29 → 29+1=30 > 30 → false
         let doc_fail = Value::Object({
@@ -579,7 +586,7 @@ mod tests {
             m.insert("age".to_string(), Value::Integer(29));
             m
         });
-        assert!(!lf.eval_exprs(&doc_fail));
+        assert!(!lf.eval_exprs(&doc_fail).expect("filter evaluation failed"));
     }
 
     #[test]

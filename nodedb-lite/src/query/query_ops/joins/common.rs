@@ -57,16 +57,18 @@ pub fn decode_filters(bytes: &[u8]) -> Result<Vec<ScanFilter>, LiteError> {
 pub fn apply_filters(
     rows: Vec<HashMap<String, Value>>,
     filters: &[ScanFilter],
-) -> Vec<HashMap<String, Value>> {
+) -> Result<Vec<HashMap<String, Value>>, LiteError> {
     if filters.is_empty() {
-        return rows;
+        return Ok(rows);
     }
-    rows.into_iter()
-        .filter(|row| {
-            let doc = Value::Object(row.clone());
-            filters.iter().all(|f| f.matches_value(&doc))
-        })
-        .collect()
+    let mut kept = Vec::with_capacity(rows.len());
+    for row in rows {
+        let doc = Value::Object(row.clone());
+        if ScanFilter::all_match_value(filters, &doc)? {
+            kept.push(row);
+        }
+    }
+    Ok(kept)
 }
 
 // ─── Join key extraction ──────────────────────────────────────────────────────

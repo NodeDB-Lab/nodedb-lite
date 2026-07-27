@@ -36,7 +36,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 let doc = crate::nodedb::convert::loro_value_to_document(id, &loro_val);
                 let json = serde_json::to_value(&doc.fields).unwrap_or_default();
                 let msgpack = nodedb_types::json_msgpack::json_to_msgpack_or_empty(&json);
-                if filters.is_empty() || filters.iter().all(|f| f.matches_binary(&msgpack)) {
+                if filters.is_empty()
+                    || nodedb_query::ScanFilter::all_match_binary(filters, &msgpack)
+                        .map_err(|_| NodeDbError::division_by_zero())?
+                {
                     matching_ids.push(id.clone());
                 }
             }
@@ -87,7 +90,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 let doc = crate::nodedb::convert::loro_value_to_document(id, &loro_val);
                 let json = serde_json::to_value(&doc.fields).unwrap_or_default();
                 let msgpack = nodedb_types::json_msgpack::json_to_msgpack_or_empty(&json);
-                if filters.is_empty() || filters.iter().all(|f| f.matches_binary(&msgpack)) {
+                if filters.is_empty()
+                    || nodedb_query::ScanFilter::all_match_binary(filters, &msgpack)
+                        .map_err(|_| NodeDbError::division_by_zero())?
+                {
                     matching_ids.push(id.clone());
                 }
             }

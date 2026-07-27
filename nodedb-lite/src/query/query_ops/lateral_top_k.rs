@@ -67,7 +67,7 @@ pub(crate) async fn execute_lateral_top_k_sql<S: StorageEngine>(
             });
         }
         let inner_rows = scan_collection(engine, inner_collection).await?;
-        let mut matched = apply_filters(inner_rows, &corr_filters);
+        let mut matched = apply_filters(inner_rows, &corr_filters)?;
         sort_rows(&mut matched, inner_order_by);
         matched.truncate(effective_limit);
         if matched.is_empty() && left_join {
@@ -132,7 +132,7 @@ pub async fn execute_lateral_top_k<S: StorageEngine>(
 
         // Scan inner collection and apply all filters.
         let inner_all = scan_collection(engine, inner_collection).await?;
-        let mut inner_rows = apply_filters(inner_all, &filters);
+        let mut inner_rows = apply_filters(inner_all, &filters)?;
 
         // Sort inner rows.
         if !inner_order_by.is_empty() {
@@ -266,7 +266,8 @@ mod tests {
                 value: dept_val,
                 ..Default::default()
             }];
-            let mut inner_rows = apply_filters(employees.clone(), &filters);
+            let mut inner_rows =
+                apply_filters(employees.clone(), &filters).expect("filter evaluation failed");
             sort_rows(&mut inner_rows, &[("salary".to_string(), false)]);
             inner_rows.truncate(inner_limit);
             for inner_row in inner_rows {

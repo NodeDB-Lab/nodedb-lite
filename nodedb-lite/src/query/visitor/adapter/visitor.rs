@@ -19,8 +19,8 @@ use nodedb_sql::{
     AggregateVisitArgs, CreateArrayVisitArgs, DocumentIndexLookupVisitArgs,
     HybridSearchTripleVisitArgs, HybridSearchVisitArgs, InsertVisitArgs, JoinVisitArgs,
     LateralLoopVisitArgs, LateralTopKVisitArgs, MergeVisitArgs, RecursiveScanVisitArgs,
-    RecursiveValueVisitArgs, ScanVisitArgs, SpatialScanVisitArgs, TimeseriesScanVisitArgs,
-    UpdateFromVisitArgs, UpsertVisitArgs, VectorSearchVisitArgs,
+    RecursiveValueVisitArgs, ScanVisitArgs, SpatialScanVisitArgs, SubqueryVisitArgs,
+    TimeseriesScanVisitArgs, UpdateFromVisitArgs, UpsertVisitArgs, VectorSearchVisitArgs,
 };
 use nodedb_types::result::QueryResult;
 
@@ -36,6 +36,7 @@ use crate::query::visitor::kv::lower_kv_insert;
 use crate::query::visitor::lateral::{lower_lateral_loop, lower_lateral_top_k};
 use crate::query::visitor::queries::{
     lower_aggregate, lower_cte, lower_document_index_lookup, lower_join, lower_range_scan,
+    lower_subquery,
 };
 use crate::query::visitor::recursive::{lower_recursive_scan, lower_recursive_value};
 use crate::query::visitor::search::{
@@ -396,6 +397,10 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         outer: &nodedb_sql::types::SqlPlan,
     ) -> Result<LiteFut<'a>, LiteError> {
         lower_cte(self.engine, definitions, outer)
+    }
+
+    fn subquery(&mut self, args: SubqueryVisitArgs<'_>) -> Result<LiteFut<'a>, LiteError> {
+        lower_subquery(self.engine, args)
     }
 
     fn merge(&mut self, args: MergeVisitArgs<'_>) -> Result<LiteFut<'a>, LiteError> {

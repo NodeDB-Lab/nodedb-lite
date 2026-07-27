@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! SQL-visitor lowering for query-shaped SqlPlan variants:
-//! Aggregate, Join, DocumentIndexLookup, RangeScan, Cte.
+//! Aggregate, Join, DocumentIndexLookup, RangeScan, Cte, Subquery.
 
 use std::collections::HashMap;
 
@@ -8,6 +8,7 @@ use nodedb_physical::PhysicalTaskVisitor;
 use nodedb_physical::physical_plan::document::DocumentOp;
 use nodedb_physical::physical_plan::query::{AggregateSpec, JoinProjection};
 use nodedb_query::expr::GroupKeySpec;
+use nodedb_sql::SubqueryVisitArgs;
 use nodedb_sql::temporal::TemporalScope;
 use nodedb_sql::types::SqlPlan;
 use nodedb_sql::types::filter::Filter;
@@ -28,7 +29,9 @@ use crate::storage::engine::StorageEngine;
 
 use super::adapter::LiteFut;
 use super::having_eval::{apply_having_result, make_agg_alias_map};
-use super::scan_post::apply_scan_post_processing;
+use super::scan_post::{
+    apply_scan_post_processing, distinct_rows, filter_rows, project_rows, sort_rows,
+};
 
 /// Convert a `nodedb_sql` `AggregateExpr` to a physical `AggregateSpec`.
 pub(super) fn sql_agg_to_spec(agg: &AggregateExpr) -> AggregateSpec {
@@ -368,4 +371,85 @@ pub(super) fn lower_cte<'a, S: StorageEngine + 'a>(
         }
         engine.execute_plan(&outer).await
     }))
+}
+
+// ── Subquery ─────────────────────────────────────────────────────────────────
+
+/// Relational post-processing over a subquery / derived-table body, for Lite
+/// single-node.
+///
+/// The body is materialized by executing `input`, then the outer constraints
+/// the body's leaf could not absorb are applied in the same order the
+/// distributed engine's `ProviderScan` tail uses — filter → offset → sort →
+/// distinct → project → limit — so both engines answer an `ORDER BY` /
+/// `OFFSET` / `DISTINCT` over a subquery identically. Lite has no shards, so
+/// there is no gather step: the body already produces the full row stream.
+pub(super) fn lower_subquery<'a, S: StorageEngine + 'a>(
+    engine: &'a LiteQueryEngine<S>,
+    args: SubqueryVisitArgs<'_>,
+) -> Result<LiteFut<'a>, LiteError> {
+    let SubqueryVisitArgs {
+        input,
+        filters,
+        projection,
+        sort_keys,
+        offset,
+        distinct,
+        limit,
+    } = args;
+    let input = input.clone();
+    let filters = filters.to_vec();
+    let projection = subquery_projection_columns(projection)?;
+    let sort_keys = sort_keys.to_vec();
+
+    Ok(Box::pin(async move {
+        let mut result = engine.execute_plan(&input).await?;
+
+        filter_rows(&mut result, &filters)?;
+
+        if offset > 0 {
+            result.rows = result.rows.into_iter().skip(offset).collect();
+        }
+
+        sort_rows(&mut result, &sort_keys)?;
+
+        if distinct {
+            distinct_rows(&mut result, &projection);
+        }
+
+        project_rows(&mut result, &projection);
+
+        if let Some(n) = limit {
+            result.rows.truncate(n);
+        }
+
+        Ok(result)
+    }))
+}
+
+/// Lower an outer target list to bare column names. `Star` (and a qualified
+/// star) means "inherit the body's columns" and yields an empty list.
+///
+/// A computed projection is rejected rather than silently dropped: the tail
+/// reshapes materialized rows and has no expression evaluator, so the
+/// expression must be projected inside the subquery instead.
+fn subquery_projection_columns(projection: &[Projection]) -> Result<Vec<String>, LiteError> {
+    let mut names = Vec::with_capacity(projection.len());
+    for p in projection {
+        match p {
+            Projection::Column(qname) => {
+                names.push(qname.rsplit('.').next().unwrap_or(qname).to_string());
+            }
+            Projection::Star | Projection::QualifiedStar(_) => return Ok(Vec::new()),
+            Projection::Computed { .. } => {
+                return Err(LiteError::BadRequest {
+                    detail: "a computed projection over an ORDER BY / OFFSET / DISTINCT subquery \
+                             is not supported; select the base columns in the subquery and \
+                             compute them in an outer SELECT"
+                        .into(),
+                });
+            }
+        }
+    }
+    Ok(names)
 }

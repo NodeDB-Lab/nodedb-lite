@@ -72,7 +72,7 @@ pub(crate) async fn execute_lateral_loop_sql<S: StorageEngine>(
                 ..Default::default()
             });
         }
-        let inner_rows = apply_filters(inner_all, &corr_filters);
+        let inner_rows = apply_filters(inner_all, &corr_filters)?;
 
         if inner_rows.is_empty() {
             if left_join {
@@ -142,7 +142,7 @@ pub async fn execute_lateral_loop<S: StorageEngine>(
         }
 
         let inner_all = scan_collection(engine, inner_collection).await?;
-        let inner_rows = apply_filters(inner_all, &filters);
+        let inner_rows = apply_filters(inner_all, &filters)?;
 
         if inner_rows.is_empty() {
             if left_join {
@@ -205,7 +205,8 @@ mod tests {
                 value: cust_val,
                 ..Default::default()
             }];
-            let inner_rows = apply_filters(orders.clone(), &filters);
+            let inner_rows =
+                apply_filters(orders.clone(), &filters).expect("filter evaluation failed");
             for inner_row in inner_rows {
                 let mut merged = outer_row.clone();
                 merged.extend(inner_row);

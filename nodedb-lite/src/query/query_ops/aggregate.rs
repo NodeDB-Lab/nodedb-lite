@@ -35,19 +35,13 @@ pub fn execute_aggregate(
     let scan_filters = decode_filters(filters)?;
     let having_filters = decode_filters(having)?;
 
-    let filtered: Vec<HashMap<String, Value>> = rows
-        .into_iter()
-        .filter(|row| {
-            let doc = Value::Object(row.clone());
-            scan_filters.iter().all(|f| f.matches_value(&doc))
-        })
-        .collect();
+    let filtered = retain_matching(rows, &scan_filters)?;
 
     if grouping_sets.is_empty() {
         // Plain GROUP BY — single grouping set containing all group_by columns.
-        let grouped = group_rows(&filtered, group_by);
+        let grouped = group_rows(&filtered, group_by)?;
         let mut result_rows = compute_aggregate_groups(grouped, group_by, aggregates)?;
-        apply_having(&mut result_rows, &having_filters, group_by, aggregates);
+        apply_having(&mut result_rows, &having_filters, group_by, aggregates)?;
         apply_sort(&mut result_rows, sort_keys, group_by, aggregates);
         let columns = make_columns(group_by, aggregates);
         Ok(QueryResult {
@@ -63,7 +57,7 @@ pub fn execute_aggregate(
                 .iter()
                 .filter_map(|&i| group_by.get(i as usize).cloned())
                 .collect();
-            let grouped = group_rows(&filtered, &subset);
+            let grouped = group_rows(&filtered, &subset)?;
             let mut set_rows = compute_aggregate_groups(grouped, &subset, aggregates)?;
             // Null-fill absent group columns.
             let full_col_count = group_by.len();
@@ -72,7 +66,7 @@ pub fn execute_aggregate(
                     row.insert(set_indices.len(), Value::Null);
                 }
             }
-            apply_having(&mut set_rows, &having_filters, &subset, aggregates);
+            apply_having(&mut set_rows, &having_filters, &subset, aggregates)?;
             all_rows.extend(set_rows);
         }
         apply_sort(&mut all_rows, sort_keys, group_by, aggregates);
@@ -105,15 +99,9 @@ pub fn execute_partial_aggregate(
     let group_by: Vec<GroupKeySpec> = group_by.iter().map(GroupKeySpec::column).collect();
     let group_by = group_by.as_slice();
     let scan_filters = decode_filters(filters)?;
-    let filtered: Vec<HashMap<String, Value>> = rows
-        .into_iter()
-        .filter(|row| {
-            let doc = Value::Object(row.clone());
-            scan_filters.iter().all(|f| f.matches_value(&doc))
-        })
-        .collect();
+    let filtered = retain_matching(rows, &scan_filters)?;
 
-    let grouped = group_rows(&filtered, group_by);
+    let grouped = group_rows(&filtered, group_by)?;
     let result_rows = compute_aggregate_groups(grouped, group_by, aggregates)?;
 
     let mut columns = vec!["__partial".to_string()];
@@ -150,13 +138,16 @@ fn decode_filters(bytes: &[u8]) -> Result<Vec<ScanFilter>, LiteError> {
 /// `Value` does not implement `Hash`/`Eq`, so we use a string serialisation of
 /// the key for the `HashMap` discriminant and carry the original `Vec<Value>`
 /// alongside for output.
-pub(crate) fn group_rows(rows: &[HashMap<String, Value>], group_by: &[GroupKeySpec]) -> GroupMap {
+pub(crate) fn group_rows(
+    rows: &[HashMap<String, Value>],
+    group_by: &[GroupKeySpec],
+) -> Result<GroupMap, LiteError> {
     let mut groups: GroupMap = HashMap::new();
     for row in rows {
         let key: Vec<Value> = group_by
             .iter()
             .map(|spec| group_key_value(row, spec))
-            .collect();
+            .collect::<Result<Vec<_>, LiteError>>()?;
         let key_str = value_key_str(&key);
         groups
             .entry(key_str)
@@ -164,7 +155,27 @@ pub(crate) fn group_rows(rows: &[HashMap<String, Value>], group_by: &[GroupKeySp
             .1
             .push(row.clone());
     }
-    groups
+    Ok(groups)
+}
+
+/// Keep only the rows matching every filter. Evaluation is fallible (a
+/// divide-by-zero predicate fails the statement rather than dropping the row),
+/// so this replaces the `filter(..).collect()` form it grew out of.
+fn retain_matching(
+    rows: Vec<HashMap<String, Value>>,
+    filters: &[ScanFilter],
+) -> Result<Vec<HashMap<String, Value>>, LiteError> {
+    if filters.is_empty() {
+        return Ok(rows);
+    }
+    let mut kept = Vec::with_capacity(rows.len());
+    for row in rows {
+        let doc = Value::Object(row.clone());
+        if ScanFilter::all_match_value(filters, &doc)? {
+            kept.push(row);
+        }
+    }
+    Ok(kept)
 }
 
 /// Resolve one group key for a row.
@@ -172,11 +183,11 @@ pub(crate) fn group_rows(rows: &[HashMap<String, Value>], group_by: &[GroupKeySp
 /// A spec carrying an expression (e.g. `GROUP BY date_trunc('day', ts)`) is
 /// evaluated against the row; otherwise the named field is extracted directly.
 /// A spec with neither groups everything under `Null`.
-fn group_key_value(row: &HashMap<String, Value>, spec: &GroupKeySpec) -> Value {
+fn group_key_value(row: &HashMap<String, Value>, spec: &GroupKeySpec) -> Result<Value, LiteError> {
     match (&spec.expr, &spec.field) {
-        (Some(expr), _) => expr.eval(&Value::Object(row.clone())),
-        (None, Some(field)) => row.get(field).cloned().unwrap_or(Value::Null),
-        (None, None) => Value::Null,
+        (Some(expr), _) => Ok(expr.eval(&Value::Object(row.clone()))?),
+        (None, Some(field)) => Ok(row.get(field).cloned().unwrap_or(Value::Null)),
+        (None, None) => Ok(Value::Null),
     }
 }
 
@@ -329,19 +340,25 @@ fn apply_having(
     having: &[ScanFilter],
     group_by: &[GroupKeySpec],
     aggregates: &[AggregateSpec],
-) {
+) -> Result<(), LiteError> {
     if having.is_empty() {
-        return;
+        return Ok(());
     }
     let columns = make_columns(group_by, aggregates);
-    rows.retain(|row| {
+    // HAVING evaluation is fallible, so the keep-decision is computed before
+    // the retain rather than inside a closure that cannot propagate.
+    let mut keep = Vec::with_capacity(rows.len());
+    for row in rows.iter() {
         let mut map = HashMap::new();
         for (col, val) in columns.iter().zip(row.iter()) {
             map.insert(col.clone(), val.clone());
         }
         let doc = Value::Object(map);
-        having.iter().all(|f| f.matches_value(&doc))
-    });
+        keep.push(ScanFilter::all_match_value(having, &doc)?);
+    }
+    let mut iter = keep.into_iter();
+    rows.retain(|_| iter.next().unwrap_or(true));
+    Ok(())
 }
 
 fn apply_sort(

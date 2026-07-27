@@ -73,7 +73,7 @@ pub async fn execute_hash_join<S: StorageEngine>(
     };
 
     let pf = decode_filters(post_filters)?;
-    let joined = apply_filters(joined, &pf);
+    let joined = apply_filters(joined, &pf)?;
 
     let joined = apply_projection(joined, projection);
 

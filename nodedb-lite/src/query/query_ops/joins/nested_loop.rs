@@ -43,7 +43,7 @@ pub async fn execute_nested_loop_join<S: StorageEngine>(
         for right_row in &right_rows {
             let merged = merge_rows(left_row, right_row, None);
             let doc = Value::Object(merged.clone());
-            let passes = filters.iter().all(|f| f.matches_value(&doc));
+            let passes = ScanFilter::all_match_value(&filters, &doc)?;
             if passes {
                 matched = true;
                 if join_type != "semi" && join_type != "anti" {
@@ -86,7 +86,7 @@ pub async fn execute_nested_loop_join<S: StorageEngine>(
             for left_row in &left_rows {
                 let merged = merge_rows(left_row, right_row, None);
                 let doc = Value::Object(merged);
-                if filters.iter().all(|f| f.matches_value(&doc)) {
+                if ScanFilter::all_match_value(&filters, &doc)? {
                     any_match = true;
                     break;
                 }
@@ -136,6 +136,10 @@ mod tests {
         };
 
         let doc = Value::Object(merged);
-        assert!(filter.matches_value(&doc));
+        assert!(
+            filter
+                .matches_value(&doc)
+                .expect("filter evaluation failed")
+        );
     }
 }

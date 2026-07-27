@@ -67,7 +67,7 @@ pub async fn execute_recursive_value(
 
     // Evaluate anchor row against an empty document.
     let empty_doc = Value::Object(HashMap::new());
-    let anchor_row = eval_exprs(&init_parsed, &empty_doc, columns);
+    let anchor_row = eval_exprs(&init_parsed, &empty_doc, columns)?;
     maybe_push(&mut accumulator, &mut seen, anchor_row.clone(), distinct);
 
     let mut current_row = anchor_row;
@@ -83,7 +83,7 @@ pub async fn execute_recursive_value(
 
         // Evaluate condition; stop when false (or absent after first anchor).
         if let Some(cond) = &cond_parsed {
-            let result = cond.eval(&doc);
+            let result = cond.eval(&doc)?;
             if !is_truthy(&result) {
                 break;
             }
@@ -95,7 +95,7 @@ pub async fn execute_recursive_value(
             }
         }
 
-        let next_row = eval_exprs(&step_parsed, &doc, columns);
+        let next_row = eval_exprs(&step_parsed, &doc, columns)?;
         // When distinct, a duplicate step row means fixed point — stop.
         if distinct {
             let key = row_dedup_key(&next_row);
@@ -127,11 +127,11 @@ fn eval_exprs(
     exprs: &[nodedb_query::expr::types::SqlExpr],
     doc: &Value,
     columns: &[String],
-) -> HashMap<String, Value> {
+) -> Result<HashMap<String, Value>, LiteError> {
     columns
         .iter()
         .zip(exprs.iter())
-        .map(|(col, expr)| (col.clone(), expr.eval(doc)))
+        .map(|(col, expr)| Ok((col.clone(), expr.eval(doc)?)))
         .collect()
 }
 

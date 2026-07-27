@@ -117,7 +117,7 @@ pub fn insert<S: StorageEngine>(
                                 &incoming_obj,
                                 on_conflict_updates,
                                 &col_names,
-                            )
+                            )?
                         } else {
                             row_values.clone()
                         }
@@ -205,7 +205,7 @@ pub fn update<S: StorageEngine>(
 
     for row in all_rows {
         let doc = row_to_object(&col_names, &row);
-        let matches = filters.iter().all(|f| f.matches_value(&doc));
+        let matches = ScanFilter::all_match_value(&filters, &doc)?;
         if !matches {
             continue;
         }
@@ -280,7 +280,7 @@ pub fn delete<S: StorageEngine>(
     let mut pks_to_delete: Vec<Value> = Vec::new();
     for row in all_rows {
         let doc = row_to_object(&col_names, &row);
-        let matches = filters.is_empty() || filters.iter().all(|f| f.matches_value(&doc));
+        let matches = filters.is_empty() || ScanFilter::all_match_value(&filters, &doc)?;
         if matches {
             pks_to_delete.push(row.get(pk_idx).cloned().unwrap_or(Value::Null));
         }
@@ -586,7 +586,7 @@ fn apply_conflict_updates(
     incoming: &Value,
     updates: &[(String, UpdateValue)],
     col_names: &[String],
-) -> Vec<Value> {
+) -> Result<Vec<Value>, LiteError> {
     for (field, update_val) in updates {
         let new_val = match update_val {
             UpdateValue::Literal(bytes) => {
@@ -598,7 +598,7 @@ fn apply_conflict_updates(
                 // use the incoming value for the target field as a safe fallback
                 // when the expr cannot be fully resolved.
                 let doc = incoming.clone();
-                let evaled = expr.eval(&doc);
+                let evaled = expr.eval(&doc)?;
                 if matches!(evaled, Value::Null) {
                     incoming.get(field).cloned().unwrap_or(Value::Null)
                 } else {
@@ -612,7 +612,7 @@ fn apply_conflict_updates(
             existing[col_idx] = new_val;
         }
     }
-    existing
+    Ok(existing)
 }
 
 #[cfg(test)]

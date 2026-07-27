@@ -41,7 +41,7 @@ pub async fn execute_recursive_scan<S: StorageEngine>(
     let full_collection = scan_collection(engine, collection).await?;
 
     // Anchor: base case rows.
-    let anchor = apply_filters(full_collection.clone(), &base_parsed);
+    let anchor = apply_filters(full_collection.clone(), &base_parsed)?;
 
     let effective_limit = if limit == 0 { usize::MAX } else { limit };
     let max_iter = if max_iterations == 0 {
@@ -91,7 +91,7 @@ pub async fn execute_recursive_scan<S: StorageEngine>(
         }
 
         // Filter the full collection with recursive_filters.
-        let candidates = apply_filters(full_collection.clone(), &rec_parsed);
+        let candidates = apply_filters(full_collection.clone(), &rec_parsed)?;
 
         // Join candidates against working_set via join_link.
         let next_rows = match join_link {

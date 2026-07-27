@@ -58,6 +58,19 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
         // rejections in `reject_delta_with_policy`, not to validate writes
         // itself. Building constraint enforcement locally is a real feature,
         // not a compile fix, so these are unsupported until that lands.
+        // `ApplyAuthenticated` carries catalog-owned signing enforcement
+        // (`delta_signature`, `signing_required`, and the authenticated
+        // identity triple). Lite has no signature-verification wiring, and the
+        // variant exists precisely so a transport cannot omit those fields —
+        // so handling it as a plain `Apply` would silently skip the signing
+        // admission it was created to enforce. Rejected until Lite verifies
+        // signatures itself; that is a real feature, not a compile fix.
+        CrdtOp::ApplyAuthenticated { .. } => Err(LiteError::Unsupported {
+            detail: "ApplyAuthenticated carries signing enforcement that Lite cannot verify \
+                     locally; applying it unverified would bypass the signing admission"
+                .into(),
+        }),
+
         CrdtOp::SetConstraints { .. } => Err(LiteError::Unsupported {
             detail: "SetConstraints requires the CRDT validator constraint subsystem, \
                      which Lite does not implement locally"

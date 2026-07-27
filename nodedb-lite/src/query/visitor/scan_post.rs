@@ -37,45 +37,15 @@ pub(crate) fn apply_scan_post_processing(
     distinct: bool,
 ) -> Result<QueryResult, LiteError> {
     // 1. WHERE — apply both primitive MetadataFilter and complex QExpr predicates.
-    if !filters.is_empty() {
-        let lf: LiteFilter = sql_filters_to_metadata(filters, &[])?;
-        if !lf.is_empty() {
-            result.rows.retain(|row| {
-                let json_doc = row_to_json(&result.columns, row);
-                let meta_pass = lf
-                    .meta
-                    .as_ref()
-                    .map(|f| matches_metadata_filter(&json_doc, f))
-                    .unwrap_or(true);
-                if !meta_pass {
-                    return false;
-                }
-                if !lf.exprs.is_empty() {
-                    let typed_doc = row_to_typed_value(&result.columns, row);
-                    lf.eval_exprs(&typed_doc)
-                } else {
-                    true
-                }
-            });
-        }
-    }
+    filter_rows(&mut result, filters)?;
 
-    // 2. DISTINCT
+    // 2. DISTINCT — over the full row; a scan has no separate target list here.
     if distinct {
-        let mut seen: HashSet<String> = HashSet::new();
-        result.rows.retain(|row| {
-            let key = serde_json::to_string(&row_to_json(&result.columns, row)).unwrap_or_default();
-            seen.insert(key)
-        });
+        distinct_rows(&mut result, &[]);
     }
 
     // 3. ORDER BY
-    if !sort_keys.is_empty() {
-        let resolved = resolve_sort_keys(sort_keys, &result.columns)?;
-        result
-            .rows
-            .sort_by(|a, b| compare_rows(a, b, &result.columns, &resolved));
-    }
+    sort_rows(&mut result, sort_keys)?;
 
     // 4. Window functions
     if !window_specs.is_empty() {
@@ -108,6 +78,119 @@ pub(crate) fn apply_scan_post_processing(
     }
 
     Ok(result)
+}
+
+/// Retain only the rows satisfying `filters`, applying both the primitive
+/// `MetadataFilter` form and the complex `QExpr` predicates. A no-op when
+/// `filters` is empty or lowers to nothing.
+pub(crate) fn filter_rows(result: &mut QueryResult, filters: &[Filter]) -> Result<(), LiteError> {
+    if filters.is_empty() {
+        return Ok(());
+    }
+    let lf: LiteFilter = sql_filters_to_metadata(filters, &[])?;
+    if lf.is_empty() {
+        return Ok(());
+    }
+    // Evaluation is fallible (a divide-by-zero predicate must fail the
+    // statement, not drop the row), so the keep-decision is computed up front
+    // rather than inside a `retain` closure that cannot propagate.
+    let columns = result.columns.clone();
+    let mut keep = Vec::with_capacity(result.rows.len());
+    for row in &result.rows {
+        let json_doc = row_to_json(&columns, row);
+        let meta_pass = lf
+            .meta
+            .as_ref()
+            .map(|f| matches_metadata_filter(&json_doc, f))
+            .unwrap_or(true);
+        if !meta_pass {
+            keep.push(false);
+            continue;
+        }
+        if lf.exprs.is_empty() {
+            keep.push(true);
+        } else {
+            let typed_doc = row_to_typed_value(&columns, row);
+            keep.push(lf.eval_exprs(&typed_doc)?);
+        }
+    }
+    let mut iter = keep.into_iter();
+    result.rows.retain(|_| iter.next().unwrap_or(true));
+    Ok(())
+}
+
+/// Deduplicate rows on the *would-be projected* shape, so SQL `DISTINCT`
+/// semantics hold: two rows agreeing on every projected column are equal even
+/// when their non-projected columns differ. An empty `projection` dedupes on
+/// the whole row.
+pub(crate) fn distinct_rows(result: &mut QueryResult, projection: &[String]) {
+    let columns = result.columns.clone();
+    let mut seen: HashSet<String> = HashSet::new();
+    result.rows.retain(|row| {
+        let doc = if projection.is_empty() {
+            row_to_json(&columns, row)
+        } else {
+            project_row(&columns, row, projection)
+        };
+        seen.insert(serde_json::to_string(&doc).unwrap_or_default())
+    });
+}
+
+/// Sort rows by `sort_keys` in place. A no-op when `sort_keys` is empty.
+pub(crate) fn sort_rows(result: &mut QueryResult, sort_keys: &[SortKey]) -> Result<(), LiteError> {
+    if sort_keys.is_empty() {
+        return Ok(());
+    }
+    let resolved = resolve_sort_keys(sort_keys, &result.columns)?;
+    // Decorate-sort-undecorate: an expression sort key is fallible, and a
+    // comparator cannot propagate, so every key is materialized once before
+    // the sort — which also avoids re-evaluating it on each comparison.
+    let mut decorated: Vec<(Vec<Value>, Vec<Value>)> = Vec::with_capacity(result.rows.len());
+    for row in std::mem::take(&mut result.rows) {
+        let keys = resolved
+            .iter()
+            .map(|sk| extract_key_value(&row, &result.columns, &sk.key))
+            .collect::<Result<Vec<_>, LiteError>>()?;
+        decorated.push((keys, row));
+    }
+    decorated.sort_by(|a, b| compare_keys(&a.0, &b.0, &resolved));
+    result.rows = decorated.into_iter().map(|(_, row)| row).collect();
+    Ok(())
+}
+
+/// Reshape every row down to `projection`, in the order named. Columns absent
+/// from a row become `Value::Null` (the row shape stays rectangular). An empty
+/// `projection` means `SELECT *` and leaves the result untouched.
+pub(crate) fn project_rows(result: &mut QueryResult, projection: &[String]) {
+    if projection.is_empty() {
+        return;
+    }
+    let indices: Vec<Option<usize>> = projection
+        .iter()
+        .map(|name| result.columns.iter().position(|c| c == name))
+        .collect();
+    for row in &mut result.rows {
+        *row = indices
+            .iter()
+            .map(|idx| idx.and_then(|i| row.get(i).cloned()).unwrap_or(Value::Null))
+            .collect();
+    }
+    result.columns = projection.to_vec();
+}
+
+/// A row reduced to the named columns, as JSON — the DISTINCT key for a
+/// projected target list.
+fn project_row(columns: &[String], row: &[Value], projection: &[String]) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for name in projection {
+        let value = columns
+            .iter()
+            .position(|c| c == name)
+            .and_then(|i| row.get(i))
+            .map_or(serde_json::Value::Null, value_to_json);
+        map.insert(name.clone(), value);
+    }
+    serde_json::Value::Object(map)
 }
 
 fn convert_window_specs(specs: &[WindowSpec]) -> Result<Vec<WindowFuncSpec>, LiteError> {
@@ -167,11 +250,16 @@ fn resolve_sort_keys(
         .map(|sk| {
             let key = match &sk.expr {
                 nodedb_sql::types_expr::SqlExpr::Column { name, .. } => {
-                    let idx = columns.iter().position(|c| c == name).ok_or_else(|| {
-                        LiteError::BadRequest {
+                    // Output columns are bare names, so a qualified reference
+                    // (`t.col`) only matches once the qualifier is stripped.
+                    let bare = name.rsplit('.').next().unwrap_or(name);
+                    let idx = columns
+                        .iter()
+                        .position(|c| c == name)
+                        .or_else(|| columns.iter().position(|c| c == bare))
+                        .ok_or_else(|| LiteError::BadRequest {
                             detail: format!("ORDER BY column '{name}' not found in scan output"),
-                        }
-                    })?;
+                        })?;
                     ResolvedKey::ColIndex(idx)
                 }
                 other => ResolvedKey::Expr(convert_sql_expr(other)?),
@@ -185,16 +273,13 @@ fn resolve_sort_keys(
         .collect()
 }
 
-fn compare_rows(
-    a: &[Value],
-    b: &[Value],
-    columns: &[String],
-    keys: &[SortKeyResolved],
-) -> std::cmp::Ordering {
-    for sk in keys {
-        let va = extract_key_value(a, columns, &sk.key);
-        let vb = extract_key_value(b, columns, &sk.key);
-        let ord = cmp_with_nulls(&va, &vb, sk.nulls_first);
+/// Compare two rows' pre-materialized sort-key values, honouring each key's
+/// direction and NULL placement.
+fn compare_keys(a: &[Value], b: &[Value], keys: &[SortKeyResolved]) -> std::cmp::Ordering {
+    for (i, sk) in keys.iter().enumerate() {
+        let va = a.get(i).unwrap_or(&Value::Null);
+        let vb = b.get(i).unwrap_or(&Value::Null);
+        let ord = cmp_with_nulls(va, vb, sk.nulls_first);
         let ord = if sk.ascending { ord } else { ord.reverse() };
         if ord != std::cmp::Ordering::Equal {
             return ord;
@@ -203,12 +288,16 @@ fn compare_rows(
     std::cmp::Ordering::Equal
 }
 
-fn extract_key_value(row: &[Value], columns: &[String], key: &ResolvedKey) -> Value {
+fn extract_key_value(
+    row: &[Value],
+    columns: &[String],
+    key: &ResolvedKey,
+) -> Result<Value, LiteError> {
     match key {
-        ResolvedKey::ColIndex(idx) => row.get(*idx).cloned().unwrap_or(Value::Null),
+        ResolvedKey::ColIndex(idx) => Ok(row.get(*idx).cloned().unwrap_or(Value::Null)),
         ResolvedKey::Expr(expr) => {
             let doc = row_to_typed_value(columns, row);
-            expr.eval(&doc)
+            Ok(expr.eval(&doc)?)
         }
     }
 }

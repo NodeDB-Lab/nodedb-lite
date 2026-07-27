@@ -124,7 +124,7 @@ pub async fn scan<S: StorageEngine>(
         let doc = row_to_object(&col_names, &row);
 
         for f in &filters {
-            if !f.matches_value(&doc) {
+            if !f.matches_value(&doc)? {
                 continue 'row;
             }
         }
@@ -133,18 +133,15 @@ pub async fn scan<S: StorageEngine>(
     }
 
     // Computed columns.
-    let mut result_rows: Vec<Vec<Value>> = rows
-        .into_iter()
-        .map(|row| {
-            let mut out = row;
-            let doc = row_to_object(&col_names, &out);
-            for cc in &computed_cols {
-                let v = cc.expr.eval(&doc);
-                out.push(v);
-            }
-            out
-        })
-        .collect();
+    let mut result_rows: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut out = row;
+        let doc = row_to_object(&col_names, &out);
+        for cc in &computed_cols {
+            out.push(cc.expr.eval(&doc)?);
+        }
+        result_rows.push(out);
+    }
 
     // Sort.
     let extended_names: Vec<String> = {

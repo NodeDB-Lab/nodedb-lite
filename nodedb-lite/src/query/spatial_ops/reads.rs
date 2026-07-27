@@ -143,12 +143,12 @@ pub fn spatial_scan<S: StorageEngine>(
         let doc_value = Value::Object(doc.fields.clone());
 
         // Apply attribute filters.
-        if !attr_filters.iter().all(|f| f.matches_value(&doc_value)) {
+        if !ScanFilter::all_match_value(&attr_filters, &doc_value)? {
             continue;
         }
 
         // Apply RLS filters.
-        if !rls.iter().all(|f| f.matches_value(&doc_value)) {
+        if !ScanFilter::all_match_value(&rls, &doc_value)? {
             continue;
         }
 

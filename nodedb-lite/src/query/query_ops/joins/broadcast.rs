@@ -63,7 +63,7 @@ pub async fn execute_broadcast_join<S: StorageEngine>(
     let _ = large_alias; // alias already in field names if prefixed by planner
 
     let pf = decode_filters(post_filters)?;
-    let joined = apply_filters(joined, &pf);
+    let joined = apply_filters(joined, &pf)?;
     let joined = apply_projection(joined, projection);
 
     if !post_group_by.is_empty() || !post_aggregates.is_empty() {

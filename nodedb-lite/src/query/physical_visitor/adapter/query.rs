@@ -136,6 +136,15 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             detail: "ProviderScan is coordinator-materialized catalog scan; unsupported on the single-node Lite engine".into(),
         }),
 
+        // PostProcess is the gather-then-relational-tail wrapper the coordinator
+        // resolves onto a ProviderScan. Lite never builds one: it lowers
+        // `SqlPlan::Subquery` directly in the SQL visitor, where the same
+        // filter → offset → sort → distinct → project → limit tail runs against
+        // the materialized body.
+        QueryOp::PostProcess { .. } => Err(LiteError::Unsupported {
+            detail: "PostProcess is a coordinator-resolved subquery tail; unsupported on the single-node Lite engine".into(),
+        }),
+
         QueryOp::ShuffleJoinConsume { .. } => Err(LiteError::Unsupported {
             detail: "ShuffleJoinConsume is a cross-node shuffle-join consumer; unsupported on the single-node Lite engine".into(),
         }),

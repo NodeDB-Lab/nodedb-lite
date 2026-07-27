@@ -29,7 +29,7 @@ pub async fn execute_facet_counts<S: StorageEngine>(
 ) -> Result<QueryResult, LiteError> {
     let parsed_filters = decode_filters(filters)?;
     let all_rows = scan_collection(engine, collection).await?;
-    let rows = apply_filters(all_rows, &parsed_filters);
+    let rows = apply_filters(all_rows, &parsed_filters)?;
 
     let mut output: Vec<HashMap<String, Value>> = Vec::new();
 
