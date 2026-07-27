@@ -12,7 +12,9 @@ use std::sync::{Arc, Mutex};
 
 use nodedb_sql::types::*;
 use nodedb_types::collection::CollectionType;
-use nodedb_types::columnar::{ColumnarProfile, ColumnarSchema, DocumentMode, StrictSchema};
+use nodedb_types::columnar::{
+    ColumnarProfile, ColumnarSchema, DocumentMode, FloatWidth, IntWidth, StrictSchema,
+};
 use nodedb_types::sync::wire::CollectionDescriptor;
 
 use crate::engine::columnar::ColumnarEngine;
@@ -249,6 +251,9 @@ impl<S: StorageEngine> SqlCatalog for LiteCatalog<S> {
                     is_primary_key: true,
                     default: None,
                     raw_type: None,
+                    // A synthesized text key is neither an integer nor a float.
+                    int_width: None,
+                    float_width: None,
                 }],
                 primary_key: Some("id".into()),
                 has_auto_tier: false,
@@ -274,13 +279,21 @@ fn columns_from_column_defs(
 ) -> (Vec<ColumnInfo>, Option<String>) {
     let cols = columns
         .iter()
-        .map(|c| ColumnInfo {
-            name: c.name.clone(),
-            data_type: convert_column_type(&c.column_type),
-            nullable: c.nullable,
-            is_primary_key: c.primary_key,
-            default: c.default.clone(),
-            raw_type: Some(format!("{:?}", c.column_type)),
+        .map(|c| {
+            // Resolve the declared width once here, at the catalog boundary,
+            // so the write path (range validation) and the read path (OID and
+            // binary payload width) cannot disagree.
+            let raw_type = format!("{:?}", c.column_type);
+            ColumnInfo {
+                name: c.name.clone(),
+                data_type: convert_column_type(&c.column_type),
+                nullable: c.nullable,
+                is_primary_key: c.primary_key,
+                default: c.default.clone(),
+                int_width: IntWidth::from_declared_type(&raw_type),
+                float_width: FloatWidth::from_declared_type(&raw_type),
+                raw_type: Some(raw_type),
+            }
         })
         .collect();
     let pk = columns
@@ -320,6 +333,8 @@ fn columns_from_fields(fields: &[(String, String)]) -> Vec<ColumnInfo> {
                 nullable: true,
                 is_primary_key: false,
                 default: None,
+                int_width: IntWidth::from_declared_type(type_hint),
+                float_width: FloatWidth::from_declared_type(type_hint),
                 raw_type: Some(type_hint.clone()),
             }
         })
