@@ -188,8 +188,7 @@ pub(crate) async fn load_or_create_salt_opfs(
     vfs: &pagedb::vfs::opfs::OpfsVfs,
     salt_path: &str,
 ) -> Result<[u8; 16], LiteError> {
-    use pagedb::vfs::traits::{Vfs, VfsFile};
-    use pagedb::vfs::types::OpenMode;
+    use pagedb::vfs::{OpenMode, Vfs, VfsFile};
 
     let mut file = vfs
         .open(salt_path, OpenMode::CreateOrOpen)

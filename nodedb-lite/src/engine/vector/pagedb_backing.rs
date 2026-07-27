@@ -22,7 +22,7 @@
 //! blob checkpoint path.
 
 use pagedb::SegmentReader;
-use pagedb::vfs::traits::Vfs;
+use pagedb::vfs::Vfs;
 
 use nodedb_vector::segment_backing::VectorSegmentBacking;
 

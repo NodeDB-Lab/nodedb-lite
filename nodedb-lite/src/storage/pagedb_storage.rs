@@ -19,11 +19,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pagedb::errors::PagedbError;
 use pagedb::options::{OpenOptions, RetainPolicy};
+use pagedb::vfs::Vfs;
 use pagedb::vfs::memory::MemVfs;
-use pagedb::vfs::traits::Vfs;
-use pagedb::{Db, RealmId};
+use pagedb::{Db, PagedbError, RealmId};
 
 use crate::error::LiteError;
 use crate::storage::engine::{CompactionOutcome, KvPair, StorageEngine, WriteOp};
@@ -608,13 +607,14 @@ impl PagedbStorage<pagedb::vfs::opfs::OpfsVfs> {
         let db = Db::open(vfs, kek, 4096, realm, lite_open_options())
             .await
             .map_err(|e| match e {
-                pagedb::errors::PagedbError::Corruption(_)
-                | pagedb::errors::PagedbError::ChecksumFailure => LiteError::WorkerFailed {
-                    detail: format!(
-                        "OPFS database is corrupted — delete the OPFS directory and \
+                PagedbError::Corruption(_) | PagedbError::ChecksumFailure => {
+                    LiteError::WorkerFailed {
+                        detail: format!(
+                            "OPFS database is corrupted — delete the OPFS directory and \
                          re-sync from Origin to recover. Original error: {e}"
-                    ),
-                },
+                        ),
+                    }
+                }
                 other => LiteError::from(other),
             })?;
 
@@ -836,7 +836,7 @@ where
         let already_exists = txn.link_segment(&segment_name, &meta).await;
         match already_exists {
             Ok(()) => {}
-            Err(pagedb::errors::PagedbError::AlreadyLinked) => {
+            Err(PagedbError::AlreadyLinked) => {
                 // Use replace_segment to atomically swap old → new.
                 txn.replace_segment(&segment_name, &meta)
                     .await
@@ -859,7 +859,7 @@ where
 
         let reader = match txn.open_segment(&segment_name).await {
             Ok(r) => r,
-            Err(pagedb::errors::PagedbError::NotFound) => return Ok(None),
+            Err(PagedbError::NotFound) => return Ok(None),
             Err(e) => return Err(LiteError::from(e)),
         };
 
@@ -872,7 +872,7 @@ where
         let mut txn = self.db.begin_write().await.map_err(LiteError::from)?;
         match txn.unlink_segment(&segment_name).await {
             Ok(()) => {}
-            Err(pagedb::errors::PagedbError::NotLinked) => return Ok(()), // already gone
+            Err(PagedbError::NotLinked) => return Ok(()), // already gone
             Err(e) => return Err(LiteError::from(e)),
         }
         txn.commit().await.map(|_| ()).map_err(LiteError::from)
@@ -929,7 +929,7 @@ where
         let link_result = txn.link_segment(&segment_name, &meta).await;
         match link_result {
             Ok(()) => {}
-            Err(pagedb::errors::PagedbError::AlreadyLinked) => {
+            Err(PagedbError::AlreadyLinked) => {
                 txn.replace_segment(&segment_name, &meta)
                     .await
                     .map_err(LiteError::from)?;
@@ -950,7 +950,7 @@ where
 
         let reader = match txn.open_segment(&segment_name).await {
             Ok(r) => r,
-            Err(pagedb::errors::PagedbError::NotFound) => return Ok(None),
+            Err(PagedbError::NotFound) => return Ok(None),
             Err(e) => return Err(LiteError::from(e)),
         };
 
@@ -1024,7 +1024,7 @@ where
         let mut txn = self.db.begin_write().await.map_err(LiteError::from)?;
         match txn.unlink_segment(&segment_name).await {
             Ok(()) => {}
-            Err(pagedb::errors::PagedbError::NotLinked) => return Ok(()), // already gone
+            Err(PagedbError::NotLinked) => return Ok(()), // already gone
             Err(e) => return Err(LiteError::from(e)),
         }
         txn.commit().await.map(|_| ()).map_err(LiteError::from)

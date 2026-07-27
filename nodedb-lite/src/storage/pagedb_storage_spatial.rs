@@ -29,7 +29,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 use async_trait::async_trait;
 #[cfg(not(target_arch = "wasm32"))]
-use pagedb::vfs::traits::Vfs;
+use pagedb::vfs::Vfs;
 #[cfg(not(target_arch = "wasm32"))]
 use pagedb::{RealmId, SegmentKind};
 
@@ -100,7 +100,7 @@ where
         let link_result = txn.link_segment(&name, &meta).await;
         match link_result {
             Ok(()) => {}
-            Err(pagedb::errors::PagedbError::AlreadyLinked) => {
+            Err(pagedb::PagedbError::AlreadyLinked) => {
                 txn.replace_segment(&name, &meta)
                     .await
                     .map_err(LiteError::from)?;
@@ -121,7 +121,7 @@ where
 
         let reader = match txn.open_segment(&name).await {
             Ok(r) => r,
-            Err(pagedb::errors::PagedbError::NotFound) => return Ok(None),
+            Err(pagedb::PagedbError::NotFound) => return Ok(None),
             Err(e) => return Err(LiteError::from(e)),
         };
 
@@ -190,7 +190,7 @@ where
         let mut txn = self.db.begin_write().await.map_err(LiteError::from)?;
         match txn.unlink_segment(&name).await {
             Ok(()) => {}
-            Err(pagedb::errors::PagedbError::NotLinked) => {}
+            Err(pagedb::PagedbError::NotLinked) => {}
             Err(e) => return Err(LiteError::from(e)),
         }
         txn.commit().await.map(|_| ()).map_err(LiteError::from)
