@@ -19,6 +19,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use pagedb::options::{OpenOptions, RetainPolicy};
 use pagedb::vfs::Vfs;
 use pagedb::vfs::memory::MemVfs;
@@ -324,7 +325,12 @@ where
     async fn get(&self, ns: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, LiteError> {
         let composite = KeyBuf::new(ns, key);
         let txn = self.db.begin_read().await.map_err(LiteError::from)?;
-        txn.get(composite.as_slice()).await.map_err(LiteError::from)
+        // pagedb hands back a `Bytes` sharing the cached page; `StorageEngine`
+        // is defined in owned `Vec<u8>`, so the borrow ends at this boundary.
+        txn.get(composite.as_slice())
+            .await
+            .map(|opt| opt.map(|v| v.to_vec()))
+            .map_err(LiteError::from)
     }
 
     async fn put(&self, ns: Namespace, key: &[u8], value: &[u8]) -> Result<(), LiteError> {
@@ -347,7 +353,7 @@ where
         let raw = txn.scan_prefix(&ns_prefix).await.map_err(LiteError::from)?;
         Ok(raw
             .into_iter()
-            .map(|(k, v)| (strip_prefix(&k).to_vec(), v))
+            .map(|(k, v)| (strip_prefix(&k).to_vec(), v.to_vec()))
             .collect())
     }
 
@@ -393,13 +399,18 @@ where
         } else {
             // All keys distinct — partition into sorted puts + sorted deletes,
             // then call the batch APIs within the same WriteTxn (both commit atomically).
-            let mut puts: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+            // `put_batch` takes `Bytes` so the tree can store the buffer without
+            // re-copying it; `delete_batch` still takes owned key vectors.
+            let mut puts: Vec<(Bytes, Bytes)> = Vec::new();
             let mut deletes: Vec<Vec<u8>> = Vec::new();
 
             for op in ops {
                 match op {
                     WriteOp::Put { ns, key, value } => {
-                        puts.push((prefix_key(*ns, key), value.clone()));
+                        puts.push((
+                            Bytes::from(prefix_key(*ns, key)),
+                            Bytes::from(value.clone()),
+                        ));
                     }
                     WriteOp::Delete { ns, key } => {
                         deletes.push(prefix_key(*ns, key));
@@ -445,7 +456,7 @@ where
         Ok(raw
             .into_iter()
             .take(limit)
-            .map(|(k, v)| (strip_prefix(&k).to_vec(), v))
+            .map(|(k, v)| (strip_prefix(&k).to_vec(), v.to_vec()))
             .collect())
     }
 
@@ -473,7 +484,7 @@ where
         Ok(raw
             .into_iter()
             .take(effective_limit)
-            .map(|(k, v)| (strip_prefix(&k).to_vec(), v))
+            .map(|(k, v)| (strip_prefix(&k).to_vec(), v.to_vec()))
             .collect())
     }
 
@@ -634,7 +645,12 @@ impl<V: Vfs + Clone + 'static> StorageEngine for PagedbStorage<V> {
     async fn get(&self, ns: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, LiteError> {
         let composite = KeyBuf::new(ns, key);
         let txn = self.db.begin_read().await.map_err(LiteError::from)?;
-        txn.get(composite.as_slice()).await.map_err(LiteError::from)
+        // pagedb hands back a `Bytes` sharing the cached page; `StorageEngine`
+        // is defined in owned `Vec<u8>`, so the borrow ends at this boundary.
+        txn.get(composite.as_slice())
+            .await
+            .map(|opt| opt.map(|v| v.to_vec()))
+            .map_err(LiteError::from)
     }
 
     async fn put(&self, ns: Namespace, key: &[u8], value: &[u8]) -> Result<(), LiteError> {
@@ -657,7 +673,7 @@ impl<V: Vfs + Clone + 'static> StorageEngine for PagedbStorage<V> {
         let raw = txn.scan_prefix(&ns_prefix).await.map_err(LiteError::from)?;
         Ok(raw
             .into_iter()
-            .map(|(k, v)| (strip_prefix(&k).to_vec(), v))
+            .map(|(k, v)| (strip_prefix(&k).to_vec(), v.to_vec()))
             .collect())
     }
 
@@ -696,13 +712,18 @@ impl<V: Vfs + Clone + 'static> StorageEngine for PagedbStorage<V> {
                 }
             }
         } else {
-            let mut puts: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+            // `put_batch` takes `Bytes` so the tree can store the buffer without
+            // re-copying it; `delete_batch` still takes owned key vectors.
+            let mut puts: Vec<(Bytes, Bytes)> = Vec::new();
             let mut deletes: Vec<Vec<u8>> = Vec::new();
 
             for op in ops {
                 match op {
                     WriteOp::Put { ns, key, value } => {
-                        puts.push((prefix_key(*ns, key), value.clone()));
+                        puts.push((
+                            Bytes::from(prefix_key(*ns, key)),
+                            Bytes::from(value.clone()),
+                        ));
                     }
                     WriteOp::Delete { ns, key } => {
                         deletes.push(prefix_key(*ns, key));
@@ -747,7 +768,7 @@ impl<V: Vfs + Clone + 'static> StorageEngine for PagedbStorage<V> {
         Ok(raw
             .into_iter()
             .take(limit)
-            .map(|(k, v)| (strip_prefix(&k).to_vec(), v))
+            .map(|(k, v)| (strip_prefix(&k).to_vec(), v.to_vec()))
             .collect())
     }
 
@@ -775,7 +796,7 @@ impl<V: Vfs + Clone + 'static> StorageEngine for PagedbStorage<V> {
         Ok(raw
             .into_iter()
             .take(effective_limit)
-            .map(|(k, v)| (strip_prefix(&k).to_vec(), v))
+            .map(|(k, v)| (strip_prefix(&k).to_vec(), v.to_vec()))
             .collect())
     }
 

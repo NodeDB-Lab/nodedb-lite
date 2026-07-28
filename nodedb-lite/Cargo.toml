@@ -36,6 +36,7 @@ serde_json = { workspace = true }
 sonic-rs = { workspace = true }
 loro = { workspace = true }
 pagedb = { workspace = true }
+bytes = { workspace = true }
 nodedb-sql = { workspace = true }
 nodedb-physical = { workspace = true }
 arrow = { workspace = true }

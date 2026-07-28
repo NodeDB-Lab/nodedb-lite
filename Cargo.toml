@@ -47,6 +47,9 @@ zerompk = { version = "0.6", features = ["std", "derive"] }
 
 # Storage
 pagedb = { version = "0", default-features = false }
+# Matches the `Bytes` type pagedb's txn API returns; must track pagedb's own
+# `bytes` major so the two resolve to one version and stay assignable.
+bytes = "1"
 roaring = "0.11"
 lru = "0.12"
 arrow = { version = "59", default-features = false, features = ["ipc"] }
