@@ -34,7 +34,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
     ///
     /// **Atomicity model**: all operations are validated upfront. If any
     /// validation fails, none are applied. Once validation passes, all
-    /// operations are applied in a single Loro batch (one delta export).
+    /// operations are applied under a single CRDT lock hold. Each row still
+    /// exports its own delta (see `CrdtEngine::batch_upsert`) — a delta
+    /// spanning rows or collections is not independently applicable by the
+    /// receiver.
     ///
     /// This is NOT ACID rollback — Loro doesn't support undo. Instead,
     /// we validate-then-apply: no partial commits are possible because
@@ -105,8 +108,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
             }
         }
 
-        // Phase 3: Apply all operations in a single Loro batch.
-        // One delta export for the entire transaction.
+        // Phase 3: Apply all operations under one CRDT lock hold.
+        // One delta export per row, not one for the transaction.
         let mut crdt = self.crdt.lock_or_recover();
 
         // Build batch ops with borrowed field slices.
@@ -120,8 +123,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 .map_err(NodeDbError::storage)?;
         }
 
-        // Deletes are applied individually but within the same lock hold,
-        // so the delta export at the end captures everything.
+        // Deletes are applied individually but within the same lock hold;
+        // each one exports its own delta, like every upsert above.
         for &(collection, doc_id) in &delete_ops {
             crdt.delete(collection, doc_id)
                 .map_err(NodeDbError::storage)?;

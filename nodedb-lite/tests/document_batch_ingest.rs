@@ -4,8 +4,9 @@
 //!
 //! Verifies that `document_put_with_vector_batch_impl` correctly writes all
 //! documents (queryable via `document_get`), indexes their vectors (queryable
-//! via vector search), and advances the CRDT version vector by producing
-//! exactly one pending delta for the entire batch.
+//! via vector search), and advances the CRDT version vector by producing one
+//! pending delta per CRDT row it touches — never one coalesced delta for the
+//! whole batch, which no receiver could apply row by row.
 
 use nodedb_client::NodeDb;
 use nodedb_lite::storage::pagedb_storage::PagedbStorageMem;
@@ -72,8 +73,12 @@ async fn batch_100_docs_all_queryable() {
     }
 }
 
+/// A batch emits one delta per CRDT row, not one per batch: each document row
+/// and each vector-metadata row is exported on its own so the receiver — which
+/// commits per row and stores documents per collection — can apply it
+/// independently. Coalescing them back into a single delta would break sync.
 #[tokio::test]
-async fn batch_produces_one_crdt_delta() {
+async fn batch_produces_one_crdt_delta_per_row() {
     let db = open_db().await;
 
     let docs: Vec<Document> = (0..50)
@@ -102,17 +107,29 @@ async fn batch_produces_one_crdt_delta() {
         .await
         .expect("batch put");
 
-    // Exactly one new pending delta should have been added for the entire batch.
     let deltas_after = db
         .pending_crdt_deltas()
         .expect("pending_crdt_deltas after")
         .len();
 
+    // One delta per CRDT row: every item writes a document row, and every item
+    // carrying a non-empty embedding also writes a vector-metadata row.
+    let vector_rows = items
+        .iter()
+        .filter(|it| it.embedding.is_some_and(|e| !e.is_empty()))
+        .count();
+    let expected_rows = items.len() + vector_rows;
+
     assert_eq!(
         deltas_after,
-        deltas_before + 1,
-        "batch of 50 docs should produce exactly one CRDT delta, \
-         got {deltas_after} (was {deltas_before})"
+        deltas_before + expected_rows,
+        "batch of {} items ({} with embeddings) must produce {expected_rows} CRDT \
+         deltas — one per row, not one per batch — because a delta spanning rows \
+         or collections is not independently applicable by a receiver that commits \
+         per row and stores documents per collection; got {deltas_after} (was \
+         {deltas_before})",
+        items.len(),
+        vector_rows
     );
 }
 

@@ -4,9 +4,16 @@
 //!
 //! `document_put_with_vector_batch_impl` takes a slice of
 //! `(doc_collection, doc, vector_collection, id, embedding)` items and
-//! acquires the CRDT lock exactly once, performs all CRDT mutations under
-//! that single lock, then calls `export(updates_since(version_before))`
-//! once to produce a single pending delta covering the whole batch.
+//! acquires the CRDT lock exactly **once** for the whole batch — that is the
+//! win over the single-item path, which takes and releases the lock per item.
+//!
+//! The batch does **not** collapse into one delta: `CrdtEngine::batch_upsert`
+//! emits one `PendingDelta` per CRDT row, tagged with that row's real
+//! collection and document ID. A delta spanning several rows (or several
+//! collections) is not independently applicable by a receiver, which commits
+//! per row and stores documents per collection. So a batch of N items emits
+//! N document deltas plus one vector-metadata delta per item that carries a
+//! non-empty embedding. See `CrdtEngine::batch_upsert` for the contract.
 //!
 //! FTS indexing, bitemporal history writes, and HNSW inserts run after
 //! the CRDT lock is released — matching the ordering of the single-item path.
@@ -44,8 +51,13 @@ type ResolvedBatchItem<'a> = (String, LoroFields<'a>, LoroFields<'a>);
 impl<S: StorageEngine> NodeDbLite<S> {
     /// Batch upsert of documents with optional embeddings.
     ///
-    /// Acquires the CRDT lock once, runs all per-item Loro mutations under
-    /// that lock, then calls `export(updates_since(version_before))` once.
+    /// Acquires the CRDT lock once and runs every per-item Loro mutation
+    /// under that single hold. Per `CrdtEngine::batch_upsert`, each CRDT row
+    /// still exports its own delta — one per document, plus one per item with
+    /// a non-empty embedding for the vector-metadata row — because a delta
+    /// covering several rows or collections is not independently applicable by
+    /// the receiver.
+    ///
     /// FTS indexing, bitemporal history, and HNSW inserts happen after the
     /// lock is released, in the same relative order as the single-item path.
     ///
@@ -97,7 +109,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
             resolved.push((doc_id, doc_fields, vec_fields));
         }
 
-        // Build the ops slice for batch_upsert — one CRDT lock, one export.
+        // Build the ops slice for batch_upsert — one CRDT lock hold, one
+        // exported delta per row.
         {
             let mut crdt = self.crdt.lock_or_recover();
 
