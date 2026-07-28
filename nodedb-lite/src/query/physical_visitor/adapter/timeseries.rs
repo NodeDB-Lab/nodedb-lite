@@ -29,8 +29,20 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             rls_filters,
             system_time,
             valid_at_ms,
+            sort_keys,
         } => {
             use nodedb_types::SystemTimeScope;
+            // Lite's timeseries scan has no ordering stage — `ScanParams`
+            // carries no sort keys, so rows come back in the engine's natural
+            // order. Empty `sort_keys` means exactly that and is fine; anything
+            // else must be REFUSED rather than dropped, or an `ORDER BY` would
+            // silently return correctly-filtered rows in the wrong order. This
+            // is the seam to implement ordering at if Lite ever grows it.
+            if !sort_keys.is_empty() {
+                return Err(LiteError::Unsupported {
+                    detail: "ORDER BY is not supported on the timeseries engine in Lite".into(),
+                });
+            }
             // Timeseries does not implement all-versions audit in Lite.
             if system_time.is_all_versions() {
                 return Err(LiteError::Unsupported {

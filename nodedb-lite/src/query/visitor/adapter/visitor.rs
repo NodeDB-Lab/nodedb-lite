@@ -544,6 +544,7 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
             limit,
             tiered,
             temporal,
+            sort_keys,
         } = args;
         lower_timeseries_scan(
             self.engine,
@@ -558,6 +559,7 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
             limit,
             tiered,
             temporal,
+            sort_keys,
         )
     }
 

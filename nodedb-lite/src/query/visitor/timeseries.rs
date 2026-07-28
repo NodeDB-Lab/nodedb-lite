@@ -6,7 +6,7 @@ use nodedb_physical::PhysicalTaskVisitor;
 use nodedb_physical::physical_plan::TimeseriesOp;
 use nodedb_sql::temporal::TemporalScope;
 use nodedb_sql::types::filter::Filter;
-use nodedb_sql::types::query::{AggregateExpr, Projection};
+use nodedb_sql::types::query::{AggregateExpr, Projection, SortKey};
 use nodedb_sql::types_expr::SqlExpr;
 use nodedb_sql::types_expr::SqlValue;
 
@@ -14,6 +14,7 @@ use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::filter_convert::sql_filters_to_metadata;
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
+use crate::query::visitor::scan_post::sort_rows;
 use crate::storage::engine::StorageEngine;
 
 use super::adapter::LiteFut;
@@ -80,6 +81,7 @@ pub(super) fn lower_timeseries_scan<'a, S: StorageEngine + 'a>(
     limit: usize,
     _tiered: bool,
     temporal: &TemporalScope,
+    sort_keys: &[SortKey],
 ) -> Result<LiteFut<'a>, LiteError> {
     let filter_bytes = encode_filters(filters)?;
     let proj_cols = extract_projection_cols(projection);
@@ -87,11 +89,20 @@ pub(super) fn lower_timeseries_scan<'a, S: StorageEngine + 'a>(
 
     let (system_time, valid_at_ms) = extract_temporal(temporal);
 
+    // ORDER BY must be applied to the FULL result and only then truncated, so an
+    // ordered query returns the first `limit` rows of the ordering the client
+    // asked for — not an arbitrary `limit` rows that were then sorted among
+    // themselves. So when there are sort keys we scan unbounded (`limit == 0`
+    // is the scan's "no cap" encoding), sort, and truncate here. With no sort
+    // keys the limit is pushed into the scan exactly as before.
+    let sorted = !sort_keys.is_empty();
+    let scan_limit = if sorted { 0 } else { limit };
+
     let op = TimeseriesOp::Scan {
         collection: collection.to_string(),
         time_range,
         projection: proj_cols,
-        limit,
+        limit: scan_limit,
         filters: filter_bytes,
         bucket_interval_ms,
         group_by: group_by.to_vec(),
@@ -101,11 +112,24 @@ pub(super) fn lower_timeseries_scan<'a, S: StorageEngine + 'a>(
         rls_filters: Vec::new(),
         system_time,
         valid_at_ms,
+        sort_keys: Vec::new(),
     };
 
     let mut phys = LiteDataPlaneVisitor { engine };
     let fut = phys.timeseries(&op)?;
-    Ok(Box::pin(fut))
+    if !sorted {
+        return Ok(Box::pin(fut));
+    }
+
+    let sort_keys = sort_keys.to_vec();
+    Ok(Box::pin(async move {
+        let mut result = fut.await?;
+        sort_rows(&mut result, &sort_keys)?;
+        if limit > 0 {
+            result.rows.truncate(limit);
+        }
+        Ok(result)
+    }))
 }
 
 /// Extract the system-time scope and valid-time point from a `TemporalScope`.
@@ -243,6 +267,7 @@ mod tests {
             100,
             false,
             &TemporalScope::default(),
+            &[],
         );
         assert!(result.is_ok());
     }
