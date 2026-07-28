@@ -55,13 +55,18 @@ pub struct FtsCollectionManager {
     /// Needed by `FtsDeleteDoc` to translate the Origin surrogate back to the
     /// Lite string doc_id without dropping the whole collection.
     origin_surrogate_to_doc_id: HashMap<u32, String>,
-    /// Collection name → bound analyzer name, from `TextOp::SetAnalyzer`.
+    /// Collection name → bound analyzer name, from `TextOp::SetTextConfig`.
     ///
     /// Retained so indexes created after the analyzer was bound inherit it —
     /// DDL normally binds the analyzer before the first document is written,
     /// when none of the collection's indexes exist yet. See
     /// `super::analyzer` for the binding logic.
     pub(super) collection_analyzers: HashMap<String, String>,
+    /// Collection name → default fuzzy matching, from `TextOp::SetTextConfig`.
+    ///
+    /// Retained for the same reason as `collection_analyzers`: the DDL that
+    /// sets it usually runs before any of the collection's indexes exist.
+    pub(super) collection_fuzzy_defaults: HashMap<String, bool>,
 }
 
 impl FtsCollectionManager {
@@ -75,6 +80,7 @@ impl FtsCollectionManager {
             next_surrogate: 1,
             origin_surrogate_to_doc_id: HashMap::new(),
             collection_analyzers: HashMap::new(),
+            collection_fuzzy_defaults: HashMap::new(),
         }
     }
 
