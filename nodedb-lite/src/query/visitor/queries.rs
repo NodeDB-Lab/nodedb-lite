@@ -339,6 +339,9 @@ pub(super) fn lower_range_scan<'a, S: StorageEngine + 'a>(
         lower: lo_bytes,
         upper: hi_bytes,
         limit,
+        // Lite lowers this scan itself and applies no row-level security, so it
+        // declares none rather than inventing filters it cannot enforce.
+        rls_filters: Vec::new(),
     };
 
     let mut phys = LiteDataPlaneVisitor { engine };

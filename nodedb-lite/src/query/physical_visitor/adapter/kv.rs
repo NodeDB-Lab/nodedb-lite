@@ -55,7 +55,22 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             }))
         }
 
-        KvOp::BatchGet { collection, keys } => {
+        KvOp::BatchGet {
+            collection,
+            keys,
+            rls_filters,
+        } => {
+            // Lite's KV reads have no row-filter stage, so RLS filters cannot be
+            // applied here. REFUSE rather than drop them: silently ignoring one
+            // returns rows the caller is not authorised to see. Empty filters
+            // (the common case) pass through unchanged.
+            if !rls_filters.is_empty() {
+                return Err(LiteError::Unsupported {
+                    detail: "row-level security filters on KV BatchGet are not supported on the \
+                             Lite engine"
+                        .into(),
+                });
+            }
             let col = collection.clone();
             let ks = keys.clone();
             Ok(Box::pin(async move {
@@ -67,7 +82,16 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             collection,
             key,
             fields,
+            rls_filters,
         } => {
+            // See `BatchGet` above: refuse rather than silently bypass RLS.
+            if !rls_filters.is_empty() {
+                return Err(LiteError::Unsupported {
+                    detail: "row-level security filters on KV FieldGet are not supported on the \
+                             Lite engine"
+                        .into(),
+                });
+            }
             let col = collection.clone();
             let k = key.clone();
             let flds = fields.clone();
