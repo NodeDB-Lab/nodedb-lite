@@ -159,7 +159,22 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             condition,
             join_type,
             limit,
+            left_rls_filters,
+            right_rls_filters,
         } => {
+            // Lite's join executors fetch each side by collection name and have
+            // no per-side filter stage, so row-level-security filters cannot be
+            // applied here yet. REFUSE rather than drop them: silently ignoring
+            // an RLS filter would return rows the caller is not authorised to
+            // see, which is strictly worse than failing the query. Empty
+            // filters (the common case) pass through unchanged.
+            if !left_rls_filters.is_empty() || !right_rls_filters.is_empty() {
+                return Err(LiteError::Unsupported {
+                    detail: "row-level security filters on NestedLoopJoin are not supported on the \
+                             Lite engine"
+                        .into(),
+                });
+            }
             let lc = left_collection.clone();
             let rc = right_collection.clone();
             let cond = condition.clone();
@@ -177,7 +192,18 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             join_type,
             limit,
             pre_sorted,
+            left_rls_filters,
+            right_rls_filters,
         } => {
+            // See `NestedLoopJoin` above: refuse rather than silently bypass an
+            // RLS filter Lite cannot apply.
+            if !left_rls_filters.is_empty() || !right_rls_filters.is_empty() {
+                return Err(LiteError::Unsupported {
+                    detail: "row-level security filters on SortMergeJoin are not supported on the \
+                             Lite engine"
+                        .into(),
+                });
+            }
             let lc = left_collection.clone();
             let rc = right_collection.clone();
             let on = on.clone();
