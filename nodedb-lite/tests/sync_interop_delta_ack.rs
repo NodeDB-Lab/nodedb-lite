@@ -100,8 +100,9 @@ async fn real_loro_delta_gets_acked() {
     assert_eq!(
         frame.msg_type,
         SyncMessageType::DeltaAck,
-        "expected DeltaAck, got {:?}",
-        frame.msg_type
+        "expected DeltaAck, got {:?}: {:?}",
+        frame.msg_type,
+        frame.decode_body::<nodedb_types::sync::wire::DeltaRejectMsg>()
     );
 
     let ack: DeltaAckMsg = frame.decode_body().expect("decode DeltaAckMsg");
