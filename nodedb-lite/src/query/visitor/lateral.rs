@@ -3,6 +3,7 @@
 //! LateralTopK, LateralLoop.
 
 use nodedb_physical::physical_plan::query::JoinProjection;
+use nodedb_physical::physical_plan::SortKeySpec;
 use nodedb_sql::types::SqlPlan;
 use nodedb_sql::types::filter::Filter;
 use nodedb_sql::types::query::{Projection, SortKey};
@@ -29,12 +30,26 @@ fn encode_filters(filters: &[Filter]) -> Result<Vec<u8>, LiteError> {
     }
 }
 
-fn sort_key_to_pair(k: &SortKey) -> (String, bool) {
-    let name = match &k.expr {
-        SqlExpr::Column { name, .. } => name.clone(),
-        other => format!("{other:?}"),
-    };
-    (name, k.ascending)
+/// Convert a SQL `SortKey` into the physical-plan [`SortKeySpec`].
+///
+/// A bare column becomes a pushable key. Anything computed becomes a
+/// deliberately NON-column spec, so `SortKeySpec::as_column()` reports `None`
+/// and every consumer skips it — which is what already happened in practice:
+/// the previous code stringified the expression with `format!("{other:?}")`
+/// and used that as a column name, which could never match a real column. Same
+/// observable ordering, but the limitation is now explicit in the type instead
+/// of hidden behind an unmatchable name.
+fn sort_key_to_spec(k: &SortKey) -> SortKeySpec {
+    match &k.expr {
+        SqlExpr::Column { name, .. } => SortKeySpec::column(name.clone(), k.ascending),
+        _ => SortKeySpec {
+            expr: nodedb_query::expr::SqlExpr::Literal(nodedb_types::value::Value::Null),
+            ascending: k.ascending,
+            // Same PostgreSQL default `SortKeySpec::column` applies:
+            // ASC → NULLS LAST, DESC → NULLS FIRST.
+            nulls_first: !k.ascending,
+        },
+    }
 }
 
 fn build_join_projections(projection: &[Projection]) -> Vec<JoinProjection> {
@@ -84,7 +99,7 @@ pub(super) fn lower_lateral_top_k<'a, S: StorageEngine + 'a>(
     let outer_alias_str = outer_alias.unwrap_or("outer").to_string();
     let inner_col = inner_collection.to_string();
     let inner_filt_bytes = encode_filters(inner_filters)?;
-    let inner_ob: Vec<(String, bool)> = inner_order_by.iter().map(sort_key_to_pair).collect();
+    let inner_ob: Vec<SortKeySpec> = inner_order_by.iter().map(sort_key_to_spec).collect();
     let inner_lim = inner_limit;
     let corr_keys = correlation_keys.to_vec();
     let lat_alias = lateral_alias.to_string();

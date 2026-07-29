@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use nodedb_physical::physical_plan::SortKeySpec;
 use nodedb_physical::physical_plan::query::AggregateSpec;
 use nodedb_query::expr::GroupKeySpec;
 use nodedb_query::scan_filter::ScanFilter;
@@ -29,7 +30,7 @@ pub fn execute_aggregate(
     aggregates: &[AggregateSpec],
     filters: &[u8],
     having: &[u8],
-    sort_keys: &[(String, bool)],
+    sort_keys: &[SortKeySpec],
     grouping_sets: &[Vec<u32>],
 ) -> Result<QueryResult, LiteError> {
     let scan_filters = decode_filters(filters)?;
@@ -363,7 +364,7 @@ fn apply_having(
 
 fn apply_sort(
     rows: &mut [Vec<Value>],
-    sort_keys: &[(String, bool)],
+    sort_keys: &[SortKeySpec],
     group_by: &[GroupKeySpec],
     aggregates: &[AggregateSpec],
 ) {
@@ -372,14 +373,24 @@ fn apply_sort(
     }
     let columns = make_columns(group_by, aggregates);
     rows.sort_by(|a, b| {
-        for (col, asc) in sort_keys {
+        for key in sort_keys {
+            // Aggregate output rows are addressed by output column name, so a
+            // computed key has nothing to match here — skip it, matching the
+            // Origin executor's `sort_aggregated_rows`.
+            let Some(col) = key.as_column() else {
+                continue;
+            };
             let idx = columns.iter().position(|c| c == col);
             if let Some(i) = idx {
                 let av = a.get(i).unwrap_or(&Value::Null);
                 let bv = b.get(i).unwrap_or(&Value::Null);
-                let ord = value_cmp(av, bv);
+                // NULL placement is absolute; the direction never flips it.
+                let ord = match key.order_nulls(av == &Value::Null, bv == &Value::Null) {
+                    Some(ord) => ord,
+                    None => key.direct(value_cmp(av, bv)),
+                };
                 if ord != std::cmp::Ordering::Equal {
-                    return if *asc { ord } else { ord.reverse() };
+                    return ord;
                 }
             }
         }

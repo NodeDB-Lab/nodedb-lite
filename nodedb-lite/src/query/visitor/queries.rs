@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use nodedb_physical::PhysicalTaskVisitor;
 use nodedb_physical::physical_plan::document::DocumentOp;
 use nodedb_physical::physical_plan::query::{AggregateSpec, JoinProjection};
+use nodedb_physical::physical_plan::SortKeySpec;
 use nodedb_query::expr::GroupKeySpec;
 use nodedb_sql::SubqueryVisitArgs;
 use nodedb_sql::temporal::TemporalScope;
@@ -58,13 +59,26 @@ fn convert_aggregates(aggs: &[AggregateExpr]) -> Vec<AggregateSpec> {
     aggs.iter().map(sql_agg_to_spec).collect()
 }
 
-/// Extract a column name string from a `SortKey.expr` for use in aggregate sort.
-fn sort_key_to_pair(k: &SortKey) -> (String, bool) {
-    let name = match &k.expr {
-        SqlExpr::Column { name, .. } => name.clone(),
-        other => format!("{other:?}"),
-    };
-    (name, k.ascending)
+/// Convert a SQL `SortKey` into the physical-plan [`SortKeySpec`].
+///
+/// A bare column becomes a pushable key. Anything computed becomes a
+/// deliberately NON-column spec, so `SortKeySpec::as_column()` reports `None`
+/// and every consumer skips it — which is what already happened in practice:
+/// the previous code stringified the expression with `format!("{other:?}")`
+/// and used that as a column name, which could never match a real column. Same
+/// observable ordering, but the limitation is now explicit in the type instead
+/// of hidden behind an unmatchable name.
+fn sort_key_to_spec(k: &SortKey) -> SortKeySpec {
+    match &k.expr {
+        SqlExpr::Column { name, .. } => SortKeySpec::column(name.clone(), k.ascending),
+        _ => SortKeySpec {
+            expr: nodedb_query::expr::SqlExpr::Literal(nodedb_types::value::Value::Null),
+            ascending: k.ascending,
+            // Same PostgreSQL default `SortKeySpec::column` applies:
+            // ASC → NULLS LAST, DESC → NULLS FIRST.
+            nulls_first: !k.ascending,
+        },
+    }
 }
 
 /// Encode `Vec<Filter>` → msgpack bytes via `ScanFilter`.
@@ -167,7 +181,7 @@ pub(super) fn lower_aggregate<'a, S: StorageEngine + 'a>(
     // function-call resolution through agg_alias_map. We always do the post-filter
     // and pass empty bytes to execute_aggregate (no pushdown for HAVING).
     let having_post = having.to_vec();
-    let sort_pairs: Vec<(String, bool)> = sort_keys.iter().map(sort_key_to_pair).collect();
+    let sort_pairs: Vec<SortKeySpec> = sort_keys.iter().map(sort_key_to_spec).collect();
     let gs: Vec<Vec<u32>> = grouping_sets
         .unwrap_or(&[])
         .iter()

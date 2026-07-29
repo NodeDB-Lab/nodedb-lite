@@ -30,10 +30,35 @@ pub(super) fn make_agg_alias_map(aggregates: &[AggregateExpr]) -> HashMap<String
                     other => format!("{other:?}"),
                 })
                 .unwrap_or_default();
-            let key = format!("{func}:{field}");
-            (key, a.alias.clone())
+            // The CANONICAL key, `sum(salary)` — the same string
+            // `nodedb_query::agg_key::canonical_agg_key` produces and the planner
+            // rewrites HAVING's aggregate calls to. HAVING is evaluated before
+            // aggregate columns are renamed to their user aliases, so it arrives
+            // naming this key while the row carries the alias; this map is what
+            // bridges the two.
+            (format!("{func}({field})"), a.alias.clone())
         })
         .collect()
+}
+
+/// Resolve a HAVING field reference against a result row.
+///
+/// A plain column hits directly. A canonical aggregate key (`sum(salary)`)
+/// does not — the row carries that aggregate under its output alias — so it is
+/// resolved through `agg_map` first. Lookup is case-insensitive on the
+/// function name because SQL is.
+fn lookup_field<'a>(
+    row: &HashMap<&str, &'a Value>,
+    agg_map: &HashMap<String, String>,
+    field: &str,
+) -> Option<&'a Value> {
+    if let Some(v) = row.get(field) {
+        return Some(*v);
+    }
+    let alias = agg_map
+        .get(field)
+        .or_else(|| agg_map.get(&field.to_lowercase()))?;
+    row.get(alias.as_str()).copied()
 }
 
 /// Apply HAVING `Filter` predicates directly on a `QueryResult`.
@@ -78,7 +103,7 @@ fn eval_having_expr(
 ) -> bool {
     match expr {
         FilterExpr::Comparison { field, op, value } => {
-            if let Some(rv) = row.get(field.as_str()).copied() {
+            if let Some(rv) = lookup_field(row, agg_map, field.as_str()) {
                 let right = sql_value_to_ndb(value);
                 compare_values(rv, *op, &right)
             } else {
@@ -89,7 +114,7 @@ fn eval_having_expr(
         FilterExpr::Or(filters) => filters.iter().any(|f| eval_having_filter(f, row, agg_map)),
         FilterExpr::Not(f) => !eval_having_filter(f, row, agg_map),
         FilterExpr::InList { field, values } => {
-            if let Some(rv) = row.get(field.as_str()).copied() {
+            if let Some(rv) = lookup_field(row, agg_map, field.as_str()) {
                 values.iter().any(|v| {
                     let nv = sql_value_to_ndb(v);
                     compare_values(rv, CompareOp::Eq, &nv)
@@ -99,7 +124,7 @@ fn eval_having_expr(
             }
         }
         FilterExpr::Between { field, low, high } => {
-            if let Some(rv) = row.get(field.as_str()).copied() {
+            if let Some(rv) = lookup_field(row, agg_map, field.as_str()) {
                 let lo = sql_value_to_ndb(low);
                 let hi = sql_value_to_ndb(high);
                 compare_values(rv, CompareOp::Ge, &lo) && compare_values(rv, CompareOp::Le, &hi)
@@ -107,13 +132,11 @@ fn eval_having_expr(
                 true
             }
         }
-        FilterExpr::IsNull { field } => row
-            .get(field.as_str())
-            .map(|v| **v == Value::Null)
+        FilterExpr::IsNull { field } => lookup_field(row, agg_map, field.as_str())
+            .map(|v| *v == Value::Null)
             .unwrap_or(true),
-        FilterExpr::IsNotNull { field } => row
-            .get(field.as_str())
-            .map(|v| **v != Value::Null)
+        FilterExpr::IsNotNull { field } => lookup_field(row, agg_map, field.as_str())
+            .map(|v| *v != Value::Null)
             .unwrap_or(false),
         FilterExpr::Expr(sql_expr) => eval_sql_expr_bool(sql_expr, row, agg_map),
     }
@@ -130,7 +153,9 @@ fn eval_sql_expr_value(
 ) -> Option<Value> {
     match expr {
         SqlExpr::Literal(v) => Some(sql_value_to_ndb(v)),
-        SqlExpr::Column { name, .. } => row.get(name.as_str()).map(|v| (*v).clone()),
+        SqlExpr::Column { name, .. } => {
+            lookup_field(row, agg_map, name.as_str()).map(|v| v.clone())
+        }
         SqlExpr::Function { name, args, .. } => {
             let func_lower = name.to_lowercase();
             let field = args
@@ -141,8 +166,7 @@ fn eval_sql_expr_value(
                     other => format!("{other:?}"),
                 })
                 .unwrap_or_default();
-            let key = format!("{func_lower}:{field}");
-            let alias = agg_map.get(&key)?;
+            let alias = agg_map.get(&format!("{func_lower}({field})"))?;
             row.get(alias.as_str()).map(|v| (*v).clone())
         }
         SqlExpr::BinaryOp { left, op, right } => {

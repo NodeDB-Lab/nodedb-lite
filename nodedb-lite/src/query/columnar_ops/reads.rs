@@ -4,6 +4,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
+use nodedb_physical::physical_plan::SortKeySpec;
 use nodedb_query::ComputedColumn;
 use nodedb_query::scan_filter::ScanFilter;
 use nodedb_types::SurrogateBitmap;
@@ -20,7 +21,13 @@ pub struct ScanParams {
     pub projection: Vec<String>,
     pub limit: usize,
     pub filters_bytes: Vec<u8>,
-    pub sort_keys: Vec<(String, bool)>,
+    /// Sort keys from the physical plan.
+    ///
+    /// Only *stored-column* keys can be applied here — this scan sorts
+    /// materialized rows by matching a key's column name against the result's
+    /// column names, so a computed key (`SortKeySpec::as_column() == None`) has
+    /// no name to match and is skipped, exactly as the Origin executor does.
+    pub sort_keys: Vec<SortKeySpec>,
     pub system_as_of_ms: Option<i64>,
     pub valid_at_ms: Option<i64>,
     pub prefilter: Option<SurrogateBitmap>,
@@ -154,12 +161,21 @@ pub async fn scan<S: StorageEngine>(
 
     if !sort_keys.is_empty() {
         result_rows.sort_by(|a, b| {
-            for (field, ascending) in &sort_keys {
+            for key in &sort_keys {
+                // A computed key has no stored column to match against these
+                // materialized rows; skip it rather than inventing a name.
+                let Some(field) = key.as_column() else {
+                    continue;
+                };
                 let idx = extended_names.iter().position(|n| n == field);
                 let va = idx.and_then(|i| a.get(i)).unwrap_or(&Value::Null);
                 let vb = idx.and_then(|i| b.get(i)).unwrap_or(&Value::Null);
-                let ord = compare_values(va, vb);
-                let ord = if *ascending { ord } else { ord.reverse() };
+                // NULL placement follows the key's NULLS FIRST/LAST setting,
+                // which the sort direction never flips.
+                let ord = match key.order_nulls(va == &Value::Null, vb == &Value::Null) {
+                    Some(ord) => ord,
+                    None => key.direct(compare_values(va, vb)),
+                };
                 if ord != Ordering::Equal {
                     return ord;
                 }

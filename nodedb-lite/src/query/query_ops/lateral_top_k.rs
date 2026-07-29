@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use nodedb_physical::physical_plan::PhysicalPlan;
+use nodedb_physical::physical_plan::SortKeySpec;
 use nodedb_physical::physical_plan::query::JoinProjection;
 use nodedb_query::scan_filter::FilterOp;
 use nodedb_query::scan_filter::ScanFilter;
@@ -36,7 +37,7 @@ pub(crate) async fn execute_lateral_top_k_sql<S: StorageEngine>(
     outer_alias: &str,
     inner_collection: &str,
     inner_filters: &[u8],
-    inner_order_by: &[(String, bool)],
+    inner_order_by: &[SortKeySpec],
     inner_limit: usize,
     correlation_keys: &[(String, String)],
     lateral_alias: &str,
@@ -100,7 +101,7 @@ pub async fn execute_lateral_top_k<S: StorageEngine>(
     outer_alias: &str,
     inner_collection: &str,
     inner_filters: &[u8],
-    inner_order_by: &[(String, bool)],
+    inner_order_by: &[SortKeySpec],
     inner_limit: usize,
     correlation_keys: &[(String, String)],
     lateral_alias: &str,
@@ -183,13 +184,21 @@ pub(crate) async fn execute_nested_plan<S: StorageEngine>(
 
 // ── Sorting ──────────────────────────────────────────────────────────────────
 
-fn sort_rows(rows: &mut [HashMap<String, Value>], order_by: &[(String, bool)]) {
+fn sort_rows(rows: &mut [HashMap<String, Value>], order_by: &[SortKeySpec]) {
     rows.sort_by(|a, b| {
-        for (field, ascending) in order_by {
+        for key in order_by {
+            // Rows here are name-keyed maps, so only a stored-column key can be
+            // looked up; a computed key is skipped, as in the Origin executor.
+            let Some(field) = key.as_column() else {
+                continue;
+            };
             let va = a.get(field).unwrap_or(&Value::Null);
             let vb = b.get(field).unwrap_or(&Value::Null);
-            let ord = compare_values(va, vb);
-            let ord = if *ascending { ord } else { ord.reverse() };
+            // NULL placement is absolute; the direction never flips it.
+            let ord = match key.order_nulls(va == &Value::Null, vb == &Value::Null) {
+                Some(ord) => ord,
+                None => key.direct(compare_values(va, vb)),
+            };
             if ord != std::cmp::Ordering::Equal {
                 return ord;
             }
@@ -268,7 +277,7 @@ mod tests {
             }];
             let mut inner_rows =
                 apply_filters(employees.clone(), &filters).expect("filter evaluation failed");
-            sort_rows(&mut inner_rows, &[("salary".to_string(), false)]);
+            sort_rows(&mut inner_rows, &[SortKeySpec::column("salary", false)]);
             inner_rows.truncate(inner_limit);
             for inner_row in inner_rows {
                 let mut merged = outer_row.clone();
@@ -292,9 +301,9 @@ mod tests {
                 m
             })
             .collect();
-        sort_rows(&mut rows, &[("n".to_string(), true)]);
+        sort_rows(&mut rows, &[SortKeySpec::column("n", true)]);
         assert_eq!(rows[0]["n"], Value::Integer(1));
-        sort_rows(&mut rows, &[("n".to_string(), false)]);
+        sort_rows(&mut rows, &[SortKeySpec::column("n", false)]);
         assert_eq!(rows[0]["n"], Value::Integer(3));
     }
 }
