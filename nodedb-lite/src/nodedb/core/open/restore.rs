@@ -266,13 +266,45 @@ impl<S: StorageEngine> NodeDbLite<S> {
         storage: &Arc<S>,
     ) -> NodeDbResult<(HashMap<String, HnswIndex>, HashMap<String, (String, u32)>)> {
         let mut hnsw_indices = HashMap::new();
-        let Some(collections_bytes) = storage.get(Namespace::Meta, META_HNSW_COLLECTIONS).await?
-        else {
-            return Ok((hnsw_indices, HashMap::new()));
+        // Collections whose index was rebuilt from durable vectors: their
+        // internal ids are freshly assigned, so the persisted `hnsw_id_map`
+        // entries for them are stale and must be replaced, not merged.
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut rebuilt_id_maps: Vec<(String, HashMap<String, (String, u32)>)> = Vec::new();
+
+        // `META_HNSW_COLLECTIONS` is written by `flush`, so on a database that
+        // has taken writes but never flushed it is absent — and those are
+        // precisely the vectors with no segment to restore from. Discovery
+        // therefore starts from the checkpoint list and is UNIONED with the
+        // collections that have durable vectors, so a never-flushed database
+        // still comes back with its indexes.
+        let mut names: Vec<String> = match storage.get(Namespace::Meta, META_HNSW_COLLECTIONS).await
+        {
+            Ok(Some(bytes)) => zerompk::from_msgpack::<Vec<String>>(&bytes).unwrap_or_default(),
+            _ => Vec::new(),
         };
-        let Ok(names) = zerompk::from_msgpack::<Vec<String>>(&collections_bytes) else {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            match crate::engine::vector::durable::list_collections(storage.as_ref()).await {
+                Ok(durable_names) => {
+                    for n in durable_names {
+                        if !names.contains(&n) {
+                            names.push(n);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "listing durable vector collections failed; only checkpointed \
+                         collections will be restored"
+                    );
+                }
+            }
+        }
+        if names.is_empty() {
             return Ok((hnsw_indices, HashMap::new()));
-        };
+        }
 
         // On native targets, check if vector segment operations are available.
         // When yes, the graph blob has empty vector placeholders; we load the
@@ -289,10 +321,27 @@ impl<S: StorageEngine> NodeDbLite<S> {
                         // attach below, which is compiled out on wasm32.
                         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
                         Ok(Some(mut index)) => {
-                            // Attach vector segment backing when available (native pagedb path).
+                            // With segment support, `flush` writes a GRAPH-ONLY
+                            // checkpoint: the node vector bytes in it are empty
+                            // placeholders and the floats live in the
+                            // `vec/hnsw/<name>` segment. So an index whose segment
+                            // cannot be attached holds no vector data at all, and the
+                            // first distance computation panics on a zero-length node
+                            // (`dist_to_node: byte-length mismatch`). Keeping such an
+                            // index is what turned one unreadable segment into a daemon
+                            // that panicked on every query.
+                            //
+                            // The segment is only a DERIVED index, so this is
+                            // recoverable rather than fatal: the authoritative vectors
+                            // are the per-document rows written by
+                            // `engine::vector::durable`, and the index is rebuilt from
+                            // them here. (The CRDT is NOT a source — it carries only
+                            // `embedding_dim`, never the floats, which is why the
+                            // "rebuild from CRDT" this code used to claim could never
+                            // have worked.)
                             #[cfg(not(target_arch = "wasm32"))]
-                            if let Some(ext) = seg_ext {
-                                match ext.open_vector_segment(name).await {
+                            let attached = match seg_ext {
+                                Some(ext) => match ext.open_vector_segment(name).await {
                                     Ok(Some(backing)) => {
                                         use std::sync::Arc;
                                         index.with_backing(Arc::new(backing));
@@ -300,42 +349,75 @@ impl<S: StorageEngine> NodeDbLite<S> {
                                             collection = %name,
                                             "HNSW restored with pagedb vector segment backing"
                                         );
+                                        true
                                     }
-                                    Ok(None) => {
-                                        tracing::debug!(
-                                            collection = %name,
-                                            "no vector segment found; \
-                                             HNSW restored with inline vectors (legacy path)"
-                                        );
-                                    }
+                                    Ok(None) => false,
                                     Err(e) => {
                                         tracing::warn!(
                                             collection = %name,
                                             error = %e,
-                                            "vector segment open failed; \
-                                             HNSW restored with inline vectors"
+                                            "vector segment unreadable; rebuilding HNSW \
+                                             from durable vectors"
                                         );
+                                        false
                                     }
-                                }
+                                },
+                                // No segment support: the checkpoint carries its own
+                                // vectors, so it stands on its own.
+                                None => true,
+                            };
+                            // WASM has no segment path; its checkpoint is self-contained.
+                            #[cfg(target_arch = "wasm32")]
+                            let attached = true;
+
+                            if attached {
+                                hnsw_indices.insert(name.clone(), index);
+                            } else {
+                                #[cfg(not(target_arch = "wasm32"))]
+                                rebuild_into(
+                                    storage,
+                                    name,
+                                    Some((index.dim(), index.params().clone())),
+                                    &mut hnsw_indices,
+                                    &mut rebuilt_id_maps,
+                                )
+                                .await;
                             }
-                            hnsw_indices.insert(name.clone(), index);
                         }
                         Ok(None) | Err(_) => {
                             tracing::warn!(
                                 collection = %name,
-                                "HNSW checkpoint deserialization failed, will rebuild from CRDT"
+                                "HNSW checkpoint unreadable; rebuilding from durable vectors"
                             );
+                            #[cfg(not(target_arch = "wasm32"))]
+                            rebuild_into(
+                                storage,
+                                name,
+                                None,
+                                &mut hnsw_indices,
+                                &mut rebuilt_id_maps,
+                            )
+                            .await;
                         }
                     },
                     None => {
                         tracing::error!(
                             collection = %name,
-                            "HNSW checkpoint CRC32C mismatch — discarding. \
-                             Will rebuild from CRDT document vectors on next vector insert."
+                            "HNSW checkpoint CRC32C mismatch — discarding and rebuilding \
+                             from durable vectors."
                         );
                         let _ = storage.delete(Namespace::Vector, key.as_bytes()).await;
+                        #[cfg(not(target_arch = "wasm32"))]
+                        rebuild_into(storage, name, None, &mut hnsw_indices, &mut rebuilt_id_maps)
+                            .await;
                     }
                 }
+            } else {
+                // No checkpoint at all — a database that took writes but never
+                // flushed. The durable vectors are still on disk, so the index
+                // is built straight from them.
+                #[cfg(not(target_arch = "wasm32"))]
+                rebuild_into(storage, name, None, &mut hnsw_indices, &mut rebuilt_id_maps).await;
             }
         }
 
@@ -372,6 +454,20 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 }
             },
             None => HashMap::new(),
+        };
+
+        // Replace stale id-map entries for any rebuilt collection. Its internal
+        // ids were reassigned during the rebuild, so keeping the persisted ones
+        // would map search hits to the wrong documents.
+        #[cfg(not(target_arch = "wasm32"))]
+        let id_map = {
+            let mut id_map = id_map;
+            for (name, rebuilt) in rebuilt_id_maps {
+                let prefix = format!("{name}:");
+                id_map.retain(|k, _| !k.starts_with(&prefix));
+                id_map.extend(rebuilt);
+            }
+            id_map
         };
 
         Ok((hnsw_indices, id_map))
@@ -454,5 +550,45 @@ impl<S: StorageEngine> NodeDbLite<S> {
             }
         }
         Ok(mgr)
+    }
+}
+
+/// Rebuild `collection` from its durable vectors and record the result.
+///
+/// Shared by every restore path that ends up without a usable index — no
+/// checkpoint, an unreadable checkpoint, or a checkpoint whose vector segment
+/// could not be attached — so all of them recover identically instead of each
+/// inventing its own fallback.
+#[cfg(not(target_arch = "wasm32"))]
+async fn rebuild_into<S: StorageEngine>(
+    storage: &Arc<S>,
+    collection: &str,
+    template: Option<(usize, crate::engine::vector::HnswParams)>,
+    hnsw_indices: &mut HashMap<String, HnswIndex>,
+    rebuilt_id_maps: &mut Vec<(String, HashMap<String, (String, u32)>)>,
+) {
+    match crate::engine::vector::durable::rebuild_index(storage.as_ref(), collection, template)
+        .await
+    {
+        Ok(Some((index, id_map))) => {
+            tracing::info!(
+                collection,
+                vectors = index.len(),
+                "HNSW rebuilt from durable vectors"
+            );
+            hnsw_indices.insert(collection.to_owned(), index);
+            rebuilt_id_maps.push((collection.to_owned(), id_map));
+        }
+        Ok(None) => {
+            tracing::debug!(collection, "no durable vectors; HNSW starts empty");
+        }
+        Err(e) => {
+            tracing::error!(
+                collection,
+                error = %e,
+                "rebuilding HNSW from durable vectors FAILED; dense retrieval is \
+                 unavailable for this collection until the next write"
+            );
+        }
     }
 }

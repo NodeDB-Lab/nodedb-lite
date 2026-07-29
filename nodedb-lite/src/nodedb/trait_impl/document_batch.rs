@@ -149,6 +149,24 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 .await
                 .map_err(NodeDbError::storage)?;
             }
+            // Same durability contract as the single-document path: the
+            // vector is persisted in the same write that makes the document
+            // durable, so the in-memory HNSW below is a derived index rather
+            // than the only copy.
+            if let Some(embedding) = item.embedding
+                && !embedding.is_empty()
+            {
+                let op = crate::engine::vector::durable::put_op(
+                    item.vector_collection,
+                    item.id,
+                    embedding,
+                );
+                self.storage
+                    .batch_write(std::slice::from_ref(&op))
+                    .await
+                    .map_err(NodeDbError::storage)?;
+            }
+
 
             self.index_document_text(item.doc_collection, doc_id, &item.doc.fields);
             self.index_document_sparse(item.doc_collection, doc_id, &item.doc.fields);

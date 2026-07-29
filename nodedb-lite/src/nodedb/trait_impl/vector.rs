@@ -171,6 +171,23 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// lookup) and delete its CRDT document. The HNSW slot is reclaimed lazily
     /// on later inserts; no compaction is performed here.
     pub(super) async fn vector_delete_impl(&self, collection: &str, id: &str) -> NodeDbResult<()> {
+        // Drop the durable row FIRST. It is the source of truth the index is
+        // rebuilt from, so leaving it behind would resurrect a deleted vector
+        // on the next rebuild — the in-memory tombstone below does not survive
+        // one. Ordering also matters: if the process dies between the two, a
+        // surviving durable row would come back, whereas a removed row simply
+        // leaves the tombstoned slot to be rebuilt away.
+        if let Err(e) =
+            crate::engine::vector::durable::remove(&*self.storage, collection, id).await
+        {
+            tracing::warn!(
+                collection,
+                id,
+                error = %e,
+                "removing durable vector failed; it may reappear if the index is rebuilt"
+            );
+        }
+
         let internal_id = {
             let id_map = self.vector_state.vector_id_map.lock_or_recover();
             id_map

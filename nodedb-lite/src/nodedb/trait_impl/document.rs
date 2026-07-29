@@ -208,6 +208,21 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .await
             .map_err(NodeDbError::storage)?;
         }
+        // Make the vector durable in the SAME write that makes the document
+        // durable. Before this, a vector lived only in the in-memory HNSW
+        // until some later flush wrote the segment, so an acknowledged write
+        // could still lose its vector on an unclean exit — and the segment
+        // being the only copy meant an unreadable one was unrecoverable.
+        // Written BEFORE the in-memory index below so the durable row can
+        // never be the thing that is missing after a crash.
+        if !embedding.is_empty() {
+            let op = crate::engine::vector::durable::put_op(vector_collection, id, embedding);
+            self.storage
+                .batch_write(std::slice::from_ref(&op))
+                .await
+                .map_err(NodeDbError::storage)?;
+        }
+
 
         self.index_document_text(doc_collection, &doc_id, &doc.fields);
         self.index_document_sparse(doc_collection, &doc_id, &doc.fields);

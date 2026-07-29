@@ -393,3 +393,89 @@ where
         })
     })
 }
+
+/// Tear down one vector index: its in-memory graph, id-map entries, build
+/// params, codec sidecar, persisted checkpoint, and the durable per-document
+/// vectors it was built from.
+///
+/// The durable rows MUST go too. They are the source of truth the index is
+/// rebuilt from, so leaving them behind would make the next open silently
+/// resurrect the index that was just dropped.
+pub(super) fn vector_drop_index<'a, S>(
+    engine: &'a LiteQueryEngine<S>,
+    index_key: String,
+) -> Result<LitePhysicalFut<'a>, LiteError>
+where
+    S: StorageEngine + 'a,
+{
+    let vector_state = Arc::clone(&engine.vector_state);
+    Ok(Box::pin(async move {
+        let existed = vector_state
+            .hnsw_indices
+            .lock_or_recover()
+            .remove(&index_key)
+            .is_some();
+
+        {
+            let mut map = vector_state.vector_id_map.lock_or_recover();
+            let prefix = format!("{index_key}:");
+            map.retain(|k, _| !k.starts_with(&prefix));
+        }
+        vector_state
+            .per_index_config
+            .lock_or_recover()
+            .remove(&index_key);
+        vector_state
+            .codec_sidecars
+            .lock_or_recover()
+            .remove(&index_key);
+
+        // Persisted checkpoint.
+        let _ = vector_state
+            .storage
+            .delete(
+                nodedb_types::Namespace::Vector,
+                format!("hnsw:{index_key}").as_bytes(),
+            )
+            .await;
+
+        // Durable per-document vectors — see the doc comment above.
+        match crate::engine::vector::durable::load_collection(&*vector_state.storage, &index_key)
+            .await
+        {
+            Ok(rows) => {
+                for (doc_id, _) in rows {
+                    if let Err(e) = crate::engine::vector::durable::remove(
+                        &*vector_state.storage,
+                        &index_key,
+                        &doc_id,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            index_key,
+                            doc_id,
+                            error = %e,
+                            "DropIndex: removing a durable vector failed; it may resurrect \
+                             the dropped index on the next open"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    index_key,
+                    error = %e,
+                    "DropIndex: listing durable vectors failed; some may survive the drop"
+                );
+            }
+        }
+
+        tracing::info!(index_key, existed, "vector index dropped");
+        Ok(nodedb_types::result::QueryResult {
+            columns: Vec::new(),
+            rows: Vec::new(),
+            rows_affected: u64::from(existed),
+        })
+    }))
+}

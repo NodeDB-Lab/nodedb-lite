@@ -22,7 +22,7 @@ use crate::storage::engine::StorageEngine;
 use super::adapter::LitePhysicalFut;
 use super::vector_write::{
     vector_delete_by_id, vector_delete_by_surrogate, vector_direct_upsert, vector_insert,
-    vector_query_stats, vector_set_params,
+    vector_drop_index, vector_query_stats, vector_set_params,
 };
 
 /// Entry point called by `LiteDataPlaneVisitor::vector()`.
@@ -161,6 +161,18 @@ where
                 format!("{collection}:{field_name}")
             };
             vector_set_params(engine, index_key, *m, *ef_construction, metric.clone())
+        }
+
+        VectorOp::DropIndex {
+            collection,
+            field_name,
+        } => {
+            let index_key = if field_name.is_empty() {
+                collection.clone()
+            } else {
+                format!("{collection}:{field_name}")
+            };
+            vector_drop_index(engine, index_key)
         }
 
         // ── C. DirectUpsert ───────────────────────────────────────────────────

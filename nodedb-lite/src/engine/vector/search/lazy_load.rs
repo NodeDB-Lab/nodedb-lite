@@ -56,9 +56,17 @@ pub(super) async fn ensure_index_loaded<S: StorageEngine>(
     };
 
     // On native targets, attach vector segment backing if available.
+    //
+    // With segment backing the checkpoint is GRAPH-ONLY — its node vector bytes
+    // are empty placeholders — so an index whose segment will not attach holds
+    // no vector data and panics in the distance kernels
+    // (`dist_to_node: byte-length mismatch`) on the first search. There are no
+    // "inline vectors" to fall back to on this path, despite what this code
+    // used to say. The segment is a derived index, so the recovery is to
+    // rebuild from the durable per-document vectors instead.
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(ext) = vector_state.storage.as_vector_segment_ext() {
-        match ext.open_vector_segment(index_key).await {
+        let attached = match ext.open_vector_segment(index_key).await {
             Ok(Some(backing)) => {
                 use std::sync::Arc;
                 index.with_backing(Arc::new(backing));
@@ -66,19 +74,57 @@ pub(super) async fn ensure_index_loaded<S: StorageEngine>(
                     index_key,
                     "lazy-load: attached pagedb vector segment backing"
                 );
+                true
             }
-            Ok(None) => {
-                tracing::debug!(
-                    index_key,
-                    "lazy-load: no vector segment found; using inline vectors"
-                );
-            }
+            Ok(None) => false,
             Err(e) => {
                 tracing::warn!(
                     index_key,
                     error = %e,
-                    "lazy-load: vector segment open failed; using inline vectors"
+                    "lazy-load: vector segment unreadable; rebuilding from durable vectors"
                 );
+                false
+            }
+        };
+
+        if !attached {
+            // Snapshot the shape before awaiting: `HnswIndex` holds a `RefCell`
+            // arena, so a borrow held across the await would make this future
+            // non-`Send`.
+            let shape = (index.dim(), index.params().clone());
+            match crate::engine::vector::durable::rebuild_index(
+                &*vector_state.storage,
+                index_key,
+                Some(shape),
+            )
+            .await
+            {
+                Ok(Some((rebuilt, id_map))) => {
+                    tracing::info!(
+                        index_key,
+                        vectors = rebuilt.len(),
+                        "lazy-load: HNSW rebuilt from durable vectors"
+                    );
+                    {
+                        let mut map = vector_state.vector_id_map.lock_or_recover();
+                        let prefix = format!("{index_key}:");
+                        map.retain(|k, _| !k.starts_with(&prefix));
+                        map.extend(id_map);
+                    }
+                    index = rebuilt;
+                }
+                Ok(None) | Err(_) => {
+                    // Nothing durable to rebuild from: publishing the
+                    // vectorless checkpoint would panic on first search, so
+                    // leave the collection unloaded instead.
+                    tracing::warn!(
+                        index_key,
+                        "lazy-load: no durable vectors to rebuild from; \
+                         leaving collection unloaded rather than publishing a \
+                         vectorless index"
+                    );
+                    return Ok(());
+                }
             }
         }
     }
