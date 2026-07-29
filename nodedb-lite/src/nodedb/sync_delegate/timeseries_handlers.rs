@@ -24,10 +24,28 @@ pub(super) async fn pending_timeseries_batches_impl<S: StorageEngine>(
 pub(super) async fn mark_timeseries_batch_in_flight_impl<S: StorageEngine>(
     db: &NodeDbLite<S>,
     stream_seq: u64,
+    batch_id: u64,
     durable_key: Vec<u8>,
 ) {
     if let Some(q) = &db.timeseries_outbound {
-        q.mark_in_flight_by_seq(stream_seq, durable_key).await;
+        q.mark_in_flight_by_seq(stream_seq, batch_id, durable_key)
+            .await;
+    }
+}
+
+/// Retire exactly the batch Origin terminally rejected.
+///
+/// Separate from the `applied_seq` sweep because a rejected batch never
+/// advances the frontier — see `TimeseriesOutbound::ack_in_flight_by_batch_id`.
+pub(super) async fn ack_timeseries_batch_by_id_impl<S: StorageEngine>(
+    db: &NodeDbLite<S>,
+    batch_id: u64,
+) {
+    if let Some(q) = &db.timeseries_outbound
+        && let Some(key) = q.ack_in_flight_by_batch_id(batch_id).await
+        && let Err(e) = q.ack_keys(&[key]).await
+    {
+        tracing::warn!(batch_id, error = %e, "timeseries rejected-batch ack_keys failed");
     }
 }
 

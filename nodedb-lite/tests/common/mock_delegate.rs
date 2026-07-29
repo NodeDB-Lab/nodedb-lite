@@ -199,8 +199,15 @@ impl SyncDelegate for MockDelegate {
     async fn pending_timeseries_batches(&self) -> Vec<(Vec<u8>, PendingTimeseriesBatch)> {
         Vec::new()
     }
-    async fn mark_timeseries_batch_in_flight(&self, _stream_seq: u64, _durable_key: Vec<u8>) {}
+    async fn mark_timeseries_batch_in_flight(
+        &self,
+        _stream_seq: u64,
+        _batch_id: u64,
+        _durable_key: Vec<u8>,
+    ) {
+    }
     async fn ack_timeseries_batches_through_seq(&self, _applied_seq: u64) {}
+    async fn ack_timeseries_batch_by_id(&self, _batch_id: u64) {}
     async fn acknowledge_timeseries_batch(&self, _durable_key: Vec<u8>) {}
     async fn clear_engine_in_flight(&self) {}
 

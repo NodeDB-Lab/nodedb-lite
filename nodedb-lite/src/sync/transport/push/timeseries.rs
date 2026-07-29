@@ -73,9 +73,11 @@ where
             samples = msg.sample_count,
             "sent TimeseriesPush to Origin; awaiting ack before deleting durable entry"
         );
-        // Mark in-flight keyed by seq (TimeseriesAckMsg echoes applied_seq, not batch_id).
+        // Indexed by seq for the cumulative applied_seq path; batch_id is kept
+        // so a terminal rejection (which never advances applied_seq) can retire
+        // exactly this batch.
         delegate
-            .mark_timeseries_batch_in_flight(seq, durable_key)
+            .mark_timeseries_batch_in_flight(seq, batch.batch_id, durable_key)
             .await;
     }
     ControlFlow::Continue(())
@@ -136,6 +138,9 @@ fn encode_batch(
 
     Some(nodedb_types::sync::wire::TimeseriesPushMsg {
         lite_id: lite_id.to_string(),
+        // Echoed verbatim on the ack; the only way a terminal rejection can
+        // name the batch it refused.
+        batch_id: batch.batch_id,
         collection: batch.collection.clone(),
         ts_block: ts_enc.finish(),
         val_block: val_enc.finish(),

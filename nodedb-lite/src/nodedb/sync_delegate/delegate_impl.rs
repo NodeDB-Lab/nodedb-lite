@@ -244,10 +244,16 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         super::timeseries_handlers::pending_timeseries_batches_impl(self).await
     }
 
-    async fn mark_timeseries_batch_in_flight(&self, stream_seq: u64, durable_key: Vec<u8>) {
+    async fn mark_timeseries_batch_in_flight(
+        &self,
+        stream_seq: u64,
+        batch_id: u64,
+        durable_key: Vec<u8>,
+    ) {
         super::timeseries_handlers::mark_timeseries_batch_in_flight_impl(
             self,
             stream_seq,
+            batch_id,
             durable_key,
         )
         .await
@@ -255,6 +261,10 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
 
     async fn ack_timeseries_batches_through_seq(&self, applied_seq: u64) {
         super::timeseries_handlers::ack_timeseries_batches_through_seq_impl(self, applied_seq).await
+    }
+
+    async fn ack_timeseries_batch_by_id(&self, batch_id: u64) {
+        super::timeseries_handlers::ack_timeseries_batch_by_id_impl(self, batch_id).await
     }
 
     async fn acknowledge_timeseries_batch(&self, durable_key: Vec<u8>) {

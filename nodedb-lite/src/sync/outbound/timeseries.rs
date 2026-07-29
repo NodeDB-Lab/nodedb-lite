@@ -56,12 +56,27 @@ pub struct PendingTimeseriesBatch {
 pub struct TimeseriesOutbound<S: StorageEngine> {
     queue: DurableOutboundQueue<S>,
     ids: AtomicU64,
-    /// stream_seq → durable_key for entries sent but not yet acked by Origin.
+    /// stream_seq → in-flight record for entries sent but not yet acked.
     ///
-    /// Keyed by stream_seq rather than batch_id because `TimeseriesAckMsg`
-    /// carries `applied_seq` but not `batch_id`; on ack we clear all entries
-    /// whose seq ≤ applied_seq.
-    in_flight: Mutex<HashMap<u64, Vec<u8>>>,
+    /// Keyed by stream_seq because the common success path retires
+    /// cumulatively: `TimeseriesAckMsg::applied_seq` is a producer frontier, so
+    /// an ack clears every entry with seq ≤ applied_seq.
+    ///
+    /// Each record ALSO carries its `batch_id`, because that frontier cannot
+    /// name a *terminally rejected* batch: a rejected batch never applied, so
+    /// it never advances `applied_seq`, and a seq-only map leaves it queued to
+    /// be re-sent forever. See [`TimeseriesOutbound::ack_in_flight_by_batch_id`].
+    in_flight: Mutex<HashMap<u64, InFlightBatch>>,
+}
+
+/// A batch sent to Origin and awaiting its ack.
+#[derive(Debug, Clone)]
+struct InFlightBatch {
+    /// Echoed back on `TimeseriesAckMsg::batch_id`; identifies this batch
+    /// specifically, which the cumulative `applied_seq` frontier cannot.
+    batch_id: u64,
+    /// Durable queue key, deleted once Origin resolves the batch.
+    durable_key: Vec<u8>,
 }
 
 impl<S: StorageEngine> TimeseriesOutbound<S> {
@@ -118,7 +133,7 @@ impl<S: StorageEngine> TimeseriesOutbound<S> {
         let pairs = self.queue.drain_batch(limit).await?;
         let mut out = Vec::with_capacity(pairs.len());
         for (key, payload) in pairs {
-            if in_flight.values().any(|k| k == &key) {
+            if in_flight.values().any(|f| f.durable_key == key) {
                 continue;
             }
             let batch: PendingTimeseriesBatch =
@@ -132,10 +147,22 @@ impl<S: StorageEngine> TimeseriesOutbound<S> {
 
     /// Record that a batch has been sent to Origin and is awaiting its ack.
     ///
-    /// Keyed by `stream_seq` because `TimeseriesAckMsg` echoes `applied_seq`
-    /// but not `batch_id`.
-    pub async fn mark_in_flight_by_seq(&self, stream_seq: u64, durable_key: Vec<u8>) {
-        self.in_flight.lock().await.insert(stream_seq, durable_key);
+    /// Indexed by `stream_seq` for the cumulative success path, and carrying
+    /// `batch_id` so a terminally rejected batch can still be named — see the
+    /// `in_flight` field docs.
+    pub async fn mark_in_flight_by_seq(
+        &self,
+        stream_seq: u64,
+        batch_id: u64,
+        durable_key: Vec<u8>,
+    ) {
+        self.in_flight.lock().await.insert(
+            stream_seq,
+            InFlightBatch {
+                batch_id,
+                durable_key,
+            },
+        );
     }
 
     /// Remove all in-flight records with seq ≤ `applied_seq` and return their
@@ -150,7 +177,29 @@ impl<S: StorageEngine> TimeseriesOutbound<S> {
         to_ack
             .into_iter()
             .filter_map(|seq| guard.remove(&seq))
+            .map(|f| f.durable_key)
             .collect()
+    }
+
+    /// Remove the in-flight record for exactly `batch_id` and return its
+    /// durable key.
+    ///
+    /// This is the retire path for a batch Origin has TERMINALLY rejected.
+    /// [`Self::ack_in_flight_through_seq`] cannot serve that case: a rejected
+    /// batch never applied, so it never advances `applied_seq`, and its seq
+    /// sits *above* the frontier — the cumulative sweep would skip it and the
+    /// push loop would re-send a batch Origin has permanently refused, forever.
+    ///
+    /// Returns `None` when no in-flight record matches (e.g. a duplicate ack,
+    /// or one arriving after a reconnect cleared the map), which callers must
+    /// treat as "already retired", not as an error.
+    pub async fn ack_in_flight_by_batch_id(&self, batch_id: u64) -> Option<Vec<u8>> {
+        let mut guard = self.in_flight.lock().await;
+        let seq = guard
+            .iter()
+            .find(|(_, f)| f.batch_id == batch_id)
+            .map(|(seq, _)| *seq)?;
+        guard.remove(&seq).map(|f| f.durable_key)
     }
 
     /// Clear all in-flight records on reconnect so entries are re-drained.
@@ -243,6 +292,41 @@ mod tests {
         q.ack_keys(&keys).await.unwrap();
 
         assert_eq!(q.len().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_batch_is_retirable_even_though_the_frontier_never_reached_it() {
+        // The reason in-flight records carry `batch_id` at all. A terminally
+        // rejected batch never applied, so `applied_seq` stays below its seq and
+        // the cumulative sweep can never retire it. Without retire-by-batch-id
+        // the durable entry stays queued and the push loop re-sends a batch
+        // Origin has permanently refused, forever.
+        let q = make_queue().await;
+        q.mark_in_flight_by_seq(5, 100, b"key-5".to_vec()).await;
+        q.mark_in_flight_by_seq(6, 101, b"key-6".to_vec()).await;
+
+        // Nothing applied: the producer frontier still sits below both batches.
+        assert!(
+            q.ack_in_flight_through_seq(4).await.is_empty(),
+            "the cumulative sweep must not retire a batch the frontier never reached"
+        );
+
+        assert_eq!(
+            q.ack_in_flight_by_batch_id(101).await,
+            Some(b"key-6".to_vec()),
+            "the rejected batch must be retirable by the id the ack echoed"
+        );
+        // Only the rejected batch is retired; its neighbour stays in flight.
+        assert_eq!(
+            q.ack_in_flight_by_batch_id(101).await,
+            None,
+            "a duplicate rejection ack must be a no-op, not a second retirement"
+        );
+        assert_eq!(
+            q.ack_in_flight_through_seq(5).await,
+            vec![b"key-5".to_vec()],
+            "the untouched batch must still retire normally once the frontier advances"
+        );
     }
 
     #[tokio::test]

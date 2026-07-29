@@ -120,6 +120,11 @@ impl TimeseriesEngine {
 
         Some(nodedb_types::sync::wire::TimeseriesPushMsg {
             lite_id: lite_id.to_string(),
+            // Zero like the other correlation fields below (`producer_id`,
+            // `epoch`, `seq`): this builder does not go through the durable
+            // outbound queue, so nothing tracks or acks the batch it returns.
+            // The retire-by-batch-id path applies to `push/timeseries.rs`.
+            batch_id: 0,
             collection: collection.to_string(),
             ts_block: ts_enc.finish(),
             val_block: val_enc.finish(),

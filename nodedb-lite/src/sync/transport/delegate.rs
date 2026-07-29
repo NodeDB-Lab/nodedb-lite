@@ -183,11 +183,23 @@ pub trait SyncDelegate: Send + Sync + 'static {
     async fn pending_timeseries_batches(&self) -> Vec<(Vec<u8>, PendingTimeseriesBatch)>;
     /// Record that a timeseries batch has been sent and is awaiting Origin ack.
     ///
-    /// Keyed by `stream_seq` because `TimeseriesAckMsg` echoes `applied_seq`
-    /// but not `batch_id`.
-    async fn mark_timeseries_batch_in_flight(&self, stream_seq: u64, durable_key: Vec<u8>);
+    /// Indexed by `stream_seq` for the cumulative `applied_seq` success path,
+    /// and carrying `batch_id` so a terminally rejected batch — which never
+    /// advances that frontier — can still be named and retired.
+    async fn mark_timeseries_batch_in_flight(
+        &self,
+        stream_seq: u64,
+        batch_id: u64,
+        durable_key: Vec<u8>,
+    );
     /// On Origin ack: delete all durable entries whose seq ≤ `applied_seq`.
     async fn ack_timeseries_batches_through_seq(&self, applied_seq: u64);
+    /// On terminal rejection: delete the durable entry for exactly `batch_id`.
+    ///
+    /// Required alongside the sweep above because a rejected batch's seq sits
+    /// *above* `applied_seq` (it never applied), so the cumulative path can
+    /// never retire it and the push loop would re-send it indefinitely.
+    async fn ack_timeseries_batch_by_id(&self, batch_id: u64);
     /// Delete the durable entry directly (for empty/un-encodable batches).
     async fn acknowledge_timeseries_batch(&self, durable_key: Vec<u8>);
 

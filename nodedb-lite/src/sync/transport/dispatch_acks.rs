@@ -513,27 +513,26 @@ pub(super) async fn handle_timeseries_ack(
         AckStatus::Rejected { reason } => {
             // Terminal failure: per the wire contract this batch "will never
             // apply". Unlike `Fenced` and `Gap`, both of which are recoverable
-            // by re-sending, there is nothing to retry. NOTE: unlike the other
-            // engine acks, `TimeseriesAckMsg` carries no batch_id, so there is
-            // no way to retire *only* the rejected batch — the best available
-            // call is the same durable-through-seq retirement the success arm
-            // uses. If the rejected batch's own stream seq is beyond
-            // `applied_seq` (the common case, since it never applied), this
-            // call will NOT retire it and the durable entry stays queued for
-            // the push loop to keep re-sending a batch Origin will never
-            // accept. Logged at ERROR with Origin's reason so the loss (or
-            // the stuck-retry, if retirement misses it) is never silent.
+            // by re-sending, there is nothing to retry — so it is retired by
+            // `batch_id`, naming exactly the batch Origin refused.
+            //
+            // The `applied_seq` sweep the success arm uses CANNOT serve this
+            // case: a rejected batch never applied, so it never advances the
+            // frontier and its seq sits above `applied_seq`. Retiring through
+            // the frontier would skip it, and the push loop would re-send a
+            // batch Origin has permanently refused, forever.
+            //
+            // Retiring DOES drop the write, so it is logged at ERROR with
+            // Origin's reason rather than lost silently.
             tracing::error!(
                 collection = %ack.collection,
+                batch_id = ack.batch_id,
                 applied_seq = ack.applied_seq,
                 reason = %reason,
                 "TimeseriesAck: Origin permanently rejected this batch; \
-                 dropping durably-applied entries through applied_seq — the \
-                 write is LOST and will not retry"
+                 dropping it — the write is LOST and will not retry"
             );
-            delegate
-                .ack_timeseries_batches_through_seq(ack.applied_seq)
-                .await;
+            delegate.ack_timeseries_batch_by_id(ack.batch_id).await;
         }
     }
 }
