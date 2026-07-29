@@ -40,36 +40,65 @@ async fn encrypted_value_survives_reopen_with_same_passphrase() {
     }
 }
 
-/// Reopening with a DIFFERENT passphrase must not surface the original data.
-/// The wrong KEK fails page authentication; the native recovery path renames
-/// the unreadable database aside and starts fresh, so the secret value is not
-/// readable under the wrong key.
+/// Write `top-secret` under the `right-key` passphrase and close.
+async fn seed_encrypted_store(path: &std::path::Path) {
+    let storage = PagedbStorageDefault::open(path, Encryption::passphrase("right-key"))
+        .await
+        .expect("open encrypted");
+    let db = NodeDbLite::open(storage, 1).await.expect("open db");
+    db.kv_put("col", "key", b"top-secret")
+        .await
+        .expect("kv_put");
+    db.kv_flush().await.expect("kv_flush");
+}
+
+/// Opening with a DIFFERENT passphrase must fail rather than yield a store.
+///
+/// The wrong KEK cannot authenticate the database header, and the open is
+/// refused. That refusal *is* the confidentiality guarantee: there is no
+/// handle to read through, so the ciphertext cannot be surfaced as plaintext.
 #[tokio::test]
 async fn wrong_passphrase_does_not_reveal_data() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("enc_wrong.pagedb");
+    seed_encrypted_store(&path).await;
 
-    {
-        let storage = PagedbStorageDefault::open(&path, Encryption::passphrase("right-key"))
-            .await
-            .expect("open encrypted");
-        let db = NodeDbLite::open(storage, 1).await.expect("open db");
-        db.kv_put("col", "key", b"top-secret")
-            .await
-            .expect("kv_put");
-        db.kv_flush().await.expect("kv_flush");
-    }
+    let opened = PagedbStorageDefault::open(&path, Encryption::passphrase("WRONG-key")).await;
 
-    // Reopen with the wrong passphrase: the original plaintext must never be
-    // returned. (Recovery may yield a fresh empty store rather than an error.)
-    let storage = PagedbStorageDefault::open(&path, Encryption::passphrase("WRONG-key"))
+    assert!(
+        opened.is_err(),
+        "a store must not open under a passphrase that cannot authenticate its header"
+    );
+}
+
+/// A failed unlock must leave the store intact and still openable.
+///
+/// A wrong passphrase is overwhelmingly a typo, not corruption, so the failed
+/// attempt must not treat the database as damaged — renaming it aside and
+/// starting fresh would silently destroy the user's data on a mistyped key.
+/// The proof is that the correct passphrase still opens it afterwards and the
+/// original value is unchanged.
+#[tokio::test]
+async fn a_failed_unlock_leaves_the_store_intact() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("enc_retry.pagedb");
+    seed_encrypted_store(&path).await;
+
+    let failed = PagedbStorageDefault::open(&path, Encryption::passphrase("WRONG-key")).await;
+    assert!(
+        failed.is_err(),
+        "the wrong passphrase must not open the store"
+    );
+    drop(failed);
+
+    let storage = PagedbStorageDefault::open(&path, Encryption::passphrase("right-key"))
         .await
-        .expect("reopen attempt");
-    let db = NodeDbLite::open(storage, 1).await.expect("open db");
+        .expect("the correct passphrase must still open the store after a failed attempt");
+    let db = NodeDbLite::open(storage, 1).await.expect("reopen db");
     let got = db.kv_get("col", "key").await.expect("kv_get");
-    assert_ne!(
+    assert_eq!(
         got.as_deref(),
         Some(b"top-secret".as_slice()),
-        "the secret value must not be readable under a different passphrase"
+        "a failed unlock must not discard or alter the stored data"
     );
 }
