@@ -193,12 +193,71 @@ impl Drop for OriginServer {
     }
 }
 
+/// An established sync WebSocket session with Origin.
+pub type OriginWs =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Announce a CRDT document collection to Origin, materializing it in the
+/// catalog under the session's tenant.
+///
+/// Origin resolves and authorizes every delta against its target collection, so
+/// a push to a collection that was never created is refused with "collection
+/// not found" — masking whatever behaviour the test meant to exercise, and
+/// surfacing as a misleading `PERMISSION_DENIED` compensation hint.
+///
+/// A real Lite client always announces before its first delta (see
+/// `ensure_collection_announced` in the sync push path), so tests that
+/// hand-roll frames over a raw socket must do the same to be representative.
+///
+/// The descriptor mirrors what Lite's own announce builds: tenant 1 (the trust
+/// identity the interop handshake authenticates as) and the default database,
+/// because deltas apply under `DatabaseId::DEFAULT` and registering the
+/// collection anywhere else would leave it invisible to the apply path. Origin
+/// rejects a descriptor whose tenant differs from the session's, so these are
+/// not free parameters.
+///
+/// The announce is create-only and Origin replies with no frame; frames are
+/// processed in order per session, so a delta sent afterwards on the same
+/// socket always observes the collection.
+pub async fn announce_collection(ws: &mut OriginWs, name: &str) {
+    use futures::SinkExt;
+    use nodedb_types::sync::wire::{
+        CollectionDescriptor, CollectionSchemaSyncMsg, SyncFrame, SyncMessageType,
+    };
+    use tokio_tungstenite::tungstenite::Message;
+
+    let msg = CollectionSchemaSyncMsg {
+        descriptor: CollectionDescriptor {
+            tenant_id: 1,
+            database_id: nodedb_types::id::DatabaseId::DEFAULT,
+            name: name.to_string(),
+            collection_type: nodedb_types::collection::CollectionType::document(),
+            bitemporal: false,
+            // These sessions push Loro deltas, which only apply to a
+            // CRDT-backed collection.
+            crdt: true,
+            fields: Vec::new(),
+            primary: nodedb_types::PrimaryEngine::Document,
+            vector_primary: None,
+            partition_strategy: nodedb_types::PartitionStrategy::default(),
+            declared_primary_key: None,
+            descriptor_version: 1,
+        },
+        creation_hlc: nodedb_types::hlc::Hlc::ZERO,
+    };
+
+    let bytes = SyncFrame::try_encode(SyncMessageType::CollectionSchema, &msg)
+        .expect("encode CollectionSchema frame")
+        .to_bytes();
+    ws.send(Message::Binary(bytes.into()))
+        .await
+        .expect("send CollectionSchema announce");
+}
+
 /// Connect to Origin and complete the sync handshake in trust mode (empty JWT).
 ///
 /// Panics if the connection or handshake fails.
-pub async fn connect_and_handshake(
-    ws_url: &str,
-) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+pub async fn connect_and_handshake(ws_url: &str) -> OriginWs {
     use std::time::Duration;
 
     use futures::SinkExt;

@@ -18,7 +18,7 @@ use nodedb_types::sync::wire::{
 use nodedb_types::wire_version::WIRE_FORMAT_VERSION;
 use tokio_tungstenite::tungstenite::Message;
 
-use common::origin::{OriginServer, connect_and_handshake};
+use common::origin::{OriginServer, announce_collection, connect_and_handshake};
 
 // ── helper ────────────────────────────────────────────────────────────────────
 
@@ -67,6 +67,7 @@ async fn real_loro_delta_gets_acked() {
         return;
     };
     let mut ws = connect_and_handshake(_server.ws_url).await;
+    announce_collection(&mut ws, "interop_test").await;
 
     let mut engine = CrdtEngine::new(1001).expect("create CrdtEngine");
     engine
@@ -117,6 +118,10 @@ async fn empty_delta_is_rejected() {
         return;
     };
     let mut ws = connect_and_handshake(_server.ws_url).await;
+    // Announce so the rejection can only be the empty payload. Without the
+    // collection, Origin refuses with "collection not found" and the test
+    // would pass even if the empty-delta check were removed.
+    announce_collection(&mut ws, "interop_test").await;
 
     let msg = DeltaPushMsg {
         collection: "interop_test".into(),
@@ -151,6 +156,9 @@ async fn crc_mismatch_delta_is_rejected() {
         return;
     };
     let mut ws = connect_and_handshake(_server.ws_url).await;
+    // Announce so the rejection can only be the checksum mismatch — see the
+    // note in `empty_delta_is_rejected`.
+    announce_collection(&mut ws, "interop_test").await;
 
     let payload = vec![1u8, 2, 3, 4, 5];
     let bad_checksum = 0xDEAD_BEEFu32;
@@ -188,6 +196,7 @@ async fn sequential_deltas_all_acked() {
         return;
     };
     let mut ws = connect_and_handshake(_server.ws_url).await;
+    announce_collection(&mut ws, "interop_seq").await;
 
     let mut engine = CrdtEngine::new(1004).expect("create CrdtEngine");
 

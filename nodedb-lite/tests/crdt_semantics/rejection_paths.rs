@@ -20,7 +20,7 @@ use super::helpers::{
     assert_hint_code, crc32c_of, expect_reject, minimal_delta_payload, push_delta, push_msg_no_crc,
     push_msg_with_crc,
 };
-use crate::common::origin::{OriginServer, connect_and_handshake};
+use crate::common::origin::{OriginServer, announce_collection, connect_and_handshake};
 use futures::SinkExt;
 use nodedb_types::sync::wire::{DeltaPushMsg, SyncFrame, SyncMessageType};
 use tokio_tungstenite::tungstenite::Message;
@@ -179,6 +179,7 @@ async fn origin_unique_violation_produces_compensation_hint() {
         return;
     };
     let mut ws = connect_and_handshake(_server.ws_url).await;
+    announce_collection(&mut ws, "users_unique").await;
 
     // Build a Loro-style delta payload with a CRDT upsert for field "email".
     // The raw bytes are a minimal Loro export_updates snapshot. We use the
@@ -226,6 +227,7 @@ async fn origin_fk_missing_produces_compensation_hint() {
         return;
     };
     let mut ws = connect_and_handshake(_server.ws_url).await;
+    announce_collection(&mut ws, "posts_fk").await;
 
     // Delta for a "posts" document referencing a "user-nonexistent" parent.
     let delta = build_crdt_delta_for_field("author_id", "user-nonexistent", 3005);

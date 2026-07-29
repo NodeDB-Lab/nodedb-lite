@@ -16,7 +16,7 @@ use nodedb_lite::engine::crdt::CrdtEngine;
 use nodedb_types::sync::wire::{DeltaPushMsg, SyncFrame, SyncMessageType};
 use tokio_tungstenite::tungstenite::Message;
 
-use common::origin::{OriginServer, connect_and_handshake};
+use common::origin::{OriginServer, announce_collection, connect_and_handshake};
 
 async fn push_delta(
     ws: &mut tokio_tungstenite::WebSocketStream<
@@ -49,15 +49,27 @@ async fn push_delta(
         .await
         .expect("send DeltaPush");
 
-    let resp = tokio::time::timeout(Duration::from_secs(10), ws.next())
-        .await
-        .expect("timeout")
-        .expect("stream closed")
-        .expect("WebSocket read error");
+    // The sync channel is full-duplex: Origin may interleave server-initiated
+    // frames (a `CollectionSchema` descriptor fan-out, a keepalive) ahead of
+    // the ack for the push just sent. A real client demultiplexes by frame type
+    // rather than assuming the next frame is its response, so skip anything
+    // that is not a terminal outcome for this delta.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let resp = tokio::time::timeout_at(deadline, ws.next())
+            .await
+            .expect("timeout")
+            .expect("stream closed")
+            .expect("WebSocket read error");
 
-    SyncFrame::from_bytes(resp.into_data().as_ref())
-        .expect("decode frame")
-        .msg_type
+        let Some(frame) = SyncFrame::from_bytes(resp.into_data().as_ref()) else {
+            continue;
+        };
+        match frame.msg_type {
+            SyncMessageType::DeltaAck | SyncMessageType::DeltaReject => return frame.msg_type,
+            _ => continue,
+        }
+    }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -120,6 +132,7 @@ async fn replay_dedup_returns_ack() {
     // First connection: send the delta, receive ack.
     {
         let mut ws = connect_and_handshake(_server.ws_url).await;
+        announce_collection(&mut ws, "reconnect_test").await;
         let msg_type = push_delta(
             &mut ws,
             "reconnect_test",
@@ -143,6 +156,7 @@ async fn replay_dedup_returns_ack() {
     // Second connection: replay the same mutation_id — must also get DeltaAck.
     {
         let mut ws = connect_and_handshake(_server.ws_url).await;
+        announce_collection(&mut ws, "reconnect_test").await;
         let msg_type = push_delta(
             &mut ws,
             "reconnect_test",
@@ -186,6 +200,7 @@ async fn new_mutations_after_reconnect_are_processed() {
         let delta_bytes = engine.pending_deltas()[0].delta_bytes.clone();
 
         let mut ws = connect_and_handshake(_server.ws_url).await;
+        announce_collection(&mut ws, "reconnect_progress").await;
         let msg_type = push_delta(
             &mut ws,
             "reconnect_progress",
@@ -217,6 +232,7 @@ async fn new_mutations_after_reconnect_are_processed() {
             .expect("delta for doc-2");
 
         let mut ws = connect_and_handshake(_server.ws_url).await;
+        announce_collection(&mut ws, "reconnect_progress").await;
         let msg_type = push_delta(
             &mut ws,
             "reconnect_progress",

@@ -23,7 +23,7 @@ use nodedb_types::sync::wire::{
 use tokio_tungstenite::tungstenite::Message;
 
 use super::helpers::{Ws, minimal_hs, raw_connect, recv_ack, send_hs};
-use crate::common::origin::OriginServer;
+use crate::common::origin::{OriginServer, announce_collection};
 
 /// Send a `DeltaPush` frame and read until the matching `DeltaAck` (failing
 /// loudly on a `DeltaReject`).
@@ -84,6 +84,8 @@ async fn fenced_resend_same_seq_is_deduped_by_gate() {
         ack.producer_id, 0,
         "fenced handshake must assign a non-zero producer_id (gate is live, not the no-op sentinel)"
     );
+
+    announce_collection(&mut ws, "dedup_col").await;
 
     // Build a real Loro delta.
     let mut engine = CrdtEngine::new(7001).expect("create CrdtEngine");
