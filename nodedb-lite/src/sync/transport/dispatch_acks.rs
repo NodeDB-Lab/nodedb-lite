@@ -59,6 +59,22 @@ pub(super) async fn handle_columnar_insert_ack(
             // via its idempotent gate.
             delegate.clear_engine_in_flight().await;
         }
+        AckStatus::Rejected { reason } => {
+            // Terminal failure: per the wire contract this batch "will never
+            // apply". Unlike `Fenced` and `Gap`, both of which are recoverable
+            // by re-sending, there is nothing to retry — leaving it in flight
+            // would stall the queue behind a batch Origin has permanently
+            // refused. Retiring it DOES drop the write, so it is logged at
+            // ERROR with Origin's reason rather than lost silently.
+            tracing::error!(
+                collection = %ack.collection,
+                batch_id = ack.batch_id,
+                reason = %reason,
+                "ColumnarInsertAck: Origin permanently rejected this batch; \
+                 dropping it — the write is LOST and will not retry"
+            );
+            delegate.ack_columnar_batch_in_flight(ack.batch_id).await;
+        }
     }
 }
 
@@ -105,6 +121,22 @@ pub(super) async fn handle_vector_insert_ack(
                 "VectorInsertAck: sequence gap detected by Origin; re-draining un-acked entries from expected"
             );
             delegate.clear_engine_in_flight().await;
+        }
+        AckStatus::Rejected { reason } => {
+            // Terminal failure: per the wire contract this insert "will never
+            // apply". Unlike `Fenced` and `Gap`, both of which are recoverable
+            // by re-sending, there is nothing to retry — leaving it in flight
+            // would stall the queue behind an insert Origin has permanently
+            // refused. Retiring it DOES drop the write, so it is logged at
+            // ERROR with Origin's reason rather than lost silently.
+            tracing::error!(
+                collection = %ack.collection,
+                batch_id = ack.batch_id,
+                reason = %reason,
+                "VectorInsertAck: Origin permanently rejected this insert; \
+                 dropping it — the write is LOST and will not retry"
+            );
+            delegate.ack_vector_insert_in_flight(ack.batch_id).await;
         }
     }
     if !ack.accepted {
@@ -161,6 +193,22 @@ pub(super) async fn handle_vector_delete_ack(
             );
             delegate.clear_engine_in_flight().await;
         }
+        AckStatus::Rejected { reason } => {
+            // Terminal failure: per the wire contract this delete "will never
+            // apply". Unlike `Fenced` and `Gap`, both of which are recoverable
+            // by re-sending, there is nothing to retry — leaving it in flight
+            // would stall the queue behind a delete Origin has permanently
+            // refused. Retiring it DOES drop the write, so it is logged at
+            // ERROR with Origin's reason rather than lost silently.
+            tracing::error!(
+                collection = %ack.collection,
+                batch_id = ack.batch_id,
+                reason = %reason,
+                "VectorDeleteAck: Origin permanently rejected this delete; \
+                 dropping it — the write is LOST and will not retry"
+            );
+            delegate.ack_vector_delete_in_flight(ack.batch_id).await;
+        }
     }
 }
 
@@ -208,6 +256,22 @@ pub(super) async fn handle_fts_index_ack(
             );
             delegate.clear_engine_in_flight().await;
         }
+        AckStatus::Rejected { reason } => {
+            // Terminal failure: per the wire contract this index op "will
+            // never apply". Unlike `Fenced` and `Gap`, both of which are
+            // recoverable by re-sending, there is nothing to retry — leaving
+            // it in flight would stall the queue behind an entry Origin has
+            // permanently refused. Retiring it DOES drop the write, so it is
+            // logged at ERROR with Origin's reason rather than lost silently.
+            tracing::error!(
+                collection = %ack.collection,
+                batch_id = ack.batch_id,
+                reason = %reason,
+                "FtsIndexAck: Origin permanently rejected this index op; \
+                 dropping it — the write is LOST and will not retry"
+            );
+            delegate.ack_fts_index_in_flight(ack.batch_id).await;
+        }
     }
 }
 
@@ -254,6 +318,22 @@ pub(super) async fn handle_fts_delete_ack(
                 "FtsDeleteAck: sequence gap detected by Origin; re-draining un-acked entries from expected"
             );
             delegate.clear_engine_in_flight().await;
+        }
+        AckStatus::Rejected { reason } => {
+            // Terminal failure: per the wire contract this delete op "will
+            // never apply". Unlike `Fenced` and `Gap`, both of which are
+            // recoverable by re-sending, there is nothing to retry — leaving
+            // it in flight would stall the queue behind an entry Origin has
+            // permanently refused. Retiring it DOES drop the write, so it is
+            // logged at ERROR with Origin's reason rather than lost silently.
+            tracing::error!(
+                collection = %ack.collection,
+                batch_id = ack.batch_id,
+                reason = %reason,
+                "FtsDeleteAck: Origin permanently rejected this delete op; \
+                 dropping it — the write is LOST and will not retry"
+            );
+            delegate.ack_fts_delete_in_flight(ack.batch_id).await;
         }
     }
 }
@@ -303,6 +383,22 @@ pub(super) async fn handle_spatial_insert_ack(
             );
             delegate.clear_engine_in_flight().await;
         }
+        AckStatus::Rejected { reason } => {
+            // Terminal failure: per the wire contract this insert "will never
+            // apply". Unlike `Fenced` and `Gap`, both of which are recoverable
+            // by re-sending, there is nothing to retry — leaving it in flight
+            // would stall the queue behind an insert Origin has permanently
+            // refused. Retiring it DOES drop the write, so it is logged at
+            // ERROR with Origin's reason rather than lost silently.
+            tracing::error!(
+                collection = %ack.collection,
+                batch_id = ack.batch_id,
+                reason = %reason,
+                "SpatialInsertAck: Origin permanently rejected this insert; \
+                 dropping it — the write is LOST and will not retry"
+            );
+            delegate.ack_spatial_insert_in_flight(ack.batch_id).await;
+        }
     }
 }
 
@@ -351,6 +447,22 @@ pub(super) async fn handle_spatial_delete_ack(
             );
             delegate.clear_engine_in_flight().await;
         }
+        AckStatus::Rejected { reason } => {
+            // Terminal failure: per the wire contract this delete "will never
+            // apply". Unlike `Fenced` and `Gap`, both of which are recoverable
+            // by re-sending, there is nothing to retry — leaving it in flight
+            // would stall the queue behind a delete Origin has permanently
+            // refused. Retiring it DOES drop the write, so it is logged at
+            // ERROR with Origin's reason rather than lost silently.
+            tracing::error!(
+                collection = %ack.collection,
+                batch_id = ack.batch_id,
+                reason = %reason,
+                "SpatialDeleteAck: Origin permanently rejected this delete; \
+                 dropping it — the write is LOST and will not retry"
+            );
+            delegate.ack_spatial_delete_in_flight(ack.batch_id).await;
+        }
     }
 }
 
@@ -397,6 +509,31 @@ pub(super) async fn handle_timeseries_ack(
                 "TimeseriesAck: sequence gap detected by Origin; re-draining un-acked entries from expected"
             );
             delegate.clear_engine_in_flight().await;
+        }
+        AckStatus::Rejected { reason } => {
+            // Terminal failure: per the wire contract this batch "will never
+            // apply". Unlike `Fenced` and `Gap`, both of which are recoverable
+            // by re-sending, there is nothing to retry. NOTE: unlike the other
+            // engine acks, `TimeseriesAckMsg` carries no batch_id, so there is
+            // no way to retire *only* the rejected batch — the best available
+            // call is the same durable-through-seq retirement the success arm
+            // uses. If the rejected batch's own stream seq is beyond
+            // `applied_seq` (the common case, since it never applied), this
+            // call will NOT retire it and the durable entry stays queued for
+            // the push loop to keep re-sending a batch Origin will never
+            // accept. Logged at ERROR with Origin's reason so the loss (or
+            // the stuck-retry, if retirement misses it) is never silent.
+            tracing::error!(
+                collection = %ack.collection,
+                applied_seq = ack.applied_seq,
+                reason = %reason,
+                "TimeseriesAck: Origin permanently rejected this batch; \
+                 dropping durably-applied entries through applied_seq — the \
+                 write is LOST and will not retry"
+            );
+            delegate
+                .ack_timeseries_batches_through_seq(ack.applied_seq)
+                .await;
         }
     }
 }

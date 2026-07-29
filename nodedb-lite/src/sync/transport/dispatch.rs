@@ -105,6 +105,24 @@ pub(super) async fn dispatch_frame(
                              retained for re-send"
                         );
                     }
+                    AckStatus::Rejected { reason } => {
+                        // Terminal failure: per the wire contract this delta
+                        // "will never apply". Unlike `Fenced` (recoverable once
+                        // the producer identity is re-established) and `Gap`
+                        // (recoverable by re-sending at the right seq), there is
+                        // nothing to retry — retaining it would stall the queue
+                        // forever behind a message Origin has permanently
+                        // refused. So it is retired, which DOES drop the write:
+                        // logged at ERROR with Origin's reason so the loss is
+                        // never silent.
+                        tracing::error!(
+                            mutation_id = ack.mutation_id,
+                            reason = %reason,
+                            "DeltaAck: Origin permanently rejected this delta; \
+                             dropping it — the write is LOST and will not retry"
+                        );
+                        delegate.acknowledge(ack.mutation_id);
+                    }
                 }
                 client.handle_delta_ack(&ack).await;
             } else {
