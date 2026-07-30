@@ -14,20 +14,20 @@ homepage = "https://nodedb.dev"
 [workspace.dependencies]
 # Internal
 nodedb-lite = { path = "nodedb-lite", version = "0.1.0", default-features = false }
-nodedb-types = { version = "0.4" }
-nodedb-client = { version = "0.4" }
-nodedb-codec = { version = "0.4" }
-nodedb-crdt = { version = "0.4" }
-nodedb-query = { version = "0.4" }
-nodedb-spatial = { version = "0.4" }
-nodedb-graph = { version = "0.4" }
-nodedb-vector = { version = "0.4" }
-nodedb-fts = { version = "0.4" }
-nodedb-strict = { version = "0.4" }
-nodedb-columnar = { version = "0.4" }
-nodedb-sql = { version = "0.4" }
-nodedb-array = { version = "0.4" }
-nodedb-physical = { version = "0.4" }
+nodedb-types = { version = "0.5" }
+nodedb-client = { version = "0.5" }
+nodedb-codec = { version = "0.5" }
+nodedb-crdt = { version = "0.5" }
+nodedb-query = { version = "0.5" }
+nodedb-spatial = { version = "0.5" }
+nodedb-graph = { version = "0.5" }
+nodedb-vector = { version = "0.5" }
+nodedb-fts = { version = "0.5" }
+nodedb-strict = { version = "0.5" }
+nodedb-columnar = { version = "0.5" }
+nodedb-sql = { version = "0.5" }
+nodedb-array = { version = "0.5" }
+nodedb-physical = { version = "0.5" }
 
 # Async
 tokio = { version = "1" }
