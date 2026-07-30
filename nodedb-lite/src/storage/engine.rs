@@ -34,6 +34,15 @@ pub struct CompactionOutcome {
     pub segments_repacked: u32,
     /// Bytes truncated from the backing file by lowering the high-water mark.
     pub file_bytes_freed: u64,
+    /// Retired segment files reclaimed.
+    ///
+    /// A segment replacement normally reclaims its predecessor as part of the
+    /// commit, so this counts the remainder: segments whose retirement was
+    /// deferred because a reader still pinned them, and files left behind by a
+    /// process that died mid-retirement.
+    pub reclaimed_segments: u64,
+    /// Bytes freed by deleting tombstoned segment files.
+    pub segment_bytes_freed: u64,
 }
 
 /// A write operation for batch writes.
@@ -96,7 +105,13 @@ pub trait StorageEngine: Send + Sync + 'static {
     /// The default implementation is a no-op returning a zero
     /// [`CompactionOutcome`], so engines with nothing to compact (in-memory
     /// stores, test doubles) need not override it. The pagedb-backed engine
-    /// overrides this to drain the deferred-free list and truncate `main.db`.
+    /// overrides this to drain the deferred-free list, truncate `main.db`, AND
+    /// delete tombstoned segment files.
+    ///
+    /// Reclaiming tombstones belongs here because compaction is the only
+    /// "reclaim disk" operation callers know to run, and tombstones are by far
+    /// the largest reclaimable thing: a segment replacement retires its
+    /// predecessor and nothing else ever deletes it.
     async fn compact(&self) -> Result<CompactionOutcome, LiteError> {
         Ok(CompactionOutcome::default())
     }

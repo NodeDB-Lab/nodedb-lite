@@ -490,10 +490,16 @@ where
 
     async fn compact(&self) -> Result<CompactionOutcome, LiteError> {
         let stats = self.db.compact_now().await.map_err(LiteError::from)?;
+        // `compact_now` repacks and truncates; it does not touch retired segment
+        // files. Reclaiming those is `gc_now`, which picks up the retirements
+        // that a reader pin deferred past their commit.
+        let gc = self.db.gc_now().await.map_err(LiteError::from)?;
         Ok(CompactionOutcome {
             reclaimed_pages: stats.main_db_pages_reclaimed,
             segments_repacked: stats.segments_repacked,
             file_bytes_freed: stats.bytes_truncated,
+            reclaimed_segments: gc.reclaimed_segments,
+            segment_bytes_freed: gc.reclaimed_bytes,
         })
     }
 
@@ -802,10 +808,16 @@ impl<V: Vfs + Clone + 'static> StorageEngine for PagedbStorage<V> {
 
     async fn compact(&self) -> Result<CompactionOutcome, LiteError> {
         let stats = self.db.compact_now().await.map_err(LiteError::from)?;
+        // `compact_now` repacks and truncates; it does not touch retired segment
+        // files. Reclaiming those is `gc_now`, which picks up the retirements
+        // that a reader pin deferred past their commit.
+        let gc = self.db.gc_now().await.map_err(LiteError::from)?;
         Ok(CompactionOutcome {
             reclaimed_pages: stats.main_db_pages_reclaimed,
             segments_repacked: stats.segments_repacked,
             file_bytes_freed: stats.bytes_truncated,
+            reclaimed_segments: gc.reclaimed_segments,
+            segment_bytes_freed: gc.reclaimed_bytes,
         })
     }
 }
