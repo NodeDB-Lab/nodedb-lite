@@ -7,7 +7,7 @@
 
 use nodedb_lite::{Encryption, NodeDbLite, PagedbStorageDefault, PagedbStorageMem};
 
-async fn open_memory_db() -> NodeDbLite<PagedbStorageMem> {
+async fn open_memory_db() -> std::sync::Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()
         .await
         .expect("open in-memory storage");

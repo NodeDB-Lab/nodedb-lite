@@ -26,136 +26,13 @@
  *
  * Created by `nodedb_open`, freed by `nodedb_close`.
  *
+ * The `Arc<NodeDbLite>` is what the constructor returned, so the background
+ * flush and compaction tasks live exactly as long as this handle does.
+ *
  * `_tmpdir` is `Some` when the database was opened with the `:memory:` path.
  * The directory is deleted when the handle is dropped.
  */
 typedef struct NodeDbNodeDbHandle NodeDbNodeDbHandle;
-
-/**
- * Open or create a NodeDB-Lite database at the given path.
- *
- * Returns an opaque handle on success, NULL on failure.
- * The caller must call `nodedb_close` to free the handle.
- *
- * # Safety
- * - `path` must be a valid null-terminated UTF-8 string.
- * - `passphrase` must be NULL or a valid null-terminated UTF-8 string.
- *
- * Encryption convention:
- * - `passphrase` is NULL and `path` is `":memory:"` → `Encryption::Plaintext` (volatile data, safe).
- * - `passphrase` is NULL and `path` is a real path → returns NULL (silent plaintext persistent
- *   storage is refused; pass an empty string to opt out explicitly).
- * - `passphrase` is `""` (empty string) → `Encryption::Plaintext` (explicit conscious opt-out).
- * - `passphrase` is a non-empty string → `Encryption::passphrase(passphrase)`.
- * - `passphrase` is non-NULL but invalid UTF-8 → returns NULL.
- */
-struct NodeDbNodeDbHandle *nodedb_open(const char *path,
-                                       uint64_t peer_id,
-                                       const char *passphrase);
-
-/**
- * Open or create a NodeDB-Lite database with an explicit memory budget.
- *
- * # Safety
- * - `path` must be a valid null-terminated UTF-8 string.
- * - `passphrase` must be NULL or a valid null-terminated UTF-8 string.
- *
- * See `nodedb_open` for the passphrase/encryption convention.
- * `memory_mb` of 0 uses the default memory budget.
- */
-struct NodeDbNodeDbHandle *nodedb_open_with_config(const char *path,
-                                                   uint64_t peer_id,
-                                                   uint64_t memory_mb,
-                                                   const char *passphrase);
-
-/**
- * Close a NodeDB-Lite database and free the handle.
- *
- * # Safety
- * `handle` must be a token returned by `nodedb_open`, or NULL/0 (no-op).
- * The token is a `u64` id packed into a pointer-width integer; it is never
- * dereferenced as a raw pointer.
- */
-void nodedb_close(struct NodeDbNodeDbHandle *handle);
-
-/**
- * Flush all in-memory state to disk.
- *
- * # Safety
- * `handle` must be a valid pointer returned by `nodedb_open`.
- */
-int32_t nodedb_flush(struct NodeDbNodeDbHandle *handle);
-
-/**
- * Compact the backing store, reclaiming dead pages and truncating the file to
- * bound on-disk growth.
- *
- * The three `out_*` pointers receive the compaction outcome; any of them may
- * be NULL to ignore that field. On error they are left untouched.
- *
- * Returns `NODEDB_OK` on success, `NODEDB_ERR_NULL` if `handle` is NULL, or
- * `NODEDB_ERR_FAILED` on a compaction error.
- *
- * # Safety
- * `handle` must be a valid pointer returned by `nodedb_open`. Each non-NULL
- * `out_*` pointer must be writable and correctly aligned.
- */
-int32_t nodedb_compact(struct NodeDbNodeDbHandle *handle,
-                       uint64_t *out_reclaimed_pages,
-                       uint32_t *out_segments_repacked,
-                       uint64_t *out_file_bytes_freed);
-
-/**
- * Start background CRDT sync to an Origin server.
- *
- * Connects via WebSocket to the given URL, authenticates with the JWT token,
- * and continuously pushes pending deltas / receives shape updates.
- * Runs forever in the background with auto-reconnect.
- *
- * Returns `NODEDB_OK` on successful launch (sync runs asynchronously).
- *
- * # Safety
- * `url` and `jwt_token` must be valid null-terminated UTF-8 strings.
- */
-int32_t nodedb_start_sync(struct NodeDbNodeDbHandle *handle,
-                          const char *url,
-                          const char *jwt_token);
-
-/**
- * Generate a UUIDv7 (time-sortable, recommended for primary keys).
- *
- * # Safety
- * `out` must be a valid pointer to a `*mut c_char`.
- */
-int32_t nodedb_generate_id(char **out);
-
-/**
- * Generate an ID of the specified type.
- *
- * Supported types: "uuidv7", "uuidv4", "ulid", "cuid2", "nanoid".
- *
- * # Safety
- * `id_type` must be a valid null-terminated UTF-8 string. `out` must be a valid pointer.
- */
-int32_t nodedb_generate_id_typed(const char *id_type, char **out);
-
-/**
- * Free a string returned by nodedb_* functions.
- *
- * # Safety
- * `ptr` must be a string previously returned by a nodedb function, or NULL.
- */
-void nodedb_free_string(char *ptr);
-
-/**
- * Free a byte buffer returned by nodedb_* functions (e.g. `ndb_array_slice`).
- *
- * `len` must be the exact length originally written to `*out_len`.
- *
- * # Safety
- * `ptr` must be a buffer previously returned by a nodedb function, or NULL.
- */
-void nodedb_free_buf(uint8_t *ptr, uintptr_t len);
 
 /**
  * Create a new ND sparse array.
@@ -432,5 +309,134 @@ int32_t nodedb_vector_search(struct NodeDbNodeDbHandle *handle,
 int32_t nodedb_vector_delete(struct NodeDbNodeDbHandle *handle,
                              const char *collection,
                              const char *id);
+
+/**
+ * Generate a UUIDv7 (time-sortable, recommended for primary keys).
+ *
+ * # Safety
+ * `out` must be a valid pointer to a `*mut c_char`.
+ */
+int32_t nodedb_generate_id(char **out);
+
+/**
+ * Generate an ID of the specified type.
+ *
+ * Supported types: "uuidv7", "uuidv4", "ulid", "cuid2", "nanoid".
+ *
+ * # Safety
+ * `id_type` must be a valid null-terminated UTF-8 string. `out` must be a valid pointer.
+ */
+int32_t nodedb_generate_id_typed(const char *id_type, char **out);
+
+/**
+ * Free a string returned by nodedb_* functions.
+ *
+ * # Safety
+ * `ptr` must be a string previously returned by a nodedb function, or NULL.
+ */
+void nodedb_free_string(char *ptr);
+
+/**
+ * Free a byte buffer returned by nodedb_* functions (e.g. `ndb_array_slice`).
+ *
+ * `len` must be the exact length originally written to `*out_len`.
+ *
+ * # Safety
+ * `ptr` must be a buffer previously returned by a nodedb function, or NULL.
+ */
+void nodedb_free_buf(uint8_t *ptr, uintptr_t len);
+
+/**
+ * Open or create a NodeDB-Lite database at the given path.
+ *
+ * Returns an opaque handle on success, NULL on failure.
+ * The caller must call `nodedb_close` to free the handle.
+ *
+ * Background flush and compaction start with the database, at the intervals
+ * the resolved configuration specifies.
+ *
+ * # Safety
+ * - `path` must be a valid null-terminated UTF-8 string.
+ * - `passphrase` must be NULL or a valid null-terminated UTF-8 string.
+ *
+ * Encryption convention:
+ * - `passphrase` is NULL and `path` is `":memory:"` → `Encryption::Plaintext` (volatile data, safe).
+ * - `passphrase` is NULL and `path` is a real path → returns NULL (silent plaintext persistent
+ *   storage is refused; pass an empty string to opt out explicitly).
+ * - `passphrase` is `""` (empty string) → `Encryption::Plaintext` (explicit conscious opt-out).
+ * - `passphrase` is a non-empty string → `Encryption::passphrase(passphrase)`.
+ * - `passphrase` is non-NULL but invalid UTF-8 → returns NULL.
+ */
+struct NodeDbNodeDbHandle *nodedb_open(const char *path,
+                                       uint64_t peer_id,
+                                       const char *passphrase);
+
+/**
+ * Open or create a NodeDB-Lite database with an explicit memory budget.
+ *
+ * # Safety
+ * - `path` must be a valid null-terminated UTF-8 string.
+ * - `passphrase` must be NULL or a valid null-terminated UTF-8 string.
+ *
+ * See `nodedb_open` for the passphrase/encryption convention.
+ * `memory_mb` of 0 uses the default memory budget.
+ */
+struct NodeDbNodeDbHandle *nodedb_open_with_config(const char *path,
+                                                   uint64_t peer_id,
+                                                   uint64_t memory_mb,
+                                                   const char *passphrase);
+
+/**
+ * Close a NodeDB-Lite database and free the handle.
+ *
+ * # Safety
+ * `handle` must be a token returned by `nodedb_open`, or NULL/0 (no-op).
+ * The token is a `u64` id packed into a pointer-width integer; it is never
+ * dereferenced as a raw pointer.
+ */
+void nodedb_close(struct NodeDbNodeDbHandle *handle);
+
+/**
+ * Flush all in-memory state to disk.
+ *
+ * # Safety
+ * `handle` must be a valid pointer returned by `nodedb_open`.
+ */
+int32_t nodedb_flush(struct NodeDbNodeDbHandle *handle);
+
+/**
+ * Compact the backing store, reclaiming dead pages and truncating the file to
+ * bound on-disk growth.
+ *
+ * The three `out_*` pointers receive the compaction outcome; any of them may
+ * be NULL to ignore that field. On error they are left untouched.
+ *
+ * Returns `NODEDB_OK` on success, `NODEDB_ERR_NULL` if `handle` is NULL, or
+ * `NODEDB_ERR_FAILED` on a compaction error.
+ *
+ * # Safety
+ * `handle` must be a valid pointer returned by `nodedb_open`. Each non-NULL
+ * `out_*` pointer must be writable and correctly aligned.
+ */
+int32_t nodedb_compact(struct NodeDbNodeDbHandle *handle,
+                       uint64_t *out_reclaimed_pages,
+                       uint32_t *out_segments_repacked,
+                       uint64_t *out_file_bytes_freed);
+
+/**
+ * Start background CRDT sync to an Origin server.
+ *
+ * Connects via WebSocket to the given URL, authenticates with the JWT token,
+ * and continuously pushes pending deltas / receives shape updates.
+ * Runs forever in the background with auto-reconnect.
+ *
+ * Returns `NODEDB_OK` on successful launch (sync runs asynchronously).
+ *
+ * # Safety
+ * `url` and `jwt_token` must be valid null-terminated UTF-8 strings.
+ */
+int32_t nodedb_start_sync(struct NodeDbNodeDbHandle *handle,
+                          const char *url,
+                          const char *jwt_token);
 
 #endif  /* NODEDB_LITE_H */

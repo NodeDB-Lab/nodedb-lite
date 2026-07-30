@@ -2,6 +2,19 @@
 
 //! `NodeDbLite` constructors: `open`, `open_with_config`, `open_with_budget`,
 //! and the shared `open_inner` orchestration.
+//!
+//! Every constructor funnels through `open_inner` with a complete
+//! [`LiteConfig`](crate::config::LiteConfig), and `open_inner` is the single
+//! place that consumes it. That is deliberate: a constructor that destructured
+//! its own subset of the config could silently drop a field, which is how
+//! `auto_flush_ms` and `auto_compact_ms` came to be documented as behavior
+//! nothing implemented.
+//!
+//! The constructors return `Arc<Self>` because two of those fields describe
+//! background tasks. The tasks hold a `Weak` back-reference and are spawned
+//! here from the caller's configuration, so the durability and space bounds the
+//! config states hold on the library surface and not only through the FFI and
+//! WASM bindings.
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -9,6 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 
+use crate::config::LiteConfig;
 use crate::engine::columnar::ColumnarEngine;
 use crate::engine::fts::FtsState;
 use crate::engine::htap::HtapBridge;
@@ -23,73 +37,56 @@ use crate::nodedb::core::types::{KvWriteBuffer, NodeDbLite};
 impl<S: StorageEngine> NodeDbLite<S> {
     /// Open or create a Lite database backed by the given storage engine.
     ///
-    /// Memory budget and per-engine percentages are resolved from environment
-    /// variables via [`LiteConfig::from_env()`], falling back to defaults when
-    /// variables are absent or malformed.
-    pub async fn open(storage: S, peer_id: u64) -> NodeDbResult<Self> {
-        Self::open_with_config(storage, peer_id, crate::config::LiteConfig::from_env()).await
+    /// Configuration is resolved from environment variables via
+    /// [`LiteConfig::from_env()`], falling back to defaults when variables are
+    /// absent or malformed — which includes the default one-second auto-flush
+    /// interval, so writes are durable within a second of landing.
+    pub async fn open(storage: S, peer_id: u64) -> NodeDbResult<Arc<Self>> {
+        Self::open_with_config(storage, peer_id, LiteConfig::from_env()).await
     }
 
     /// Open with an explicit [`LiteConfig`].
     ///
-    /// This is the primary constructor for callers that need fine-grained
-    /// control over memory budgets (e.g. FFI, WASM, tests).
+    /// This is the primary constructor for callers that need control over
+    /// memory budgets or the background maintenance intervals. The config is
+    /// validated before any storage work happens, so an incoherent budget is
+    /// rejected rather than silently over-allocating.
     pub async fn open_with_config(
         storage: S,
         peer_id: u64,
-        config: crate::config::LiteConfig,
-    ) -> NodeDbResult<Self> {
-        let governor = crate::memory::MemoryGovernor::from_config(&config);
-        let sync_enabled = config.sync_enabled;
-        let outbound_queue_cap = config.outbound_queue_cap;
-        let kv_cache_capacity = NonZeroUsize::new(config.kv_cache_capacity)
-            .ok_or_else(|| NodeDbError::config("kv_cache_capacity must be greater than 0"))?;
-        Self::open_inner(
-            storage,
-            peer_id,
-            governor,
-            sync_enabled,
-            outbound_queue_cap,
-            kv_cache_capacity,
-        )
-        .await
+        config: LiteConfig,
+    ) -> NodeDbResult<Arc<Self>> {
+        Self::open_inner(storage, peer_id, config).await
     }
 
-    /// Open with a custom memory budget (convenience wrapper using default percentages).
+    /// Open with a custom memory budget, taking every other setting from
+    /// [`LiteConfig::default()`] — including the default auto-flush interval.
     ///
-    /// Prefer [`open_with_config`] for new callers.
+    /// Prefer [`open_with_config`](Self::open_with_config) for new callers.
     pub async fn open_with_budget(
         storage: S,
         peer_id: u64,
         memory_budget: usize,
-    ) -> NodeDbResult<Self> {
-        let governor = crate::memory::MemoryGovernor::new(memory_budget);
-        let defaults = crate::config::LiteConfig::default();
-        let kv_cache_capacity = NonZeroUsize::new(defaults.kv_cache_capacity)
-            .expect("default kv_cache_capacity is non-zero");
-        Self::open_inner(
-            storage,
-            peer_id,
-            governor,
-            true,
-            defaults.outbound_queue_cap,
-            kv_cache_capacity,
-        )
-        .await
+    ) -> NodeDbResult<Arc<Self>> {
+        let config = LiteConfig {
+            memory_budget,
+            ..LiteConfig::default()
+        };
+        Self::open_with_config(storage, peer_id, config).await
     }
 
     #[allow(clippy::await_holding_lock)]
-    async fn open_inner(
-        storage: S,
-        peer_id: u64,
-        governor: crate::memory::MemoryGovernor,
-        sync_enabled: bool,
-        outbound_queue_cap: usize,
-        kv_cache_capacity: NonZeroUsize,
-    ) -> NodeDbResult<Self> {
+    async fn open_inner(storage: S, peer_id: u64, config: LiteConfig) -> NodeDbResult<Arc<Self>> {
+        config.validate()?;
+
+        let governor = crate::memory::MemoryGovernor::from_config(&config);
+        let sync_enabled = config.sync_enabled;
+        let kv_cache_capacity = NonZeroUsize::new(config.kv_cache_capacity)
+            .ok_or_else(|| NodeDbError::config("kv_cache_capacity must be greater than 0"))?;
+
         // Only the outbound sync queues (compiled out on wasm32) consume the cap.
-        #[cfg(target_arch = "wasm32")]
-        let _ = outbound_queue_cap;
+        #[cfg(not(target_arch = "wasm32"))]
+        let outbound_queue_cap = config.outbound_queue_cap;
 
         let storage = Arc::new(storage);
 
@@ -295,6 +292,13 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 db.rebuild_graph_indices().await;
             }
         }
+
+        // ── Spawn the background maintenance tasks the config asked for ──
+        // Both hold a `Weak` handle, so they stop when the last `Arc` returned
+        // from here is dropped. A zero interval spawns nothing.
+        let db = Arc::new(db);
+        db.start_auto_flush(config.auto_flush_ms);
+        db.start_auto_compact(config.auto_compact_ms);
 
         Ok(db)
     }

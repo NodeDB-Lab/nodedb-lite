@@ -15,13 +15,16 @@ use nodedb_types::value::Value;
 
 use nodedb_lite::engine::document::history::ops::is_bitemporal;
 
-async fn open_db() -> NodeDbLite<PagedbStorageMem> {
+async fn open_db() -> std::sync::Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory().await.unwrap();
     NodeDbLite::open(storage, 1).await.unwrap()
 }
 
 /// Open a db and return a cloned storage handle for direct inspection.
-async fn open_db_with_storage() -> (NodeDbLite<PagedbStorageMem>, PagedbStorageMem) {
+async fn open_db_with_storage() -> (
+    std::sync::Arc<NodeDbLite<PagedbStorageMem>>,
+    PagedbStorageMem,
+) {
     let storage = PagedbStorageMem::open_in_memory().await.unwrap();
     let storage_clone = storage.clone();
     let db = NodeDbLite::open(storage, 1).await.unwrap();

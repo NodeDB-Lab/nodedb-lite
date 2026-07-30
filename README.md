@@ -112,7 +112,10 @@ The Rust crate API in `0.1.0`:
 use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 use nodedb_client::NodeDb;
 
-// Open an in-memory database (peer_id uniquely identifies this device/replica):
+// Open an in-memory database (peer_id uniquely identifies this device/replica).
+// `open` hands back an `Arc` and starts the background flush task, so writes
+// are durable within `auto_flush_ms` (one second by default) without any
+// further setup. `flush()` forces it immediately when you need a hard point.
 let storage = PagedbStorageMem::open_in_memory().await?;
 let db = NodeDbLite::open(storage, 1u64).await?;
 

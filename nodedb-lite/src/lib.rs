@@ -24,9 +24,16 @@
 //!
 //! Writes are buffered for batching; `await` returning `Ok` does **not** by
 //! itself guarantee on-disk durability. Durability is bounded by the
-//! [`config::LiteConfig::auto_flush_ms`] background flush interval, or forced
-//! by an explicit [`NodeDbLite::flush`]. For at-rest encryption see
-//! [`Encryption`]. [`NodeDb`]: nodedb_client::NodeDb
+//! [`config::LiteConfig::auto_flush_ms`] background flush interval — one second
+//! by default — or forced by an explicit [`NodeDbLite::flush`].
+//!
+//! The `open*` constructors return `Arc<NodeDbLite>` and start that flush task
+//! themselves, so the bound holds identically for a direct Rust embedder, the
+//! FFI bindings, and the WASM bindings. The task holds a `Weak` handle and
+//! stops when the last `Arc` is dropped. Set `auto_flush_ms` to 0 to take full
+//! manual control of when data reaches disk.
+//!
+//! For at-rest encryption see [`Encryption`]. [`NodeDb`]: nodedb_client::NodeDb
 
 pub mod config;
 pub mod engine;

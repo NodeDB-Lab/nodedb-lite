@@ -12,7 +12,7 @@
 
 use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 
-async fn open_db() -> NodeDbLite<PagedbStorageMem> {
+async fn open_db() -> std::sync::Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()
         .await
         .expect("open in-memory storage");

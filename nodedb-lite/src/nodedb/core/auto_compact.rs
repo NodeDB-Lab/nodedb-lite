@@ -31,16 +31,17 @@ impl<S: StorageEngine> NodeDbLite<S> {
     ///
     /// # Usage
     ///
-    /// Call this once after wrapping the database in `Arc`:
+    /// The `open*` constructors already start this task from
+    /// [`LiteConfig::auto_compact_ms`](crate::config::LiteConfig::auto_compact_ms),
+    /// which defaults to 0 (disabled). Set that field to enable compaction:
     ///
     /// ```ignore
-    /// let db = Arc::new(NodeDbLite::open(storage, peer_id).await?);
-    /// db.start_auto_compact(300_000); // compact every 5 minutes
+    /// let config = LiteConfig { auto_compact_ms: 300_000, ..LiteConfig::default() };
+    /// let db = NodeDbLite::open_with_config(storage, peer_id, config).await?;
     /// ```
     ///
-    /// Direct library users (not using the FFI or WASM wrappers) must call this
-    /// themselves — the embedded `open*` constructors return `Self`, not
-    /// `Arc<Self>`, so the task cannot be spawned internally.
+    /// Calling this directly spawns an additional task rather than replacing a
+    /// running one.
     ///
     /// # Task lifecycle
     ///

@@ -14,7 +14,7 @@ use nodedb_types::value::Value;
 const COLLECTION: &str = "embeddings";
 const FIELD: &str = "terms";
 
-async fn open_mem() -> NodeDbLite<PagedbStorageMem> {
+async fn open_mem() -> std::sync::Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()
         .await
         .expect("open in-memory storage");

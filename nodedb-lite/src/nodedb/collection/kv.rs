@@ -686,14 +686,16 @@ mod tests {
     use crate::config::LiteConfig;
     use crate::storage::pagedb_storage::PagedbStorageMem;
 
-    async fn open_db() -> NodeDbLite<PagedbStorageMem> {
+    async fn open_db() -> std::sync::Arc<NodeDbLite<PagedbStorageMem>> {
         let storage = PagedbStorageMem::open_in_memory()
             .await
             .expect("open in-memory storage");
         NodeDbLite::open(storage, 1).await.expect("open NodeDbLite")
     }
 
-    async fn open_db_with_cache_capacity(cap: usize) -> NodeDbLite<PagedbStorageMem> {
+    async fn open_db_with_cache_capacity(
+        cap: usize,
+    ) -> std::sync::Arc<NodeDbLite<PagedbStorageMem>> {
         let storage = PagedbStorageMem::open_in_memory()
             .await
             .expect("open in-memory storage");

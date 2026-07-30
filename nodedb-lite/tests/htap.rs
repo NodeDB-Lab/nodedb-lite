@@ -14,7 +14,7 @@ use nodedb_types::value::Value;
 
 async fn open_db() -> Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory().await.unwrap();
-    Arc::new(NodeDbLite::open(storage, 1).await.unwrap())
+    NodeDbLite::open(storage, 1).await.unwrap()
 }
 
 // ═══════════════════════════════════════════════════════════════════════

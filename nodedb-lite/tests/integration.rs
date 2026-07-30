@@ -11,7 +11,7 @@ use nodedb_types::document::Document;
 use nodedb_types::id::NodeId;
 use nodedb_types::value::Value;
 
-async fn open_test_db() -> NodeDbLite<PagedbStorageMem> {
+async fn open_test_db() -> Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory().await.unwrap();
     NodeDbLite::open(storage, 1).await.unwrap()
 }
@@ -248,7 +248,8 @@ async fn all_operations_generate_deltas() {
 #[tokio::test]
 async fn arc_dyn_nodedb_pattern() {
     let storage = PagedbStorageMem::open_in_memory().await.unwrap();
-    let db: Arc<dyn NodeDb> = Arc::new(NodeDbLite::open(storage, 1).await.unwrap());
+    // `open` already yields an `Arc`, which coerces straight to the trait object.
+    let db: Arc<dyn NodeDb> = NodeDbLite::open(storage, 1).await.unwrap();
 
     db.vector_insert("coll", "v1", &[1.0, 0.0], None)
         .await

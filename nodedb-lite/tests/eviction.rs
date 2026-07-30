@@ -4,7 +4,7 @@
 use nodedb_client::NodeDb;
 use nodedb_lite::{Encryption, NodeDbLite, PagedbStorageDefault, PagedbStorageMem};
 
-async fn open_db_with_budget(budget: usize) -> NodeDbLite<PagedbStorageMem> {
+async fn open_db_with_budget(budget: usize) -> std::sync::Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory().await.unwrap();
     NodeDbLite::open_with_budget(storage, 1, budget)
         .await

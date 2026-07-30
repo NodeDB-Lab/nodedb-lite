@@ -56,7 +56,7 @@ fn western_europe_polygon() -> Geometry {
     ]])
 }
 
-async fn open_in_memory() -> NodeDbLite<PagedbStorageMem> {
+async fn open_in_memory() -> std::sync::Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()
         .await
         .expect("open in-memory storage");

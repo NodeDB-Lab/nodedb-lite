@@ -24,16 +24,18 @@ impl<S: StorageEngine> NodeDbLite<S> {
     ///
     /// # Usage
     ///
-    /// Call this once after wrapping the database in `Arc`:
+    /// The `open*` constructors already start this task from
+    /// [`LiteConfig::auto_flush_ms`](crate::config::LiteConfig::auto_flush_ms),
+    /// so calling it is only needed to change the interval afterwards:
     ///
     /// ```ignore
-    /// let db = Arc::new(NodeDbLite::open(storage, peer_id).await?);
-    /// db.start_auto_flush(1_000); // flush every second
+    /// let db = NodeDbLite::open(storage, peer_id).await?;
+    /// db.start_auto_flush(5_000); // slow the flusher down to five seconds
     /// ```
     ///
-    /// Direct library users (not using the FFI or WASM wrappers) must call
-    /// this themselves — the embedded `open*` constructors return `Self`, not
-    /// `Arc<Self>`, so the task cannot be spawned internally.
+    /// Each call spawns an additional task rather than replacing the running
+    /// one, so opening with `auto_flush_ms: 0` is the way to take full manual
+    /// control of when flushes happen.
     ///
     /// # Task lifecycle
     ///

@@ -13,7 +13,7 @@ use nodedb_types::sync::compensation::CompensationHint;
 use nodedb_types::sync::wire::*;
 use nodedb_types::value::Value;
 
-async fn open_db() -> NodeDbLite<PagedbStorageMem> {
+async fn open_db() -> Arc<NodeDbLite<PagedbStorageMem>> {
     let s = PagedbStorageMem::open_in_memory().await.unwrap();
     NodeDbLite::open(s, 1).await.unwrap()
 }

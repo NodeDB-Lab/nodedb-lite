@@ -381,7 +381,7 @@ mod tests {
     use super::*;
     use crate::{NodeDbLite, PagedbStorageMem};
 
-    async fn make_db() -> NodeDbLite<PagedbStorageMem> {
+    async fn make_db() -> Arc<NodeDbLite<PagedbStorageMem>> {
         let storage = PagedbStorageMem::open_in_memory().await.unwrap();
         NodeDbLite::open(storage, 1).await.unwrap()
     }

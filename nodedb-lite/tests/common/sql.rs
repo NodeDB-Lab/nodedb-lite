@@ -19,11 +19,9 @@ pub async fn open_lite() -> Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()
         .await
         .expect("open_in_memory");
-    Arc::new(
-        NodeDbLite::open(storage, 1)
-            .await
-            .expect("NodeDbLite::open"),
-    )
+    NodeDbLite::open(storage, 1)
+        .await
+        .expect("NodeDbLite::open")
 }
 
 // ── Origin pgwire client ──────────────────────────────────────────────────────

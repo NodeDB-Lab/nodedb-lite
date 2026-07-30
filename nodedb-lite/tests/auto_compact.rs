@@ -121,3 +121,103 @@ async fn disabled_auto_compact_is_noop() {
         "data must remain intact with auto-compaction disabled"
     );
 }
+
+// ---------------------------------------------------------------------------
+// open_with_config_honors_auto_compact_ms
+// ---------------------------------------------------------------------------
+
+/// Churn a database enough that compaction has real work to do, then verify it
+/// gets done in the background when `auto_compact_ms` is set through
+/// `LiteConfig` alone.
+///
+/// The control database runs the identical workload with compaction left
+/// manual; its `compact()` must reclaim something, which is what makes the
+/// second half of the test meaningful rather than trivially satisfied. On the
+/// configured database the background task should already have reclaimed that
+/// space, leaving a subsequent manual `compact()` with nothing to do.
+#[tokio::test]
+async fn open_with_config_honors_auto_compact_ms() {
+    async fn churn<S: nodedb_lite::StorageEngine>(db: &NodeDbLite<S>) {
+        for i in 0u32..200 {
+            db.kv_put("col", &format!("k{i}"), &vec![0xABu8; 256])
+                .await
+                .expect("kv_put");
+        }
+        for i in 0u32..200 {
+            db.kv_put("col", &format!("k{i}"), &vec![0xCDu8; 256])
+                .await
+                .expect("kv_put overwrite");
+        }
+        for i in 0u32..150 {
+            db.kv_delete("col", &format!("k{i}"))
+                .await
+                .expect("kv_delete");
+        }
+        db.flush().await.expect("flush");
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // Control: compaction left fully manual, so the reclaimable space is still
+    // there when we ask for it.
+    let control_path = dir.path().join("config_auto_compact_control.pagedb");
+    let control_storage = PagedbStorageDefault::open(&control_path, Encryption::Plaintext)
+        .await
+        .expect("open control storage");
+    let control = NodeDbLite::open_with_config(
+        control_storage,
+        1,
+        LiteConfig {
+            auto_compact_ms: 0,
+            ..LiteConfig::default()
+        },
+    )
+    .await
+    .expect("open control db");
+    churn(&control).await;
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    let control_outcome = control.compact().await.expect("control manual compact");
+    assert!(
+        control_outcome.reclaimed_pages > 0,
+        "this workload must leave reclaimable pages for the comparison below to mean anything; \
+         control reclaimed nothing: {control_outcome:?}"
+    );
+
+    // Subject: same workload, compaction interval supplied through LiteConfig
+    // and nothing else.
+    let path = dir.path().join("config_auto_compact.pagedb");
+    let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+        .await
+        .expect("open storage");
+    let db = NodeDbLite::open_with_config(
+        storage,
+        1,
+        LiteConfig {
+            auto_compact_ms: 100,
+            ..LiteConfig::default()
+        },
+    )
+    .await
+    .expect("open db");
+    churn(&db).await;
+
+    // Several ticks of the configured interval.
+    tokio::time::sleep(Duration::from_millis(350)).await;
+
+    let outcome = db.compact().await.expect("manual compact after auto");
+    assert_eq!(
+        outcome.reclaimed_pages, 0,
+        "auto_compact_ms supplied via LiteConfig must run the background compaction: the \
+         control reclaimed {} pages from the same workload, so anything left here means the \
+         configured interval was never wired; outcome: {outcome:?}",
+        control_outcome.reclaimed_pages
+    );
+
+    // Compaction ran without eating live data.
+    let got = db.kv_get("col", "k175").await.expect("kv_get survivor");
+    assert_eq!(
+        got.as_deref(),
+        Some([0xCDu8; 256].as_slice()),
+        "surviving key must remain intact after background compaction"
+    );
+}

@@ -9,6 +9,7 @@
 //! whole open sequence is re-driven once against a freshly recreated store.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use nodedb_types::error::{ErrorDetails, NodeDbResult};
 
@@ -30,7 +31,7 @@ impl NodeDbLite<PagedbStorageDefault> {
         path: impl AsRef<Path>,
         peer_id: u64,
         encryption: Encryption,
-    ) -> NodeDbResult<Self> {
+    ) -> NodeDbResult<Arc<Self>> {
         let path = path.as_ref();
         let storage = PagedbStorageDefault::open(path, encryption.clone()).await?;
         match Self::open(storage, peer_id).await {
@@ -56,7 +57,7 @@ impl NodeDbLite<PagedbStorageDefault> {
         peer_id: u64,
         encryption: Encryption,
         config: crate::config::LiteConfig,
-    ) -> NodeDbResult<Self> {
+    ) -> NodeDbResult<Arc<Self>> {
         let path = path.as_ref();
         let storage = PagedbStorageDefault::open(path, encryption.clone()).await?;
         match Self::open_with_config(storage, peer_id, config.clone()).await {
