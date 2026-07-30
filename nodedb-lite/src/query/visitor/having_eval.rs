@@ -153,9 +153,7 @@ fn eval_sql_expr_value(
 ) -> Option<Value> {
     match expr {
         SqlExpr::Literal(v) => Some(sql_value_to_ndb(v)),
-        SqlExpr::Column { name, .. } => {
-            lookup_field(row, agg_map, name.as_str()).map(|v| v.clone())
-        }
+        SqlExpr::Column { name, .. } => lookup_field(row, agg_map, name.as_str()).cloned(),
         SqlExpr::Function { name, args, .. } => {
             let func_lower = name.to_lowercase();
             let field = args

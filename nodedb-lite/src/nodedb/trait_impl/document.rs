@@ -223,7 +223,6 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 .map_err(NodeDbError::storage)?;
         }
 
-
         self.index_document_text(doc_collection, &doc_id, &doc.fields);
         self.index_document_sparse(doc_collection, &doc_id, &doc.fields);
 

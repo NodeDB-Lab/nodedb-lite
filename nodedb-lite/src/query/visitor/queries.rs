@@ -5,9 +5,9 @@
 use std::collections::HashMap;
 
 use nodedb_physical::PhysicalTaskVisitor;
+use nodedb_physical::physical_plan::SortKeySpec;
 use nodedb_physical::physical_plan::document::DocumentOp;
 use nodedb_physical::physical_plan::query::{AggregateSpec, JoinProjection};
-use nodedb_physical::physical_plan::SortKeySpec;
 use nodedb_query::expr::GroupKeySpec;
 use nodedb_sql::SubqueryVisitArgs;
 use nodedb_sql::temporal::TemporalScope;

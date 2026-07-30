@@ -60,6 +60,20 @@ where
         } else {
             format!("{collection}:{field_name}")
         };
+        // Durable row first: it is the source of truth that both the in-memory
+        // index and the pagedb segment are derived from, so it must never be the
+        // copy missing after a crash — and a flush that finds no durable row for
+        // a collection writes no segment for it at all.
+        if !embedding.is_empty() {
+            let op = crate::engine::vector::durable::put_op(&index_key, &doc_id, &embedding);
+            vector_state
+                .storage
+                .batch_write(std::slice::from_ref(&op))
+                .await
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("Insert: durable vector write failed: {e}"),
+                })?;
+        }
         let internal_id = {
             let dtype = {
                 let configs = vector_state.per_index_config.lock_or_recover();
@@ -251,6 +265,17 @@ where
                     storage_dtype,
                     ..VectorPrimaryConfig::default()
                 });
+        }
+        // Durable row first — see `vector_insert` above.
+        if !embedding.is_empty() {
+            let op = crate::engine::vector::durable::put_op(&index_key, &doc_id, &embedding);
+            vector_state
+                .storage
+                .batch_write(std::slice::from_ref(&op))
+                .await
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("DirectUpsert: durable vector write failed: {e}"),
+                })?;
         }
         let internal_id = {
             let dtype = {

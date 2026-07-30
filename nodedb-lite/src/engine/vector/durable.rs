@@ -74,7 +74,7 @@ pub(crate) fn encode(vector: &[f32]) -> Vec<u8> {
 /// foreign row is skipped rather than reinterpreted, since a mis-sized vector
 /// would panic the distance kernels it is fed to.
 pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<f32>> {
-    if bytes.is_empty() || bytes.len() % F32_BYTES != 0 {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(F32_BYTES) {
         return None;
     }
     Some(
@@ -103,7 +103,9 @@ pub(crate) async fn remove<S: StorageEngine>(
     collection: &str,
     doc_id: &str,
 ) -> Result<(), LiteError> {
-    storage.delete(Namespace::Vector, &key(collection, doc_id)).await
+    storage
+        .delete(Namespace::Vector, &key(collection, doc_id))
+        .await
 }
 
 /// Every collection that has at least one durable vector.
@@ -154,7 +156,9 @@ pub(crate) async fn load_collection<S: StorageEngine>(
 
     let mut out = Vec::with_capacity(rows.len());
     for (row_key, value) in rows {
-        let Some(doc_id) = row_key.get(prefix.len()..).and_then(|b| std::str::from_utf8(b).ok())
+        let Some(doc_id) = row_key
+            .get(prefix.len()..)
+            .and_then(|b| std::str::from_utf8(b).ok())
         else {
             tracing::warn!(
                 collection,
@@ -195,7 +199,13 @@ pub(crate) async fn rebuild_index<S: StorageEngine>(
     storage: &S,
     collection: &str,
     template: Option<(usize, crate::engine::vector::HnswParams)>,
-) -> Result<Option<(crate::engine::vector::HnswIndex, HashMap<String, (String, u32)>)>, LiteError> {
+) -> Result<
+    Option<(
+        crate::engine::vector::HnswIndex,
+        HashMap<String, (String, u32)>,
+    )>,
+    LiteError,
+> {
     use crate::engine::vector::{HnswIndex, HnswParams};
 
     let rows = load_collection(storage, collection).await?;
@@ -230,6 +240,54 @@ pub(crate) async fn rebuild_index<S: StorageEngine>(
     }
 
     Ok(Some((index, id_map)))
+}
+
+/// The `(dim, vectors, surrogates)` payload to serialize into a vector segment.
+///
+/// Sourced from the DURABLE rows, never from the in-memory index. The index is
+/// not a safe source: after a graph-only checkpoint restore its nodes carry no
+/// vector bytes at all (the floats live in the attached segment backing), and
+/// `HnswIndex::extract_vectors_and_surrogates` returns an empty vec per node in
+/// that state. Serializing that produced a header declaring the real count and
+/// dimension above an empty payload — a segment that always failed to reopen,
+/// which is how a valid segment came to be replaced by a one-page malformed one
+/// on the first flush after any restart.
+///
+/// Reading from the durable rows is correct by construction: they are the
+/// authoritative copy, complete regardless of what the in-memory index is
+/// currently backed by.
+///
+/// Returns `None` when the collection has no durable vectors, in which case
+/// there is nothing to publish and the existing segment must be left alone.
+pub(crate) async fn segment_payload<S: StorageEngine>(
+    storage: &S,
+    collection: &str,
+) -> Result<Option<(usize, Vec<Vec<f32>>, Vec<u64>)>, LiteError> {
+    let rows = load_collection(storage, collection).await?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let dim = rows[0].1.len();
+    let mut vectors = Vec::with_capacity(rows.len());
+    for (doc_id, v) in rows {
+        if v.len() != dim {
+            tracing::warn!(
+                collection,
+                doc_id,
+                expected = dim,
+                found = v.len(),
+                "durable vector has the wrong dimension; omitting it from the segment"
+            );
+            continue;
+        }
+        vectors.push(v);
+    }
+    if vectors.is_empty() {
+        return Ok(None);
+    }
+    // Lite has no surrogate map; `write_vector_segment` writes no surrogate
+    // block for an empty slice.
+    Ok(Some((dim, vectors, Vec::new())))
 }
 
 #[cfg(test)]

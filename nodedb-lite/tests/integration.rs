@@ -38,7 +38,7 @@ async fn vector_batch_insert_and_search_correctness() {
         .map(|(id, emb)| (id.as_str(), emb.as_slice()))
         .collect();
 
-    db.batch_vector_insert("vecs", &refs).unwrap();
+    db.batch_vector_insert("vecs", &refs).await.unwrap();
 
     let query: Vec<f32> = (0..dim).map(|d| ((25 * dim + d) as f32) * 0.001).collect();
     let results = db
@@ -137,6 +137,7 @@ async fn multi_modal_vector_graph_document() {
             ("concept-db", &[0.0, 0.0, 1.0]),
         ],
     )
+    .await
     .unwrap();
 
     db.batch_graph_insert_edges(
@@ -181,6 +182,7 @@ async fn flush_and_reopen_persists_all() {
         let db = NodeDbLite::open(storage, 1).await.unwrap();
 
         db.batch_vector_insert("vecs", &[("v1", &[1.0, 2.0, 3.0][..])])
+            .await
             .unwrap();
         db.batch_graph_insert_edges("vecs", &[("a", "b", "KNOWS")])
             .unwrap();

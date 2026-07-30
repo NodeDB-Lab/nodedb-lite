@@ -2,8 +2,8 @@
 //! SQL-visitor lowering for lateral SqlPlan variants:
 //! LateralTopK, LateralLoop.
 
-use nodedb_physical::physical_plan::query::JoinProjection;
 use nodedb_physical::physical_plan::SortKeySpec;
+use nodedb_physical::physical_plan::query::JoinProjection;
 use nodedb_sql::types::SqlPlan;
 use nodedb_sql::types::filter::Filter;
 use nodedb_sql::types::query::{Projection, SortKey};

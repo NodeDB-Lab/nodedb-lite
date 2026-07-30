@@ -13,6 +13,9 @@ use crate::engine::graph::index::CsrIndex;
 use crate::engine::vector::graph::HnswIndex;
 use crate::storage::engine::StorageEngine;
 
+/// `"{collection}:{internal_id}"` → (document id, internal id).
+type VectorIdMap = HashMap<String, (String, u32)>;
+
 use crate::nodedb::core::types::{
     META_CRDT_DELTAS, META_CSR_COLLECTIONS, META_CSR_LEGACY, META_HNSW_COLLECTIONS,
     META_LAST_FLUSHED_MID, NodeDbLite,
@@ -270,7 +273,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // internal ids are freshly assigned, so the persisted `hnsw_id_map`
         // entries for them are stale and must be replaced, not merged.
         #[cfg(not(target_arch = "wasm32"))]
-        let mut rebuilt_id_maps: Vec<(String, HashMap<String, (String, u32)>)> = Vec::new();
+        let mut rebuilt_id_maps: Vec<(String, VectorIdMap)> = Vec::new();
 
         // `META_HNSW_COLLECTIONS` is written by `flush`, so on a database that
         // has taken writes but never flushed it is absent — and those are
@@ -565,7 +568,7 @@ async fn rebuild_into<S: StorageEngine>(
     collection: &str,
     template: Option<(usize, crate::engine::vector::HnswParams)>,
     hnsw_indices: &mut HashMap<String, HnswIndex>,
-    rebuilt_id_maps: &mut Vec<(String, HashMap<String, (String, u32)>)>,
+    rebuilt_id_maps: &mut Vec<(String, VectorIdMap)>,
 ) {
     match crate::engine::vector::durable::rebuild_index(storage.as_ref(), collection, template)
         .await

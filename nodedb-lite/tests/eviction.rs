@@ -26,7 +26,7 @@ async fn evict_collection_persists_and_removes_from_memory() {
         .iter()
         .map(|(id, e)| (id.as_str(), e.as_slice()))
         .collect();
-    db.batch_vector_insert("coll_a", &refs_a).unwrap();
+    db.batch_vector_insert("coll_a", &refs_a).await.unwrap();
 
     let vecs_b: Vec<(String, Vec<f32>)> = (0..50)
         .map(|i| {
@@ -38,7 +38,7 @@ async fn evict_collection_persists_and_removes_from_memory() {
         .iter()
         .map(|(id, e)| (id.as_str(), e.as_slice()))
         .collect();
-    db.batch_vector_insert("coll_b", &refs_b).unwrap();
+    db.batch_vector_insert("coll_b", &refs_b).await.unwrap();
 
     // Both loaded.
     let loaded = db.loaded_collections().unwrap();
@@ -67,7 +67,7 @@ async fn evicted_collection_lazily_reloads_on_search() {
         .iter()
         .map(|(id, e)| (id.as_str(), e.as_slice()))
         .collect();
-    db.batch_vector_insert("lazy_coll", &refs).unwrap();
+    db.batch_vector_insert("lazy_coll", &refs).await.unwrap();
 
     // Flush so data is in storage.
     db.flush().await.unwrap();
@@ -108,7 +108,9 @@ async fn check_and_evict_responds_to_pressure() {
         .iter()
         .map(|(id, e)| (id.as_str(), e.as_slice()))
         .collect();
-    db.batch_vector_insert("pressure_coll", &refs).unwrap();
+    db.batch_vector_insert("pressure_coll", &refs)
+        .await
+        .unwrap();
     db.flush().await.unwrap();
 
     // Memory pressure should be high.
@@ -133,8 +135,10 @@ async fn startup_loads_only_persisted_collections() {
         let db = NodeDbLite::open(storage, 1).await.unwrap();
 
         db.batch_vector_insert("active", &[("v1", &[1.0f32, 0.0][..])])
+            .await
             .unwrap();
         db.batch_vector_insert("inactive", &[("v2", &[0.0, 1.0][..])])
+            .await
             .unwrap();
         db.flush().await.unwrap();
     }

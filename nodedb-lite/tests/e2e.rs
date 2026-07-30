@@ -41,7 +41,7 @@ async fn e2e_memory_stays_within_budget() {
         .iter()
         .map(|(id, e)| (id.as_str(), e.as_slice()))
         .collect();
-    db.batch_vector_insert("vecs", &refs).unwrap();
+    db.batch_vector_insert("vecs", &refs).await.unwrap();
 
     let used = db.governor().total_used();
     let budget = db.governor().total_budget();

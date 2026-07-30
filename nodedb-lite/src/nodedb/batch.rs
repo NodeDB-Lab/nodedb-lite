@@ -15,7 +15,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// Use this for bulk loading (cold-start hydration, benchmark setup, imports).
     /// Each vector is inserted into HNSW and tracked in the ID map, but only one
     /// Loro delta is generated for the entire batch.
-    pub fn batch_vector_insert(
+    pub async fn batch_vector_insert(
         &self,
         collection: &str,
         vectors: &[(&str, &[f32])],
@@ -34,6 +34,26 @@ impl<S: StorageEngine> NodeDbLite<S> {
         }
 
         let dim = vectors[0].1.len();
+
+        // Durable rows first, in ONE batch write. They are the source of truth
+        // the in-memory index and the pagedb segment are both derived from: a
+        // flush that finds no durable row for a collection writes no segment for
+        // it, so skipping this would make a bulk load non-durable.
+        {
+            let ops: Vec<_> = vectors
+                .iter()
+                .filter(|(_, embedding)| !embedding.is_empty())
+                .map(|(id, embedding)| {
+                    crate::engine::vector::durable::put_op(collection, id, embedding)
+                })
+                .collect();
+            if !ops.is_empty() {
+                self.storage
+                    .batch_write(&ops)
+                    .await
+                    .map_err(NodeDbError::storage)?;
+            }
+        }
 
         {
             let dtype = {
@@ -168,10 +188,14 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         for (name, _) in candidates.into_iter().take(max_to_evict) {
             // Snapshot checkpoint while holding the lock.
-            // On native with segment support: graph-only bytes + extract vectors.
+            // On native with segment support: graph-only bytes, and the segment
+            // payload is read from the DURABLE vectors after the lock is
+            // released — never from the in-memory index, which carries empty
+            // vector slots whenever it was itself restored from a graph-only
+            // checkpoint.
             // Otherwise: full checkpoint blob (WASM and non-pagedb native backends).
             #[cfg(not(target_arch = "wasm32"))]
-            let (blob, segment_data) = {
+            let (blob, write_segment) = {
                 let indices = self.vector_state.hnsw_indices.lock_or_recover();
                 match indices.get(&name) {
                     Some(idx) => {
@@ -179,14 +203,12 @@ impl<S: StorageEngine> NodeDbLite<S> {
                             let graph_bytes = idx.graph_checkpoint_to_bytes().map_err(|e| {
                                 NodeDbError::serialization("hnsw-graph-checkpoint", e)
                             })?;
-                            let (vectors, surrogates) = idx.extract_vectors_and_surrogates();
-                            let dim = idx.dim();
-                            (graph_bytes, Some((dim, vectors, surrogates)))
+                            (graph_bytes, true)
                         } else {
                             let blob = idx
                                 .checkpoint_to_bytes()
                                 .map_err(|e| NodeDbError::serialization("hnsw-checkpoint", e))?;
-                            (blob, None)
+                            (blob, false)
                         }
                     }
                     None => continue,
@@ -215,17 +237,31 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
             // Write vector segment on native targets when segment ext is available.
             #[cfg(not(target_arch = "wasm32"))]
-            if let (Some((dim, vectors, surrogates)), Some(ext)) = (segment_data, seg_ext)
-                && let Err(e) = ext
-                    .write_vector_segment(&name, dim, &vectors, &surrogates)
-                    .await
-            {
-                tracing::error!(
-                    collection = %name,
-                    error = %e,
-                    "HNSW vector segment write failed during eviction; \
-                     graph blob is persisted but vectors may be lost on cold restart"
-                );
+            if write_segment && let Some(ext) = seg_ext {
+                match crate::engine::vector::durable::segment_payload(&*self.storage, &name).await {
+                    Ok(Some((dim, vectors, surrogates))) => {
+                        if let Err(e) = ext
+                            .write_vector_segment(&name, dim, &vectors, &surrogates)
+                            .await
+                        {
+                            tracing::error!(
+                                collection = %name,
+                                error = %e,
+                                "HNSW vector segment write failed during eviction; \
+                                 graph blob is persisted but vectors may be lost on cold restart"
+                            );
+                        }
+                    }
+                    // No durable vectors: leave any existing segment untouched.
+                    // Replacing it with an empty one is the corruption this avoids.
+                    Ok(None) => {}
+                    Err(e) => tracing::error!(
+                        collection = %name,
+                        error = %e,
+                        "reading durable vectors for the eviction segment write failed; \
+                         leaving the existing segment in place"
+                    ),
+                }
             }
 
             {

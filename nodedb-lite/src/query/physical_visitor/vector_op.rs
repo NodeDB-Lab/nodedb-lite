@@ -21,8 +21,8 @@ use crate::storage::engine::StorageEngine;
 
 use super::adapter::LitePhysicalFut;
 use super::vector_write::{
-    vector_delete_by_id, vector_delete_by_surrogate, vector_direct_upsert, vector_insert,
-    vector_drop_index, vector_query_stats, vector_set_params,
+    vector_delete_by_id, vector_delete_by_surrogate, vector_direct_upsert, vector_drop_index,
+    vector_insert, vector_query_stats, vector_set_params,
 };
 
 /// Entry point called by `LiteDataPlaneVisitor::vector()`.

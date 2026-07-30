@@ -95,7 +95,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
             // Mutated only via the native segment-ext path, compiled out on wasm32.
             #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
-            let mut segment_data = Vec::new();
+            let mut segment_data: Vec<(String, Vec<u8>)> = Vec::new();
             for (name, index) in csr_map.iter() {
                 match index.checkpoint_to_bytes() {
                     Ok(checkpoint) => {
@@ -181,7 +181,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             allow(unused_variables, clippy::type_complexity)
         )]
         #[allow(clippy::type_complexity)]
-        let hnsw_segment_data: Vec<(String, usize, Vec<Vec<f32>>, Vec<u64>)> = {
+        let hnsw_segment_names: Vec<String> = {
             let indices = self.vector_state.hnsw_indices.lock_or_recover();
             let names: Vec<String> = indices.keys().cloned().collect();
             let names_bytes = zerompk::to_msgpack_vec(&names)
@@ -194,7 +194,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
             // Mutated only via the native segment-ext path, compiled out on wasm32.
             #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
-            let mut segment_data = Vec::new();
+            let mut segment_names: Vec<String> = Vec::new();
             for (name, index) in indices.iter() {
                 let key = format!("hnsw:{name}");
 
@@ -210,10 +210,12 @@ impl<S: StorageEngine> NodeDbLite<S> {
                             key: key.into_bytes(),
                             value: crate::storage::checksum::wrap(&graph_bytes),
                         });
-                        // Collect vector + surrogate data for segment write after batch_write.
-                        let (vectors, surrogates) = index.extract_vectors_and_surrogates();
-                        let dim = index.dim();
-                        segment_data.push((name.clone(), dim, vectors, surrogates));
+                        // The segment payload is sourced from the DURABLE vectors
+                        // after this lock is released, NOT from `index` — see
+                        // `engine::vector::durable::segment_payload`. Reading it
+                        // from the index would serialize empty vectors whenever
+                        // the index was restored from a graph-only checkpoint.
+                        segment_names.push(name.clone());
                     } else {
                         // Non-pagedb native backend: full checkpoint blob path.
                         let checkpoint = index
@@ -239,7 +241,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                     });
                 }
             }
-            segment_data
+            segment_names
         };
 
         self.storage
@@ -250,9 +252,29 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // ── Write HNSW vector segments to pagedb (native PagedbStorage only) ──
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(ext) = seg_ext {
-            for (name, dim, vectors, surrogates) in &hnsw_segment_data {
+            for name in &hnsw_segment_names {
+                let payload =
+                    match crate::engine::vector::durable::segment_payload(&*self.storage, name)
+                        .await
+                    {
+                        Ok(Some(p)) => p,
+                        // No durable vectors: nothing to publish. Leaving the
+                        // existing segment untouched is deliberate — replacing it
+                        // with an empty one is exactly the corruption this fixes.
+                        Ok(None) => continue,
+                        Err(e) => {
+                            tracing::error!(
+                                collection = %name,
+                                error = %e,
+                                "reading durable vectors for the segment write failed; \
+                                 leaving the existing segment in place"
+                            );
+                            continue;
+                        }
+                    };
+                let (dim, vectors, surrogates) = payload;
                 if let Err(e) = ext
-                    .write_vector_segment(name, *dim, vectors, surrogates)
+                    .write_vector_segment(name, dim, &vectors, &surrogates)
                     .await
                 {
                     tracing::error!(

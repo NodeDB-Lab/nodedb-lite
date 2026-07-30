@@ -201,11 +201,11 @@ where
         .map_err(|_| LiteError::LockPoisoned)?;
     let sidecar = sidecars.get(index_key);
 
-    // On native targets, use `get_vector_or_backing` so that graph-checkpoint-
-    // only restored indexes (which have empty per-node local storage) serve
-    // vectors from the pagedb segment backing attached by `with_backing`.
-    // On WASM the backing path is absent; `get_vector` is always correct there
-    // because WASM uses the full-checkpoint blob path where vectors are inline.
+    // On native targets, use `get_vector_or_backing`: it serves graph-checkpoint-
+    // only restored indexes (empty per-node local storage) from the pagedb segment
+    // backing attached by `with_backing`, and decodes F16/BF16 node storage to f32.
+    // On WASM the backing path is absent; `get_vector` is correct there because
+    // WASM uses the full-checkpoint blob path where F32 vectors are inline.
     #[cfg(not(target_arch = "wasm32"))]
     let ranked = rerank(
         candidates,
@@ -226,7 +226,7 @@ where
         k,
         opts,
         sidecar,
-        |id| index.get_vector(id),
+        |id| index.get_vector(id).map(std::borrow::Cow::Borrowed),
     )
     .map_err(|e| LiteError::Query(e.to_string()))?;
 
@@ -389,7 +389,11 @@ mod tests {
             1,
             &opts,
             None,
-            |id| store.get(&id).map(|v| v.as_slice()),
+            |id| {
+                store
+                    .get(&id)
+                    .map(|v| std::borrow::Cow::Borrowed(v.as_slice()))
+            },
         )
         .unwrap_err();
         assert!(err.to_string().contains("query_dim=0"));
@@ -420,7 +424,11 @@ mod tests {
             2,
             &VectorAnnOptions::default(),
             None,
-            |id| store.get(&id).map(|v| v.as_slice()),
+            |id| {
+                store
+                    .get(&id)
+                    .map(|v| std::borrow::Cow::Borrowed(v.as_slice()))
+            },
         )
         .unwrap();
 
@@ -443,7 +451,11 @@ mod tests {
                 ..Default::default()
             },
             None,
-            |id| store.get(&id).map(|v| v.as_slice()),
+            |id| {
+                store
+                    .get(&id)
+                    .map(|v| std::borrow::Cow::Borrowed(v.as_slice()))
+            },
         )
         .unwrap();
 
@@ -479,7 +491,11 @@ mod tests {
             2,
             &VectorAnnOptions::default(),
             None,
-            |id| store.get(&id).map(|v| v.as_slice()),
+            |id| {
+                store
+                    .get(&id)
+                    .map(|v| std::borrow::Cow::Borrowed(v.as_slice()))
+            },
         );
         assert!(result.is_ok(), "metric override rerank must not error");
         let ranked = result.unwrap();
@@ -514,7 +530,11 @@ mod tests {
             2,
             &VectorAnnOptions::default(),
             None,
-            |id| store.get(&id).map(|v| v.as_slice()),
+            |id| {
+                store
+                    .get(&id)
+                    .map(|v| std::borrow::Cow::Borrowed(v.as_slice()))
+            },
         );
         assert!(
             result.is_ok(),

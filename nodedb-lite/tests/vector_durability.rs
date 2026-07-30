@@ -130,6 +130,112 @@ async fn reopened_search_returns_document_ids() {
     }
 }
 
+/// The segment-poisoning reproducer: flush TWICE across a reopen.
+///
+/// After the first flush the index is persisted as a graph-only checkpoint whose
+/// per-node vector storage is empty — the floats live in the pagedb segment. On
+/// reopen the index is restored from that checkpoint, so the second flush must
+/// source its segment payload from the durable vector rows. Reading it from the
+/// restored index instead serializes empty vectors under a header that declares
+/// the real count and dimension, which overwrites the good segment with a
+/// corrupt one and loses every vector in the collection.
+#[tokio::test]
+async fn second_flush_after_graph_only_restore_preserves_vectors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    let vectors: Vec<Vec<f32>> = (0..3)
+        .map(|i| (0..8).map(|k| (k + i * 8) as f32).collect())
+        .collect();
+    let ids = ["p", "q", "r"];
+
+    // Generation 1: write and flush. The segment now holds the real vectors.
+    {
+        let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+            .await
+            .unwrap();
+        for (id, v) in ids.iter().zip(&vectors) {
+            db.document_put_with_vector(COLLECTION, doc(id), COLLECTION, id, v)
+                .await
+                .unwrap();
+        }
+        db.flush().await.unwrap();
+        drop(db);
+    }
+
+    // Generation 2: reopen (graph-only restore) and flush again WITHOUT writing
+    // anything. This is the flush that used to poison the segment.
+    {
+        let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+            .await
+            .unwrap();
+        db.flush().await.unwrap();
+        drop(db);
+    }
+
+    // Generation 3: every vector must still be findable.
+    let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+        .await
+        .unwrap();
+    for (id, v) in ids.iter().zip(&vectors) {
+        let hits = db
+            .vector_search(COLLECTION, v, 5, None, None)
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| h.id == *id),
+            "{id:?} was lost by the second flush — the segment was rewritten from \
+             the restored index's empty vector slots instead of the durable rows; \
+             got {hits:?}"
+        );
+    }
+}
+
+/// Eviction persists a collection before dropping it from memory, and takes the
+/// same graph-only-checkpoint-plus-segment path as flush. It must therefore also
+/// source its segment payload from the durable rows, not from the in-memory index.
+#[tokio::test]
+async fn eviction_after_graph_only_restore_preserves_vectors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    let vector: Vec<f32> = (0..8).map(|i| (i * 3) as f32).collect();
+
+    {
+        let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+            .await
+            .unwrap();
+        db.document_put_with_vector(COLLECTION, doc("e"), COLLECTION, "e", &vector)
+            .await
+            .unwrap();
+        db.flush().await.unwrap();
+        drop(db);
+    }
+
+    {
+        // Reopened index has empty per-node storage; evict it in that state.
+        let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+            .await
+            .unwrap();
+        db.vector_search(COLLECTION, &vector, 1, None, None)
+            .await
+            .unwrap();
+        db.evict_collections(1).await.unwrap();
+        drop(db);
+    }
+
+    let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+        .await
+        .unwrap();
+    let hits = db
+        .vector_search(COLLECTION, &vector, 5, None, None)
+        .await
+        .unwrap();
+    assert!(
+        hits.iter().any(|h| h.id == "e"),
+        "eviction rewrote the segment from the restored index's empty vector \
+         slots instead of the durable rows; got {hits:?}"
+    );
+}
+
 /// A deleted vector must NOT come back when the index is rebuilt. The in-memory
 /// HNSW tombstone does not survive a reopen, so if the durable row outlived the
 /// delete the rebuild would resurrect it.

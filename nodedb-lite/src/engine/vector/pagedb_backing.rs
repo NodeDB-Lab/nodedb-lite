@@ -256,10 +256,31 @@ pub(crate) fn build_ndvs_bytes(
     vectors: &[Vec<f32>],
     surrogate_ids: &[u64],
 ) -> Result<Vec<u8>, LiteError> {
-    debug_assert!(
-        surrogate_ids.is_empty() || surrogate_ids.len() == vectors.len(),
-        "surrogate_ids length must match vectors length or be empty"
-    );
+    // HARD validation, not `debug_assert`. These invariants were previously
+    // checked only in debug builds, so a release build happily serialized a
+    // header declaring `count`/`dim` above a payload that did not contain them
+    // — producing a segment whose reopen fails with "too small for declared
+    // count". A malformed segment must fail the WRITE, loudly, not the read.
+    if !surrogate_ids.is_empty() && surrogate_ids.len() != vectors.len() {
+        return Err(LiteError::Storage {
+            detail: format!(
+                "NDVS build: {} surrogate ids for {} vectors (must match or be empty)",
+                surrogate_ids.len(),
+                vectors.len()
+            ),
+        });
+    }
+    if let Some((i, v)) = vectors.iter().enumerate().find(|(_, v)| v.len() != dim) {
+        return Err(LiteError::Storage {
+            detail: format!(
+                "NDVS build: vector {i} has {} dimensions, expected {dim}. An empty \
+                 vector here means the source index carries no vector data — e.g. a \
+                 graph-only checkpoint whose external backing was not consulted — and \
+                 serializing it would publish a segment that cannot be read back.",
+                v.len()
+            ),
+        });
+    }
 
     let count = vectors.len();
     let vec_bytes = dim
@@ -292,7 +313,6 @@ pub(crate) fn build_ndvs_bytes(
 
     // Vector data block.
     for v in vectors {
-        debug_assert_eq!(v.len(), dim, "vector dimension mismatch during NDVS build");
         // SAFETY: safe f32 → u8 cast; `u8` has alignment 1, so the cast is
         // always valid.  We only read the bytes, never write through this ptr.
         let bytes: &[u8] =

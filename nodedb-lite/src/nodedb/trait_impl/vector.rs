@@ -90,6 +90,19 @@ impl<S: StorageEngine> NodeDbLite<S> {
             ));
         }
 
+        // Make the vector durable BEFORE it enters the in-memory index. The
+        // durable row is the source of truth that the index and the pagedb
+        // segment are both derived from, so it must never be the copy that is
+        // missing after a crash — and a flush that found no durable row would
+        // write no segment at all.
+        if !embedding.is_empty() {
+            let op = crate::engine::vector::durable::put_op(collection, id, embedding);
+            self.storage
+                .batch_write(std::slice::from_ref(&op))
+                .await
+                .map_err(NodeDbError::storage)?;
+        }
+
         let internal_id = {
             let dtype = {
                 let configs = self.vector_state.per_index_config.lock_or_recover();
@@ -177,8 +190,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // one. Ordering also matters: if the process dies between the two, a
         // surviving durable row would come back, whereas a removed row simply
         // leaves the tombstoned slot to be rebuilt away.
-        if let Err(e) =
-            crate::engine::vector::durable::remove(&*self.storage, collection, id).await
+        if let Err(e) = crate::engine::vector::durable::remove(&*self.storage, collection, id).await
         {
             tracing::warn!(
                 collection,
@@ -270,6 +282,16 @@ impl<S: StorageEngine> NodeDbLite<S> {
         } else {
             format!("{collection}:{field_name}")
         };
+
+        // Durable row first — see `vector_insert_impl`. Keyed by `index_key` so
+        // each named-vector sub-index rebuilds from its own rows.
+        if !embedding.is_empty() {
+            let op = crate::engine::vector::durable::put_op(&index_key, id, embedding);
+            self.storage
+                .batch_write(std::slice::from_ref(&op))
+                .await
+                .map_err(NodeDbError::storage)?;
+        }
 
         let internal_id = {
             let dtype = {
