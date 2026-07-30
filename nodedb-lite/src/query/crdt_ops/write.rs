@@ -23,7 +23,10 @@ pub async fn handle_apply<S: StorageEngine>(
     };
 
     match result {
-        Ok(()) => {
+        // The admission is already logged when it contributed nothing; the
+        // delta is still acknowledged, since a fully-trimmed import is a
+        // successful (idempotent) apply, not a failure to replicate.
+        Ok(_admission) => {
             let mut crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
             crdt.acknowledge(mutation_id);
             Ok(QueryResult {

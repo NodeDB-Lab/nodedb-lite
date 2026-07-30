@@ -70,6 +70,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     pub fn import_remote_deltas(&self, collection: &str, data: &[u8]) -> NodeDbResult<()> {
         let mut crdt = self.crdt.lock_or_recover();
         crdt.import_remote(collection, data)
+            .map(|_admission| ())
             .map_err(NodeDbError::storage)
     }
 

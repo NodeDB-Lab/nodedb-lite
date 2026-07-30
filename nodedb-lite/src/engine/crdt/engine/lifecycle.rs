@@ -8,11 +8,31 @@ use std::collections::HashMap;
 use std::collections::btree_map::Entry;
 use std::sync::atomic::AtomicU64;
 
-use nodedb_crdt::CrdtState;
+use nodedb_crdt::{CrdtState, ImportAdmission};
 
 use crate::error::LiteError;
 
 use super::types::CrdtEngine;
+
+/// Warn when an import carried operations but contributed none of them.
+///
+/// Loro trims operations the importing document already knows, so a fully
+/// trimmed import returns `Ok` while changing nothing. That is normal for an
+/// idempotent resync of a replayed prefix, but it is also exactly what a
+/// peer-id collision looks like when it silently discards a healthy client's
+/// writes — so it must at least be visible.
+fn warn_if_fully_trimmed(collection: &str, kind: &str, admission: &ImportAdmission) {
+    if admission.encoded_operations > 0 && admission.new_operations == 0 {
+        tracing::warn!(
+            collection,
+            kind,
+            encoded_operations = admission.encoded_operations,
+            "CRDT import contributed no operations — every operation was already \
+             known. Expected for an idempotent resync; otherwise it indicates a \
+             peer-id collision silently discarding writes."
+        );
+    }
+}
 
 impl CrdtEngine {
     /// Create a new empty CRDT engine with the given peer ID.
@@ -93,23 +113,47 @@ impl CrdtEngine {
     }
 
     /// Import remote deltas for a collection (received via sync).
-    pub fn import_remote(&mut self, collection: &str, data: &[u8]) -> Result<(), LiteError> {
-        self.state_mut(collection)?
-            .import(data)
-            .map_err(|e| LiteError::Storage {
-                detail: format!("remote delta import for '{collection}' failed: {e}"),
-            })
+    ///
+    /// Returns the [`ImportAdmission`] so callers can tell "this delta advanced
+    /// the document" from "every operation in it was already known". The two are
+    /// indistinguishable from a bare `Ok(())`: Loro trims operations the
+    /// document already has, so a fully-trimmed import succeeds while
+    /// contributing nothing — which is also what a peer-id collision looks like
+    /// when it discards a healthy client's writes.
+    pub fn import_remote(
+        &mut self,
+        collection: &str,
+        data: &[u8],
+    ) -> Result<ImportAdmission, LiteError> {
+        let admission =
+            self.state_mut(collection)?
+                .import(data)
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("remote delta import for '{collection}' failed: {e}"),
+                })?;
+        warn_if_fully_trimmed(collection, "remote delta", &admission);
+        Ok(admission)
     }
 
     // ─── Snapshot & Persistence ──────────────────────────────────────
 
     /// Import a full Loro snapshot into a collection's document.
-    pub fn import_snapshot(&mut self, collection: &str, snapshot: &[u8]) -> Result<(), LiteError> {
-        self.state_mut(collection)?
-            .import(snapshot)
-            .map_err(|e| LiteError::Storage {
-                detail: format!("snapshot import for '{collection}' failed: {e}"),
-            })
+    ///
+    /// See [`Self::import_remote`] for why the admission is returned rather
+    /// than discarded.
+    pub fn import_snapshot(
+        &mut self,
+        collection: &str,
+        snapshot: &[u8],
+    ) -> Result<ImportAdmission, LiteError> {
+        let admission =
+            self.state_mut(collection)?
+                .import(snapshot)
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("snapshot import for '{collection}' failed: {e}"),
+                })?;
+        warn_if_fully_trimmed(collection, "snapshot", &admission);
+        Ok(admission)
     }
 
     /// Export a full Loro state snapshot for one collection.

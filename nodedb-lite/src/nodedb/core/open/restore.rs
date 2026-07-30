@@ -76,9 +76,11 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 continue;
             };
             match crate::storage::checksum::unwrap(envelope) {
-                Some(snapshot) => crdt.import_snapshot(collection, &snapshot).map_err(|e| {
-                    NodeDbError::storage(format!("CRDT restore of '{collection}' failed: {e}"))
-                })?,
+                Some(snapshot) => {
+                    crdt.import_snapshot(collection, &snapshot).map_err(|e| {
+                        NodeDbError::storage(format!("CRDT restore of '{collection}' failed: {e}"))
+                    })?;
+                }
                 None => {
                     tracing::error!(
                         collection = %collection,
