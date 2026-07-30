@@ -349,12 +349,30 @@ impl<S: StorageEngine> NodeDbLite<S> {
                                 Some(ext) => match ext.open_vector_segment(name).await {
                                     Ok(Some(backing)) => {
                                         use std::sync::Arc;
-                                        index.with_backing(Arc::new(backing));
-                                        tracing::debug!(
-                                            collection = %name,
-                                            "HNSW restored with pagedb vector segment backing"
-                                        );
-                                        true
+                                        // A segment that READS but cannot serve the
+                                        // index's nodes is the dangerous case: the
+                                        // graph looks healthy, so every later query
+                                        // scores a node with no vector. `with_backing`
+                                        // validates and refuses, so this rebuilds too.
+                                        match index.with_backing(Arc::new(backing)) {
+                                            Ok(_) => {
+                                                tracing::debug!(
+                                                    collection = %name,
+                                                    "HNSW restored with pagedb vector segment backing"
+                                                );
+                                                true
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    collection = %name,
+                                                    error = %e,
+                                                    "vector segment cannot serve this index \
+                                                     (empty or short payload); rebuilding HNSW \
+                                                     from durable vectors"
+                                                );
+                                                false
+                                            }
+                                        }
                                     }
                                     Ok(None) => false,
                                     Err(e) => {

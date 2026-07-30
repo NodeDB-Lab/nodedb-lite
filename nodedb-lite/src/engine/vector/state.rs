@@ -7,7 +7,7 @@
 //! the visitor pipeline can run vector ops without re-architecting the
 //! engine boundary.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use nodedb_types::collection_config::VectorPrimaryConfig;
@@ -31,6 +31,22 @@ pub struct VectorState<S: StorageEngine> {
     /// callers that don't find an entry default to F32 storage, matching
     /// the previous behavior.
     pub(crate) per_index_config: Arc<Mutex<HashMap<String, VectorPrimaryConfig>>>,
+    /// Index keys whose stored checkpoint exists but cannot be turned into a
+    /// usable index — unreadable checkpoint, or a segment that cannot serve the
+    /// graph with no durable vectors to rebuild from.
+    ///
+    /// Without this, `ensure_index_loaded` gives up WITHOUT caching anything, so
+    /// every later search on that collection repeats the entire cost — read the
+    /// checkpoint, deserialize the full graph, open and validate the segment,
+    /// scan the durable rows — and still finds nothing. On a collection with
+    /// thousands of nodes that turns one unusable segment into an operation that
+    /// pins a core indefinitely while reporting no progress.
+    ///
+    /// This is a NEGATIVE cache for the load path only. It is not consulted once
+    /// the collection is present in `hnsw_indices`, so a later insert (which
+    /// creates the index through `ensure_hnsw`) resolves the collection normally
+    /// without anything here needing to be cleared.
+    pub(crate) unloadable: Mutex<HashSet<String>>,
 }
 
 /// Get or create the HNSW index for `index_key` with the given dimensionality and
@@ -62,6 +78,7 @@ impl<S: StorageEngine> VectorState<S> {
             storage,
             codec_sidecars: Arc::new(Mutex::new(HashMap::new())),
             per_index_config: Arc::new(Mutex::new(HashMap::new())),
+            unloadable: Mutex::new(HashSet::new()),
         }
     }
 
@@ -78,6 +95,7 @@ impl<S: StorageEngine> VectorState<S> {
             storage,
             codec_sidecars: Arc::new(Mutex::new(HashMap::new())),
             per_index_config: Arc::new(Mutex::new(HashMap::new())),
+            unloadable: Mutex::new(HashSet::new()),
         }
     }
 }
