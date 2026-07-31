@@ -29,12 +29,11 @@ impl NodeDbLite<PagedbStorageDefault> {
     /// looping.
     pub async fn open_at_path(
         path: impl AsRef<Path>,
-        peer_id: u64,
         encryption: Encryption,
     ) -> NodeDbResult<Arc<Self>> {
         let path = path.as_ref();
         let storage = PagedbStorageDefault::open(path, encryption.clone()).await?;
-        match Self::open(storage, peer_id).await {
+        match Self::open(storage).await {
             Ok(db) => Ok(db),
             Err(e) if matches!(e.details(), ErrorDetails::SegmentCorrupted { .. }) => {
                 tracing::error!(
@@ -44,7 +43,7 @@ impl NodeDbLite<PagedbStorageDefault> {
                      renaming corrupt store aside and recovering (one retry)"
                 );
                 let storage = PagedbStorageDefault::recover_corrupt(path, &encryption).await?;
-                Self::open(storage, peer_id).await
+                Self::open(storage).await
             }
             Err(e) => Err(e),
         }
@@ -54,13 +53,12 @@ impl NodeDbLite<PagedbStorageDefault> {
     /// [`LiteConfig`](crate::config::LiteConfig).
     pub async fn open_at_path_with_config(
         path: impl AsRef<Path>,
-        peer_id: u64,
         encryption: Encryption,
         config: crate::config::LiteConfig,
     ) -> NodeDbResult<Arc<Self>> {
         let path = path.as_ref();
         let storage = PagedbStorageDefault::open(path, encryption.clone()).await?;
-        match Self::open_with_config(storage, peer_id, config.clone()).await {
+        match Self::open_with_config(storage, config.clone()).await {
             Ok(db) => Ok(db),
             Err(e) if matches!(e.details(), ErrorDetails::SegmentCorrupted { .. }) => {
                 tracing::error!(
@@ -70,7 +68,7 @@ impl NodeDbLite<PagedbStorageDefault> {
                      renaming corrupt store aside and recovering (one retry)"
                 );
                 let storage = PagedbStorageDefault::recover_corrupt(path, &encryption).await?;
-                Self::open_with_config(storage, peer_id, config).await
+                Self::open_with_config(storage, config).await
             }
             Err(e) => Err(e),
         }
@@ -172,7 +170,7 @@ mod tests {
         };
 
         // `NodeDbLite` isn't `Debug`, so match rather than `expect_err`.
-        let err = match NodeDbLite::open(wrapped, 1).await {
+        let err = match NodeDbLite::open(wrapped).await {
             Ok(_) => panic!("first identity read is corrupted, so open must fail"),
             Err(e) => e,
         };

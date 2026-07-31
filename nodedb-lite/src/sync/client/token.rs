@@ -173,7 +173,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_failure_keeps_push_paused() {
         let config = make_config_with_provider(None); // provider always fails
-        let client = SyncClient::new(config, 1);
+        let client = SyncClient::new(config);
         client.pause_for_auth().await;
 
         // Attempt a refresh — provider returns None.
@@ -189,7 +189,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_failure_applies_backoff() {
         let config = make_config_with_provider(None);
-        let client = SyncClient::new(config, 1);
+        let client = SyncClient::new(config);
         client.pause_for_auth().await;
 
         let initial_backoff = *client.token_refresh_backoff_ms.lock().await;
@@ -212,7 +212,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_success_clears_pause_and_resets_backoff() {
         let config = make_config_with_provider(Some("fresh-jwt-token"));
-        let client = SyncClient::new(config, 1);
+        let client = SyncClient::new(config);
         client.pause_for_auth().await;
 
         // Drive backoff up.
@@ -241,7 +241,7 @@ mod tests {
     #[tokio::test]
     async fn backoff_enforced_between_attempts() {
         let config = make_config_with_provider(None);
-        let client = SyncClient::new(config, 1);
+        let client = SyncClient::new(config);
 
         // Simulate a failed attempt just now.
         *client.token_last_attempt_ms.lock().await = crate::runtime::now_millis();
@@ -258,7 +258,7 @@ mod tests {
     #[tokio::test]
     async fn backoff_capped_at_max() {
         let config = make_config_with_provider(None);
-        let client = SyncClient::new(config, 1);
+        let client = SyncClient::new(config);
 
         // Start near the cap.
         *client.token_refresh_backoff_ms.lock().await = TOKEN_REFRESH_MAX_BACKOFF_MS / 2 + 1;

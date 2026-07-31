@@ -368,7 +368,6 @@ void nodedb_free_buf(uint8_t *ptr, uintptr_t len);
  * - `passphrase` is non-NULL but invalid UTF-8 → returns NULL.
  */
 struct NodeDbNodeDbHandle *nodedb_open(const char *path,
-                                       uint64_t peer_id,
                                        const char *passphrase);
 
 /**
@@ -382,7 +381,6 @@ struct NodeDbNodeDbHandle *nodedb_open(const char *path,
  * `memory_mb` of 0 uses the default memory budget.
  */
 struct NodeDbNodeDbHandle *nodedb_open_with_config(const char *path,
-                                                   uint64_t peer_id,
                                                    uint64_t memory_mb,
                                                    const char *passphrase);
 

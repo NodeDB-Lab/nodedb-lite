@@ -14,7 +14,7 @@
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let storage = PagedbStorageMem::open_in_memory().await?;
-//! let db = NodeDbLite::open(storage, 1u64).await?;
+//! let db = NodeDbLite::open(storage).await?;
 //! db.execute_sql("CREATE COLLECTION notes", &[]).await?;
 //! # Ok(())
 //! # }
@@ -39,6 +39,7 @@ pub mod config;
 pub mod engine;
 pub mod error;
 pub mod event;
+pub mod identity;
 pub mod memory;
 pub mod nodedb;
 pub mod query;

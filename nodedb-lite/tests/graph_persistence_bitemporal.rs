@@ -39,7 +39,7 @@ async fn graph_pagerank_finds_edges_after_reopen_without_explicit_flush() {
             .await
             .unwrap();
 
-        let db = NodeDbLite::open(storage, 1).await.unwrap();
+        let db = NodeDbLite::open(storage).await.unwrap();
         // Insert a directed triangle so PageRank has something to compute.
         db.graph_insert_edge("social", &a, &b, "E", None)
             .await
@@ -57,7 +57,7 @@ async fn graph_pagerank_finds_edges_after_reopen_without_explicit_flush() {
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
         .await
         .unwrap();
-    let db = NodeDbLite::open(storage, 1).await.unwrap();
+    let db = NodeDbLite::open(storage).await.unwrap();
 
     let ranks = db.graph_pagerank("social", None, None, None).await.unwrap();
 
@@ -101,7 +101,7 @@ async fn graph_excludes_tombstoned_edges_after_reopen() {
             .await
             .unwrap();
 
-        let db = NodeDbLite::open(storage, 1).await.unwrap();
+        let db = NodeDbLite::open(storage).await.unwrap();
         // Insert A→B (keep) and A→C (tombstone).
         let _edge_ab = db
             .graph_insert_edge("social", &a, &b, "E", None)
@@ -120,7 +120,7 @@ async fn graph_excludes_tombstoned_edges_after_reopen() {
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
         .await
         .unwrap();
-    let db = NodeDbLite::open(storage, 1).await.unwrap();
+    let db = NodeDbLite::open(storage).await.unwrap();
 
     let ranks = db.graph_pagerank("social", None, None, None).await.unwrap();
 
@@ -174,7 +174,7 @@ async fn graph_still_works_for_non_bitemporal_collections_after_reopen() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .unwrap();
-        let db = NodeDbLite::open(storage, 1).await.unwrap();
+        let db = NodeDbLite::open(storage).await.unwrap();
         // No bitemporal=true — plain graph collection.
         db.graph_insert_edge("plain", &a, &b, "E", None)
             .await
@@ -192,7 +192,7 @@ async fn graph_still_works_for_non_bitemporal_collections_after_reopen() {
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
         .await
         .unwrap();
-    let db = NodeDbLite::open(storage, 1).await.unwrap();
+    let db = NodeDbLite::open(storage).await.unwrap();
 
     let ranks = db.graph_pagerank("plain", None, None, None).await.unwrap();
 

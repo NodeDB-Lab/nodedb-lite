@@ -32,7 +32,7 @@ mod tests {
 
     async fn make_db() -> std::sync::Arc<NodeDbLite<PagedbStorageMem>> {
         let storage = PagedbStorageMem::open_in_memory().await.unwrap();
-        NodeDbLite::open(storage, 1).await.unwrap()
+        NodeDbLite::open(storage).await.unwrap()
     }
 
     #[tokio::test]
@@ -192,7 +192,7 @@ mod tests {
     async fn flush_and_reopen() {
         {
             let s = PagedbStorageMem::open_in_memory().await.unwrap();
-            let db = NodeDbLite::open(s, 1).await.unwrap();
+            let db = NodeDbLite::open(s).await.unwrap();
 
             let mut doc = Document::new("d1");
             doc.set("key", Value::String("val".into()));
@@ -288,9 +288,7 @@ mod tests {
             ..LiteConfig::default()
         };
         let storage = PagedbStorageMem::open_in_memory().await.unwrap();
-        let db = NodeDbLite::open_with_config(storage, 1, config)
-            .await
-            .unwrap();
+        let db = NodeDbLite::open_with_config(storage, config).await.unwrap();
 
         // First insert: succeeds and updates memory stats so the governor
         // reports Critical after this call returns.

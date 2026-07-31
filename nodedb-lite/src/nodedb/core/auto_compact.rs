@@ -37,7 +37,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     ///
     /// ```ignore
     /// let config = LiteConfig { auto_compact_ms: 300_000, ..LiteConfig::default() };
-    /// let db = NodeDbLite::open_with_config(storage, peer_id, config).await?;
+    /// let db = NodeDbLite::open_with_config(storage, config).await?;
     /// ```
     ///
     /// Calling this directly spawns an additional task rather than replacing a

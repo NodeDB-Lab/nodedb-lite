@@ -178,7 +178,19 @@ pub(super) async fn dispatch_frame(
                     client.pause_for_auth().await;
                 }
 
-                if let Some(hint) = &reject.compensation {
+                // A peer-id collision is the one refusal the client can act on
+                // by itself, and the one it must: every later write carries the
+                // same refused id, so a replica that only reports it is
+                // permanently unable to sync. Rotating re-authors the local
+                // documents under a new identity and re-queues this delta with
+                // them, so it replaces the rollback rather than following it.
+                let collision = reject
+                    .compensation
+                    .as_ref()
+                    .is_some_and(|hint| hint.is_peer_id_collision());
+                if collision {
+                    delegate.rotate_peer_id().await;
+                } else if let Some(hint) = &reject.compensation {
                     delegate.reject_with_policy(reject.mutation_id, hint);
                 } else {
                     delegate.reject(reject.mutation_id);

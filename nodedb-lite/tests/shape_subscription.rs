@@ -10,10 +10,10 @@ use nodedb_types::sync::shape::{ShapeDefinition, ShapeType};
 use nodedb_types::sync::wire::*;
 
 fn make_client() -> Arc<SyncClient> {
-    Arc::new(SyncClient::new(
-        SyncConfig::new("wss://localhost:6433/sync", "test.jwt"),
-        1,
-    ))
+    Arc::new(SyncClient::new(SyncConfig::new(
+        "wss://localhost:6433/sync",
+        "test.jwt",
+    )))
 }
 
 #[tokio::test]
@@ -162,7 +162,12 @@ async fn handshake_includes_active_shapes() {
         });
     }
 
-    let handshake = client.build_handshake().await;
+    let identity = nodedb_lite::identity::LiteIdentity {
+        lite_id: "shape-test".to_string(),
+        epoch: 1,
+        peer_id: nodedb_lite::identity::mint_peer_id(),
+    };
+    let handshake = client.build_handshake(&identity).await;
     assert_eq!(handshake.subscribed_shapes.len(), 2);
     assert!(handshake.subscribed_shapes.contains(&"s1".to_string()));
     assert!(handshake.subscribed_shapes.contains(&"s2".to_string()));

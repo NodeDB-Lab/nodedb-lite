@@ -24,38 +24,35 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// present.
     pub(in crate::nodedb::core::open) async fn restore_identity_and_crdt(
         storage: &Arc<S>,
-        peer_id: u64,
-    ) -> NodeDbResult<(
-        CrdtEngine,
-        crate::engine::timeseries::identity::LiteIdentity,
-    )> {
-        // ── Load or create Lite identity (lite_id + epoch) ──
+    ) -> NodeDbResult<(CrdtEngine, crate::identity::LiteIdentity)> {
+        // ── Load or create Lite identity (lite_id + epoch + peer id) ──
         //
         // This must happen before any outbound sync so the handshake carries a
         // non-empty lite_id and epoch ≥ 1, enabling Origin's idempotent-producer
         // gate. The epoch is incremented on every open, so a new process
-        // incarnation fences out writes from the previous one.
-        let lite_identity =
-            crate::engine::timeseries::identity::LiteIdentity::load_or_create(&**storage)
-                .await
-                .map_err(|e| {
-                    // Preserve corruption typing so a corrupt identity read is
-                    // routed to the post-open recovery driver rather than
-                    // crash-looping as a generic storage error.
-                    let detail = format!("lite identity load failed: {e}");
-                    if crate::error::is_corruption(&e) {
-                        NodeDbError::segment_corrupted(detail)
-                    } else {
-                        NodeDbError::storage(detail)
-                    }
-                })?;
+        // incarnation fences out writes from the previous one. The peer id
+        // comes from the same record, which is what binds the identity every
+        // local operation is authored under to the store holding them.
+        let lite_identity = crate::identity::LiteIdentity::load_or_create(&**storage)
+            .await
+            .map_err(|e| {
+                // Preserve corruption typing so a corrupt identity read is
+                // routed to the post-open recovery driver rather than
+                // crash-looping as a generic storage error.
+                let detail = format!("lite identity load failed: {e}");
+                if crate::error::is_corruption(&e) {
+                    NodeDbError::segment_corrupted(detail)
+                } else {
+                    NodeDbError::storage(detail)
+                }
+            })?;
 
         // ── Restore CRDT state, one Loro document per collection ──
         // Snapshots are stored under `loro_snapshot:<collection>`, so the whole
         // set is recovered with a single prefix scan. A collection whose
         // snapshot fails its CRC32C check is dropped individually — the other
         // collections stay intact instead of the whole engine resetting.
-        let mut crdt = CrdtEngine::new(peer_id)
+        let mut crdt = CrdtEngine::new(lite_identity.peer_id)
             .map_err(|e| NodeDbError::storage(format!("CRDT init failed: {e}")))?;
         let snapshot_entries = storage
             .scan_prefix(Namespace::LoroState, CrdtEngine::snapshot_key_prefix())

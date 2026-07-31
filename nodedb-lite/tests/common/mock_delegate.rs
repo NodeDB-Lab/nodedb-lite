@@ -23,6 +23,9 @@ pub struct MockDelegate {
     imported_schemas: std::sync::Mutex<Vec<String>>,
     pending: std::sync::Mutex<Vec<PendingDelta>>,
     collection_metas: std::sync::Mutex<std::collections::HashMap<String, CollectionMeta>>,
+    identity: std::sync::Mutex<nodedb_lite::identity::LiteIdentity>,
+    identity_changes: AtomicU64,
+    peer_id_rotations: AtomicU64,
 }
 
 impl Default for MockDelegate {
@@ -41,7 +44,29 @@ impl MockDelegate {
             imported_schemas: std::sync::Mutex::new(Vec::new()),
             pending: std::sync::Mutex::new(Vec::new()),
             collection_metas: std::sync::Mutex::new(std::collections::HashMap::new()),
+            identity: std::sync::Mutex::new(nodedb_lite::identity::LiteIdentity {
+                lite_id: "mock-lite".to_string(),
+                epoch: 1,
+                peer_id: nodedb_lite::identity::mint_peer_id(),
+            }),
+            identity_changes: AtomicU64::new(0),
+            peer_id_rotations: AtomicU64::new(0),
         }
+    }
+
+    /// The Loro peer id this delegate currently reports.
+    pub fn peer_id(&self) -> u64 {
+        self.identity.lock().expect("identity lock").peer_id
+    }
+
+    /// How many times `rotate_peer_id` was invoked.
+    pub fn peer_id_rotations(&self) -> u64 {
+        self.peer_id_rotations.load(Ordering::Relaxed)
+    }
+
+    /// How many times `regenerate_identity` was invoked.
+    pub fn identity_changes(&self) -> u64 {
+        self.identity_changes.load(Ordering::Relaxed)
     }
 
     /// Highest mutation id passed to `acknowledge`, or 0 if none.
@@ -86,6 +111,21 @@ impl MockDelegate {
 
 #[async_trait::async_trait]
 impl SyncDelegate for MockDelegate {
+    fn sync_identity(&self) -> nodedb_lite::identity::LiteIdentity {
+        self.identity.lock().expect("identity lock").clone()
+    }
+    async fn regenerate_identity(&self) {
+        let mut identity = self.identity.lock().expect("identity lock");
+        identity.lite_id = format!("{}-regenerated", identity.lite_id);
+        identity.epoch = 1;
+        identity.peer_id = nodedb_lite::identity::mint_peer_id();
+        self.identity_changes.fetch_add(1, Ordering::Relaxed);
+    }
+    async fn rotate_peer_id(&self) {
+        let mut identity = self.identity.lock().expect("identity lock");
+        identity.peer_id = nodedb_lite::identity::mint_peer_id();
+        self.peer_id_rotations.fetch_add(1, Ordering::Relaxed);
+    }
     fn pending_deltas(&self) -> Vec<PendingDelta> {
         self.pending.lock().expect("pending lock").clone()
     }

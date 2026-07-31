@@ -38,6 +38,15 @@ impl CrdtEngine {
             .map(|s| s.row_ids(collection))
             .unwrap_or_default()
     }
+    /// The Loro peer id a collection's document authors under, if it has one.
+    ///
+    /// Derived from this engine's base peer id, so it changes with a peer-id
+    /// rotation — exposed so callers can assert the rotation actually reached
+    /// the documents rather than only the engine's own field.
+    pub fn state_peer_id(&self, collection: &str) -> Option<u64> {
+        self.states.get(collection).map(|s| s.peer_id())
+    }
+
     /// Register a collection name so it appears in `collection_names()` even
     /// before any document has been inserted into it.
     ///

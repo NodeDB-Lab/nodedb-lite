@@ -88,7 +88,7 @@ async fn shape_snapshot_populates_sync_client_state() {
 
     // Create a Lite SyncClient tracking the subscription state (mirrors
     // what the transport layer maintains during run_sync_loop).
-    let client = Arc::new(SyncClient::new(SyncConfig::new(_server.ws_url, ""), 9001));
+    let client = Arc::new(SyncClient::new(SyncConfig::new(_server.ws_url, "")));
 
     // Register the shape in the client's ShapeManager before subscribing.
     {
@@ -146,7 +146,7 @@ async fn shape_delta_advances_lsn_after_snapshot() {
     };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
-    let client = Arc::new(SyncClient::new(SyncConfig::new(_server.ws_url, ""), 9002));
+    let client = Arc::new(SyncClient::new(SyncConfig::new(_server.ws_url, "")));
 
     // Subscribe + snapshot.
     {
@@ -215,7 +215,7 @@ async fn sequence_gap_detection_and_resync_on_real_connection() {
     };
     let mut ws = connect_and_handshake(_server.ws_url).await;
 
-    let client = Arc::new(SyncClient::new(SyncConfig::new(_server.ws_url, ""), 9003));
+    let client = Arc::new(SyncClient::new(SyncConfig::new(_server.ws_url, "")));
 
     // Subscribe + snapshot so the client has a real baseline LSN from Origin.
     {

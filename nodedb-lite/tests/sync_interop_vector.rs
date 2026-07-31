@@ -61,15 +61,13 @@ async fn open_lite() -> Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()
         .await
         .expect("open_in_memory");
-    NodeDbLite::open(storage, 1)
-        .await
-        .expect("NodeDbLite::open")
+    NodeDbLite::open(storage).await.expect("NodeDbLite::open")
 }
 
 /// Wire up the sync transport and wait until the connection is established.
-async fn start_sync(lite: Arc<NodeDbLite<PagedbStorageMem>>, peer_id: u64) -> Arc<SyncClient> {
+async fn start_sync(lite: Arc<NodeDbLite<PagedbStorageMem>>) -> Arc<SyncClient> {
     let sync_config = SyncConfig::new(common::origin::ORIGIN_WS, "");
-    let sync_client = Arc::new(SyncClient::new(sync_config, peer_id));
+    let sync_client = Arc::new(SyncClient::new(sync_config));
     let delegate = Arc::clone(&lite) as Arc<dyn nodedb_lite::sync::SyncDelegate>;
     let client_clone = Arc::clone(&sync_client);
     tokio::spawn(async move {
@@ -112,7 +110,7 @@ async fn vector_inserts_replicate_to_origin() {
     pg.execute(CREATE_ORIGIN).await;
 
     let lite = open_lite().await;
-    let _sync = start_sync(Arc::clone(&lite), 1).await;
+    let _sync = start_sync(Arc::clone(&lite)).await;
 
     // Insert 5 well-separated vectors.
     for i in 0u32..5 {
@@ -168,7 +166,7 @@ async fn vector_delete_replicates_to_origin() {
     pg.execute(CREATE_ORIGIN).await;
 
     let lite = open_lite().await;
-    let _sync = start_sync(Arc::clone(&lite), 2).await;
+    let _sync = start_sync(Arc::clone(&lite)).await;
 
     // Insert 5 background vectors and 1 target (6 total).
     for i in 0u32..5 {
@@ -268,7 +266,7 @@ async fn vector_pre_connection_inserts_sync_after_connect() {
     }
 
     // Now start sync transport.
-    let _sync = start_sync(Arc::clone(&lite), 3).await;
+    let _sync = start_sync(Arc::clone(&lite)).await;
 
     // Wait up to 8 s for Origin to have 3 vectors.
     let mut origin_count: usize = 0;

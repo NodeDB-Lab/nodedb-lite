@@ -16,7 +16,7 @@ async fn open_db() -> std::sync::Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()
         .await
         .expect("open in-memory storage");
-    NodeDbLite::open(storage, 1).await.expect("open NodeDbLite")
+    NodeDbLite::open(storage).await.expect("open NodeDbLite")
 }
 
 // ---------------------------------------------------------------------------

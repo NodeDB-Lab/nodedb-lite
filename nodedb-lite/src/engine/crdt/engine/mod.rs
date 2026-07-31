@@ -19,6 +19,7 @@ mod mutate;
 mod pending;
 mod persist;
 mod read;
+mod rotate;
 pub mod types;
 
 #[cfg(test)]

@@ -41,8 +41,15 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// [`LiteConfig::from_env()`], falling back to defaults when variables are
     /// absent or malformed — which includes the default one-second auto-flush
     /// interval, so writes are durable within a second of landing.
-    pub async fn open(storage: S, peer_id: u64) -> NodeDbResult<Arc<Self>> {
-        Self::open_with_config(storage, peer_id, LiteConfig::from_env()).await
+    ///
+    /// The instance's Loro peer id is not a parameter: it is minted on first
+    /// open and persisted with the data it authors. A caller-supplied id is
+    /// the same constant in every install of an application, which hands two
+    /// live replicas one producer identity and has the CRDT merge discard one
+    /// of them; and an id that lives only in the caller's argument cannot be
+    /// rotated durably when Origin refuses it.
+    pub async fn open(storage: S) -> NodeDbResult<Arc<Self>> {
+        Self::open_with_config(storage, LiteConfig::from_env()).await
     }
 
     /// Open with an explicit [`LiteConfig`].
@@ -51,32 +58,24 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// memory budgets or the background maintenance intervals. The config is
     /// validated before any storage work happens, so an incoherent budget is
     /// rejected rather than silently over-allocating.
-    pub async fn open_with_config(
-        storage: S,
-        peer_id: u64,
-        config: LiteConfig,
-    ) -> NodeDbResult<Arc<Self>> {
-        Self::open_inner(storage, peer_id, config).await
+    pub async fn open_with_config(storage: S, config: LiteConfig) -> NodeDbResult<Arc<Self>> {
+        Self::open_inner(storage, config).await
     }
 
     /// Open with a custom memory budget, taking every other setting from
     /// [`LiteConfig::default()`] — including the default auto-flush interval.
     ///
     /// Prefer [`open_with_config`](Self::open_with_config) for new callers.
-    pub async fn open_with_budget(
-        storage: S,
-        peer_id: u64,
-        memory_budget: usize,
-    ) -> NodeDbResult<Arc<Self>> {
+    pub async fn open_with_budget(storage: S, memory_budget: usize) -> NodeDbResult<Arc<Self>> {
         let config = LiteConfig {
             memory_budget,
             ..LiteConfig::default()
         };
-        Self::open_with_config(storage, peer_id, config).await
+        Self::open_with_config(storage, config).await
     }
 
     #[allow(clippy::await_holding_lock)]
-    async fn open_inner(storage: S, peer_id: u64, config: LiteConfig) -> NodeDbResult<Arc<Self>> {
+    async fn open_inner(storage: S, config: LiteConfig) -> NodeDbResult<Arc<Self>> {
         config.validate()?;
 
         let governor = crate::memory::MemoryGovernor::from_config(&config);
@@ -92,7 +91,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         // ── Restore Lite identity + CRDT state (snapshots, bitemporal
         // backfill, pending deltas, partial-flush safety, legacy CSR cleanup) ──
-        let (crdt, lite_identity) = Self::restore_identity_and_crdt(&storage, peer_id).await?;
+        let (crdt, lite_identity) = Self::restore_identity_and_crdt(&storage).await?;
 
         // ── Restore FTS indices ──
         let fts_manager = Self::restore_fts_indices(&storage).await?;
@@ -244,8 +243,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
             spatial_outbound: spatial_outbound_init,
             #[cfg(not(target_arch = "wasm32"))]
             timeseries_outbound: timeseries_outbound_init,
-            sync_lite_id: lite_identity.lite_id,
-            sync_epoch: lite_identity.epoch,
+            identity: Mutex::new(lite_identity),
+            identity_change: tokio::sync::Mutex::new(()),
             sync_enabled,
             kv_cache: Mutex::new(lru::LruCache::new(kv_cache_capacity)),
             kv_write_buf: Mutex::new(KvWriteBuffer {

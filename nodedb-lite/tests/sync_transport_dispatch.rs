@@ -39,10 +39,10 @@ impl Drop for LoopGuard {
 }
 
 fn make_client(origin: &MockOrigin) -> Arc<SyncClient> {
-    Arc::new(SyncClient::new(
-        SyncConfig::new(origin.url(), "test.jwt.token"),
-        1,
-    ))
+    Arc::new(SyncClient::new(SyncConfig::new(
+        origin.url(),
+        "test.jwt.token",
+    )))
 }
 
 fn spawn_loop(client: &Arc<SyncClient>, mock: &Arc<MockDelegate>) -> LoopGuard {
@@ -110,6 +110,51 @@ async fn dispatch_delta_reject() {
         "a DeltaReject to reach the delegate",
     )
     .await;
+}
+
+/// Origin refuses a delta whose Loro peer id belongs to another replica. The
+/// client is the only layer that can recover: every later write carries the
+/// same refused id, so a client that merely reports the refusal never syncs
+/// again. The refusal must reach the rotation path, not the rollback path.
+#[tokio::test]
+async fn peer_id_collision_reject_drives_a_rotation() {
+    let origin = MockOrigin::bind().await;
+    let client = make_client(&origin);
+    let mock = Arc::new(MockDelegate::new());
+    let before = mock.peer_id();
+    let _guard = spawn_loop(&client, &mock);
+
+    let mut ws = origin.accept_handshaked().await;
+    send_frame(
+        &mut ws,
+        SyncMessageType::DeltaReject,
+        &nodedb_types::sync::wire::DeltaRejectMsg {
+            mutation_id: 7,
+            reason: "PEER_ID_COLLISION: peer id 7 on collection 'users' is already owned by \
+                     another replica"
+                .into(),
+            compensation: Some(nodedb_types::sync::compensation::CompensationHint::Custom {
+                constraint: nodedb_types::sync::compensation::CompensationHint::PEER_ID_COLLISION
+                    .into(),
+                detail: "peer id owned by another replica".into(),
+            }),
+        },
+    )
+    .await;
+
+    let recorded = mock.as_ref();
+    await_until(
+        move || async move { recorded.peer_id_rotations() == 1 },
+        "a peer-id collision refusal to drive a rotation",
+    )
+    .await;
+
+    assert_ne!(mock.peer_id(), before, "the rotation must change the id");
+    assert!(
+        mock.rejected().is_empty(),
+        "a collision must not be rolled back as a constraint violation — that deletes the \
+         row and drops the write"
+    );
 }
 
 /// A `Gap` ack means Origin did NOT apply the delta — it expected a different

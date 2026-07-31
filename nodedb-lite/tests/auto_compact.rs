@@ -33,7 +33,7 @@ async fn auto_compact_runs_and_preserves_data() {
         ..LiteConfig::default()
     };
     let db = Arc::new(
-        NodeDbLite::open_with_config(storage, 1, config)
+        NodeDbLite::open_with_config(storage, config)
             .await
             .expect("open db"),
     );
@@ -101,7 +101,7 @@ async fn disabled_auto_compact_is_noop() {
         ..LiteConfig::default()
     };
     let db = Arc::new(
-        NodeDbLite::open_with_config(storage, 1, config)
+        NodeDbLite::open_with_config(storage, config)
             .await
             .expect("open db"),
     );
@@ -166,7 +166,6 @@ async fn open_with_config_honors_auto_compact_ms() {
         .expect("open control storage");
     let control = NodeDbLite::open_with_config(
         control_storage,
-        1,
         LiteConfig {
             auto_compact_ms: 0,
             ..LiteConfig::default()
@@ -191,7 +190,6 @@ async fn open_with_config_honors_auto_compact_ms() {
         .expect("open storage");
     let db = NodeDbLite::open_with_config(
         storage,
-        1,
         LiteConfig {
             auto_compact_ms: 100,
             ..LiteConfig::default()

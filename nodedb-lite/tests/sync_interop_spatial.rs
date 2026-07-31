@@ -53,15 +53,13 @@ async fn open_lite() -> Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()
         .await
         .expect("open_in_memory");
-    NodeDbLite::open(storage, 1)
-        .await
-        .expect("NodeDbLite::open")
+    NodeDbLite::open(storage).await.expect("NodeDbLite::open")
 }
 
 /// Wire up the sync transport and wait until the connection is established.
-async fn start_sync(lite: Arc<NodeDbLite<PagedbStorageMem>>, peer_id: u64) -> Arc<SyncClient> {
+async fn start_sync(lite: Arc<NodeDbLite<PagedbStorageMem>>) -> Arc<SyncClient> {
     let sync_config = SyncConfig::new(common::origin::ORIGIN_WS, "");
-    let sync_client = Arc::new(SyncClient::new(sync_config, peer_id));
+    let sync_client = Arc::new(SyncClient::new(sync_config));
     let delegate = Arc::clone(&lite) as Arc<dyn nodedb_lite::sync::SyncDelegate>;
     let client_clone = Arc::clone(&sync_client);
     tokio::spawn(async move {
@@ -111,7 +109,7 @@ async fn spatial_inserts_replicate_to_origin() {
     pg.execute(CREATE_ORIGIN).await;
 
     let lite = open_lite().await;
-    let _sync = start_sync(Arc::clone(&lite), 20).await;
+    let _sync = start_sync(Arc::clone(&lite)).await;
 
     // Three points close to London (within a 50 km radius of 0,51.5).
     let points: &[(&str, f64, f64)] = &[
@@ -165,7 +163,7 @@ async fn spatial_delete_replicates_to_origin() {
     pg.execute(CREATE_ORIGIN).await;
 
     let lite = open_lite().await;
-    let _sync = start_sync(Arc::clone(&lite), 21).await;
+    let _sync = start_sync(Arc::clone(&lite)).await;
 
     // Insert 2 background points and 1 target point near London.
     let bg_points: &[(&str, f64, f64)] = &[("bg_a", -0.20, 51.55), ("bg_b", -0.05, 51.45)];
@@ -257,7 +255,7 @@ async fn spatial_pre_connection_inserts_sync_after_connect() {
     }
 
     // Now start sync transport.
-    let _sync = start_sync(Arc::clone(&lite), 22).await;
+    let _sync = start_sync(Arc::clone(&lite)).await;
 
     // Wait up to 8 s for both pre-connection points to appear on Origin.
     let mut origin_count: usize = 0;
@@ -307,7 +305,7 @@ async fn spatial_collection_registers_on_origin_via_announce() {
         .await
         .expect("Lite create_collection spatial_sync_test");
 
-    let _sync = start_sync(Arc::clone(&lite), 23).await;
+    let _sync = start_sync(Arc::clone(&lite)).await;
 
     let points: &[(&str, f64, f64)] = &[
         ("reg_a", -0.10, 51.50),

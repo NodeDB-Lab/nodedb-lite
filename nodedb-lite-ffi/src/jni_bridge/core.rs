@@ -32,7 +32,6 @@ pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_00024Companion_nativeOpen
     mut env: JNIEnv,
     _class: JClass,
     path: JString,
-    peer_id: jlong,
     passphrase: JString,
 ) -> jlong {
     ffi_guard(0, || {
@@ -69,8 +68,7 @@ pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_00024Companion_nativeOpen
             .as_ref()
             .map_or(std::ptr::null(), |c| c.as_ptr());
 
-        let handle =
-            unsafe { super::super::nodedb_open(path_c.as_ptr(), peer_id as u64, passphrase_ptr) };
+        let handle = unsafe { super::super::nodedb_open(path_c.as_ptr(), passphrase_ptr) };
         handle as jlong
     })
 }

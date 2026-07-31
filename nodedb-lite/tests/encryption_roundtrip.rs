@@ -14,7 +14,7 @@ async fn encrypted_value_survives_reopen_with_same_passphrase() {
         let storage = PagedbStorageDefault::open(&path, Encryption::passphrase("correct horse"))
             .await
             .expect("open encrypted");
-        let db = NodeDbLite::open(storage, 1).await.expect("open db");
+        let db = NodeDbLite::open(storage).await.expect("open db");
         db.kv_put("col", "key", b"secret-value")
             .await
             .expect("kv_put");
@@ -30,7 +30,7 @@ async fn encrypted_value_survives_reopen_with_same_passphrase() {
         let storage = PagedbStorageDefault::open(&path, Encryption::passphrase("correct horse"))
             .await
             .expect("reopen encrypted");
-        let db = NodeDbLite::open(storage, 1).await.expect("reopen db");
+        let db = NodeDbLite::open(storage).await.expect("reopen db");
         let got = db.kv_get("col", "key").await.expect("kv_get");
         assert_eq!(
             got.as_deref(),
@@ -45,7 +45,7 @@ async fn seed_encrypted_store(path: &std::path::Path) {
     let storage = PagedbStorageDefault::open(path, Encryption::passphrase("right-key"))
         .await
         .expect("open encrypted");
-    let db = NodeDbLite::open(storage, 1).await.expect("open db");
+    let db = NodeDbLite::open(storage).await.expect("open db");
     db.kv_put("col", "key", b"top-secret")
         .await
         .expect("kv_put");
@@ -94,7 +94,7 @@ async fn a_failed_unlock_leaves_the_store_intact() {
     let storage = PagedbStorageDefault::open(&path, Encryption::passphrase("right-key"))
         .await
         .expect("the correct passphrase must still open the store after a failed attempt");
-    let db = NodeDbLite::open(storage, 1).await.expect("reopen db");
+    let db = NodeDbLite::open(storage).await.expect("reopen db");
     let got = db.kv_get("col", "key").await.expect("kv_get");
     assert_eq!(
         got.as_deref(),

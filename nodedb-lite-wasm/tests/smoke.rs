@@ -11,13 +11,13 @@ use nodedb_lite_wasm::NodeDbLiteWasm;
 #[wasm_bindgen_test]
 async fn open_in_memory_smoke() {
     // open_in_memory is the canonical Rust name; the JS binding is openInMemory.
-    let db = NodeDbLiteWasm::open_in_memory(1).await.unwrap();
+    let db = NodeDbLiteWasm::open_in_memory().await.unwrap();
     db.flush().await.unwrap();
 }
 
 #[wasm_bindgen_test]
 async fn document_put_get_roundtrip() {
-    let db = NodeDbLiteWasm::open_in_memory(2).await.unwrap();
+    let db = NodeDbLiteWasm::open_in_memory().await.unwrap();
 
     let id = db
         .document_put("col", "", r#"{"name":{"String":"Alice"}}"#)
@@ -32,6 +32,6 @@ async fn document_put_get_roundtrip() {
 #[wasm_bindgen_test]
 async fn open_alias_still_works() {
     // `open` is the backward-compat alias for `open_in_memory`.
-    let db = NodeDbLiteWasm::open(3).await.unwrap();
+    let db = NodeDbLiteWasm::open().await.unwrap();
     db.flush().await.unwrap();
 }

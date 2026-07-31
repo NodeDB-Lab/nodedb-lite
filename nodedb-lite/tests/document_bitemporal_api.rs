@@ -17,7 +17,7 @@ use nodedb_lite::engine::document::history::ops::is_bitemporal;
 
 async fn open_db() -> std::sync::Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory().await.unwrap();
-    NodeDbLite::open(storage, 1).await.unwrap()
+    NodeDbLite::open(storage).await.unwrap()
 }
 
 /// Open a db and return a cloned storage handle for direct inspection.
@@ -27,7 +27,7 @@ async fn open_db_with_storage() -> (
 ) {
     let storage = PagedbStorageMem::open_in_memory().await.unwrap();
     let storage_clone = storage.clone();
-    let db = NodeDbLite::open(storage, 1).await.unwrap();
+    let db = NodeDbLite::open(storage).await.unwrap();
     (db, storage_clone)
 }
 
@@ -309,7 +309,7 @@ async fn sql_ddl_bitemporal_collection_is_queryable_and_persists_meta() {
 
     let storage = PagedbStorageMem::open_in_memory().await.unwrap();
     let storage_clone = storage.clone();
-    let db = NodeDbLite::open(storage, 1).await.unwrap();
+    let db = NodeDbLite::open(storage).await.unwrap();
 
     db.execute_sql("CREATE COLLECTION entries WITH (bitemporal=true)", &[])
         .await

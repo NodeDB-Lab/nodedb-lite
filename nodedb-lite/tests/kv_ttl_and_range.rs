@@ -11,7 +11,7 @@ async fn open_memory_db() -> std::sync::Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()
         .await
         .expect("open in-memory storage");
-    NodeDbLite::open(storage, 1).await.expect("open NodeDbLite")
+    NodeDbLite::open(storage).await.expect("open NodeDbLite")
 }
 
 // ---------------------------------------------------------------------------
@@ -59,7 +59,7 @@ async fn ttl_survives_reopen() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("open storage");
-        let db = NodeDbLite::open(storage, 1).await.expect("open db");
+        let db = NodeDbLite::open(storage).await.expect("open db");
         db.kv_put_with_ttl("col", "key", b"persistent", 1_000_000)
             .await
             .expect("kv_put_with_ttl");
@@ -70,7 +70,7 @@ async fn ttl_survives_reopen() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("reopen storage");
-        let db = NodeDbLite::open(storage, 1).await.expect("reopen db");
+        let db = NodeDbLite::open(storage).await.expect("reopen db");
         let got = db.kv_get("col", "key").await.expect("kv_get after reopen");
         assert_eq!(
             got.as_deref(),
@@ -95,7 +95,7 @@ async fn ttl_expired_after_reopen() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("open storage");
-        let db = NodeDbLite::open(storage, 1).await.expect("open db");
+        let db = NodeDbLite::open(storage).await.expect("open db");
         db.kv_put_with_ttl("col", "key", b"transient", 50)
             .await
             .expect("kv_put_with_ttl");
@@ -109,7 +109,7 @@ async fn ttl_expired_after_reopen() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("reopen storage");
-        let db = NodeDbLite::open(storage, 1).await.expect("reopen db");
+        let db = NodeDbLite::open(storage).await.expect("reopen db");
         let got = db.kv_get("col", "key").await.expect("kv_get after reopen");
         assert!(got.is_none(), "expired key should return None after reopen");
     }

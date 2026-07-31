@@ -33,7 +33,6 @@ use crate::util::{ffi_guard, handle_ref, ptr_to_str, resolve_encryption};
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nodedb_open(
     path: *const c_char,
-    peer_id: u64,
     passphrase: *const c_char,
 ) -> *mut NodeDbHandle {
     ffi_guard(std::ptr::null_mut(), || {
@@ -62,13 +61,13 @@ pub unsafe extern "C" fn nodedb_open(
                 Some(t) => t,
                 None => return std::ptr::null_mut(),
             };
-            let db = match rt.block_on(NodeDbLite::open_at_path(&tmp.0, peer_id, enc)) {
+            let db = match rt.block_on(NodeDbLite::open_at_path(&tmp.0, enc)) {
                 Ok(db) => db,
                 Err(_) => return std::ptr::null_mut(),
             };
             (db, Some(tmp))
         } else {
-            let db = match rt.block_on(NodeDbLite::open_at_path(path, peer_id, enc)) {
+            let db = match rt.block_on(NodeDbLite::open_at_path(path, enc)) {
                 Ok(db) => db,
                 Err(_) => return std::ptr::null_mut(),
             };
@@ -97,7 +96,6 @@ pub unsafe extern "C" fn nodedb_open(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nodedb_open_with_config(
     path: *const c_char,
-    peer_id: u64,
     memory_mb: u64,
     passphrase: *const c_char,
 ) -> *mut NodeDbHandle {
@@ -136,17 +134,13 @@ pub unsafe extern "C" fn nodedb_open_with_config(
                 Some(t) => t,
                 None => return std::ptr::null_mut(),
             };
-            let db = match rt.block_on(NodeDbLite::open_at_path_with_config(
-                &tmp.0, peer_id, enc, config,
-            )) {
+            let db = match rt.block_on(NodeDbLite::open_at_path_with_config(&tmp.0, enc, config)) {
                 Ok(db) => db,
                 Err(_) => return std::ptr::null_mut(),
             };
             (db, Some(tmp))
         } else {
-            let db = match rt.block_on(NodeDbLite::open_at_path_with_config(
-                path, peer_id, enc, config,
-            )) {
+            let db = match rt.block_on(NodeDbLite::open_at_path_with_config(path, enc, config)) {
                 Ok(db) => db,
                 Err(_) => return std::ptr::null_mut(),
             };

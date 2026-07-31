@@ -51,9 +51,9 @@ const SIGNALS: &str = "signals";
 const CREATE_PROBE: &str = "CREATE COLLECTION probe WITH (bitemporal=true)";
 
 /// Wire up the sync transport and wait until the connection is established.
-async fn start_sync(lite: Arc<NodeDbLite<PagedbStorageMem>>, peer_id: u64) -> Arc<SyncClient> {
+async fn start_sync(lite: Arc<NodeDbLite<PagedbStorageMem>>) -> Arc<SyncClient> {
     let sync_config = SyncConfig::new(common::origin::ORIGIN_WS, "");
-    let sync_client = Arc::new(SyncClient::new(sync_config, peer_id));
+    let sync_client = Arc::new(SyncClient::new(sync_config));
     let delegate = Arc::clone(&lite) as Arc<dyn nodedb_lite::sync::SyncDelegate>;
     let client_clone = Arc::clone(&sync_client);
     tokio::spawn(async move {
@@ -89,9 +89,7 @@ fn make_doc(id: &str, body: &str) -> Document {
 ///
 /// Returns `None` when the Origin binary is unavailable — callers should
 /// print a skip message and return early.
-async fn setup_probe(
-    peer_id: u64,
-) -> Option<(
+async fn setup_probe() -> Option<(
     OriginServer,
     OriginPgwire,
     Arc<NodeDbLite<PagedbStorageMem>>,
@@ -106,7 +104,7 @@ async fn setup_probe(
         .await
         .expect("Lite CREATE COLLECTION probe WITH (bitemporal=true)");
 
-    let sync = start_sync(Arc::clone(&lite), peer_id).await;
+    let sync = start_sync(Arc::clone(&lite)).await;
     Some((origin, pg, lite, sync))
 }
 
@@ -141,7 +139,7 @@ async fn wait_for_probe_rows(pg: &OriginPgwire) -> usize {
 /// against.
 #[tokio::test]
 async fn documents_only_replicate_to_origin() {
-    let Some((_origin, pg, lite, _sync)) = setup_probe(40).await else {
+    let Some((_origin, pg, lite, _sync)) = setup_probe().await else {
         eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
         return;
     };
@@ -177,7 +175,7 @@ async fn documents_only_replicate_to_origin() {
 /// regression guard.
 #[tokio::test]
 async fn interleaved_second_collection_writes_still_replicate() {
-    let Some((_origin, pg, lite, _sync)) = setup_probe(41).await else {
+    let Some((_origin, pg, lite, _sync)) = setup_probe().await else {
         eprintln!("SKIP: Origin binary unavailable (set NODEDB_BIN or run via `cargo nextest`)");
         return;
     };

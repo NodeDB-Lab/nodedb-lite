@@ -12,7 +12,15 @@ impl SyncClient {
     /// Respects the flow control window: returns at most `next_batch_size()`
     /// deltas. Each message includes a CRC32C checksum of the delta payload
     /// for integrity verification at Origin.
-    pub async fn build_delta_pushes(&self, pending: &[PendingDelta]) -> Vec<DeltaPushMsg> {
+    ///
+    /// `peer_id` is passed in rather than held on the client: it changes when
+    /// a collision refusal rotates this replica's identity, and a delta pushed
+    /// under the previous one is refused again.
+    pub async fn build_delta_pushes(
+        &self,
+        pending: &[PendingDelta],
+        peer_id: u64,
+    ) -> Vec<DeltaPushMsg> {
         let flow = self.flow.lock().await;
         let batch_limit = flow.next_batch_size();
         drop(flow);
@@ -23,6 +31,21 @@ impl SyncClient {
 
         let device_valid_time_ms = crate::runtime::now_millis() as i64;
 
+        // Remember what each in-flight mutation targets. A `DeltaRejectMsg`
+        // carries only the mutation id, so without this the compensation event
+        // reaches the application naming neither the collection nor the
+        // document that was refused — leaving it unable to roll back, retry, or
+        // prompt for the write that failed.
+        {
+            let mut targets = self.delta_targets.lock().await;
+            for delta in pending.iter().take(batch_limit) {
+                targets.insert(
+                    delta.mutation_id,
+                    (delta.collection.clone(), delta.document_id.clone()),
+                );
+            }
+        }
+
         pending
             .iter()
             .take(batch_limit)
@@ -31,7 +54,7 @@ impl SyncClient {
                 document_id: delta.document_id.clone(),
                 checksum: crc32c::crc32c(&delta.delta_bytes),
                 delta: delta.delta_bytes.clone(),
-                peer_id: self.peer_id,
+                peer_id,
                 mutation_id: delta.mutation_id,
                 device_valid_time_ms: Some(device_valid_time_ms),
                 // producer_id, epoch, and seq are overwritten with real producer/epoch/stable-seq in push_crdt_deltas.
@@ -58,6 +81,10 @@ impl SyncClient {
 
     /// Process a DeltaAck from Origin.
     pub async fn handle_delta_ack(&self, ack: &DeltaAckMsg) {
+        // The mutation left the in-flight window; its target is no longer
+        // needed to report a rejection against.
+        self.delta_targets.lock().await.remove(&ack.mutation_id);
+
         let mut clock = self.clock.lock().await;
         clock.advance(0, ack.lsn); // peer 0 = Origin convention.
         drop(clock);
@@ -103,22 +130,33 @@ impl SyncClient {
         }
         self.metrics.record_reject();
 
+        let (collection, document_id) = self
+            .delta_targets
+            .lock()
+            .await
+            .remove(&reject.mutation_id)
+            .unwrap_or_default();
+
         if let Some(hint) = &reject.compensation {
             use nodedb_types::sync::compensation::CompensationHint;
-            let is_conflict = matches!(
-                hint,
+            let is_conflict = match hint {
                 CompensationHint::UniqueViolation { .. }
-                    | CompensationHint::ForeignKeyMissing { .. }
-                    | CompensationHint::SchemaViolation { .. }
-            );
+                | CompensationHint::ForeignKeyMissing { .. }
+                | CompensationHint::SchemaViolation { .. } => true,
+                // A refusal the server cannot resolve for us is a conflict with
+                // another replica as much as a UNIQUE violation is; counting it
+                // is what makes a replica stuck on a collision visible.
+                CompensationHint::Custom { .. } => true,
+                _ => false,
+            };
             if is_conflict {
                 self.metrics.record_conflict(&reject.reason);
             }
 
             self.compensation.dispatch(CompensationEvent {
                 mutation_id: reject.mutation_id,
-                collection: String::new(),
-                document_id: String::new(),
+                collection,
+                document_id,
                 hint: hint.clone(),
             });
         }
@@ -137,7 +175,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_delta_pushes() {
-        let client = SyncClient::new(make_config(), 42);
+        let client = SyncClient::new(make_config());
         let pending = vec![
             PendingDelta {
                 mutation_id: 1,
@@ -155,7 +193,7 @@ mod tests {
             },
         ];
 
-        let msgs = client.build_delta_pushes(&pending).await;
+        let msgs = client.build_delta_pushes(&pending, 42).await;
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].peer_id, 42);
         assert_eq!(msgs[0].mutation_id, 1);
@@ -166,7 +204,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_delta_ack_advances_clock() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
         client
             .handle_delta_ack(&DeltaAckMsg {
                 mutation_id: 1,
@@ -183,7 +221,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_delta_reject_dispatches_compensation() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
 
         let count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let count_clone = count.clone();
@@ -209,7 +247,7 @@ mod tests {
 
     #[tokio::test]
     async fn delta_push_includes_crc32c() {
-        let client = SyncClient::new(make_config(), 42);
+        let client = SyncClient::new(make_config());
         let delta_bytes = vec![1, 2, 3, 4, 5];
         let expected_crc = crc32c::crc32c(&delta_bytes);
         let pending = vec![PendingDelta {
@@ -219,7 +257,7 @@ mod tests {
             delta_bytes,
             seq: 0,
         }];
-        let msgs = client.build_delta_pushes(&pending).await;
+        let msgs = client.build_delta_pushes(&pending, 42).await;
         assert_eq!(msgs[0].checksum, expected_crc);
         assert_ne!(msgs[0].checksum, 0);
     }
@@ -228,7 +266,6 @@ mod tests {
     async fn flow_control_pauses_when_window_full() {
         let client = SyncClient::with_flow_control(
             make_config(),
-            1,
             crate::sync::flow_control::FlowControlConfig {
                 max_in_flight: 2,
                 initial_batch_size: 10,
@@ -259,12 +296,12 @@ mod tests {
             },
         ];
 
-        let msgs = client.build_delta_pushes(&pending).await;
+        let msgs = client.build_delta_pushes(&pending, 42).await;
         assert_eq!(msgs.len(), 2);
 
         client.record_push(&[1, 2]).await;
 
-        let msgs = client.build_delta_pushes(&pending).await;
+        let msgs = client.build_delta_pushes(&pending, 42).await;
         assert_eq!(msgs.len(), 0);
 
         client
@@ -276,7 +313,7 @@ mod tests {
                 status: nodedb_types::sync::wire::AckStatus::Applied,
             })
             .await;
-        let msgs = client.build_delta_pushes(&pending).await;
+        let msgs = client.build_delta_pushes(&pending, 42).await;
         assert_eq!(msgs.len(), 1);
     }
 }

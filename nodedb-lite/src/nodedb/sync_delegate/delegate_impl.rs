@@ -20,6 +20,34 @@ use super::super::core::NodeDbLite;
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
+    fn sync_identity(&self) -> crate::identity::LiteIdentity {
+        NodeDbLite::sync_identity(self)
+    }
+
+    async fn regenerate_identity(&self) {
+        if let Err(e) = NodeDbLite::regenerate_identity(self).await {
+            // The instance keeps authoring under a producer identity Origin has
+            // already rejected as forked, so every push from here is refused.
+            // Nothing local can repair that, and continuing quietly is how the
+            // replica ends up permanently desynced without a signal.
+            tracing::error!(
+                error = %e,
+                "SyncDelegate: fork recovery failed — this replica cannot sync until its \
+                 producer identity is replaced"
+            );
+        }
+    }
+
+    async fn rotate_peer_id(&self) {
+        if let Err(e) = NodeDbLite::rotate_peer_id(self).await {
+            tracing::error!(
+                error = %e,
+                "SyncDelegate: peer-id rotation failed — this replica cannot sync until its \
+                 Loro peer id is replaced"
+            );
+        }
+    }
+
     fn pending_deltas(&self) -> Vec<crate::engine::crdt::engine::PendingDelta> {
         self.pending_crdt_deltas().unwrap_or_default()
     }
@@ -52,7 +80,7 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         mutation_id: u64,
         hint: &nodedb_types::sync::compensation::CompensationHint,
     ) {
-        super::array_handlers::handle_reject_with_policy_impl(self, mutation_id, hint);
+        super::reject::handle_reject_with_policy_impl(self, mutation_id, hint);
     }
 
     fn import_remote(&self, collection: &str, data: &[u8]) {
@@ -83,18 +111,18 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         &self,
         msg: &nodedb_types::sync::wire::ArrayDeltaMsg,
     ) -> Option<nodedb_types::sync::wire::ArrayAckMsg> {
-        super::array_handlers::handle_array_delta_impl(self, msg)
+        super::array::handle_array_delta_impl(self, msg)
     }
 
     fn handle_array_delta_batch(
         &self,
         msg: &nodedb_types::sync::wire::ArrayDeltaBatchMsg,
     ) -> Option<nodedb_types::sync::wire::ArrayAckMsg> {
-        super::array_handlers::handle_array_delta_batch_impl(self, msg)
+        super::array::handle_array_delta_batch_impl(self, msg)
     }
 
     fn handle_array_reject(&self, msg: &nodedb_types::sync::wire::ArrayRejectMsg) {
-        super::array_handlers::handle_array_reject_impl(self, msg);
+        super::array::handle_array_reject_impl(self, msg);
     }
 
     async fn pending_columnar_batches(

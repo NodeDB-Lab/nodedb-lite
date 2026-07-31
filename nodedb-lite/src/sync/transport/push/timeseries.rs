@@ -25,7 +25,11 @@ where
     S: SinkExt<Message> + Unpin,
     S::Error: std::fmt::Display,
 {
-    let lite_id = format!("{}", client.peer_id());
+    // The instance's own identity, not its Loro peer id: Origin dedups these
+    // entries by `lite_id`, and a peer id both names a different thing and
+    // changes under a collision rotation, which would split one producer's
+    // stream in two.
+    let lite_id = delegate.sync_identity().lite_id;
     let producer_id = client.producer_id().await;
     let epoch = client.accepted_epoch().await;
 

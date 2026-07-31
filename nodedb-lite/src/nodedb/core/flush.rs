@@ -24,6 +24,19 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         let mut ops = Vec::new();
 
+        // Delta entries already on disk. Restore prefers these over the bulk
+        // blob, so any one that is no longer pending — acknowledged by Origin,
+        // or replaced by a peer-id rotation that re-authored the row — would
+        // come back on the next open and be pushed again. They are deleted in
+        // the same batch that writes the current set.
+        let persisted_delta_keys: Vec<Vec<u8>> = self
+            .storage
+            .scan_prefix(Namespace::Crdt, b"delta:")
+            .await?
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+
         // ── Persist one CRDT snapshot per collection (CRC32C wrapped) ──
         // Each collection owns its own Loro document, so each gets its own
         // storage entry under `loro_snapshot:<collection>`.
@@ -44,6 +57,19 @@ impl<S: StorageEngine> NodeDbLite<S> {
             // Also write the legacy bulk blob for backward compatibility.
             let pending = crdt.pending_deltas();
             let max_mid = pending.iter().map(|d| d.mutation_id).max().unwrap_or(0);
+
+            let live_keys: std::collections::HashSet<Vec<u8>> = pending
+                .iter()
+                .map(|d| CrdtEngine::delta_storage_key(d.mutation_id))
+                .collect();
+            for key in persisted_delta_keys {
+                if !live_keys.contains(&key) {
+                    ops.push(WriteOp::Delete {
+                        ns: Namespace::Crdt,
+                        key,
+                    });
+                }
+            }
 
             for delta in pending {
                 let key = CrdtEngine::delta_storage_key(delta.mutation_id);

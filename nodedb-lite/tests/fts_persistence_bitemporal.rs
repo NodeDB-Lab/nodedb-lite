@@ -28,7 +28,7 @@ async fn fts_returns_bitemporal_documents_after_reopen_without_explicit_flush() 
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .unwrap();
-        let db = NodeDbLite::open(storage, 1).await.unwrap();
+        let db = NodeDbLite::open(storage).await.unwrap();
         db.execute_sql("CREATE COLLECTION entries WITH (bitemporal=true)", &[])
             .await
             .unwrap();
@@ -42,7 +42,7 @@ async fn fts_returns_bitemporal_documents_after_reopen_without_explicit_flush() 
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
         .await
         .unwrap();
-    let db = NodeDbLite::open(storage, 1).await.unwrap();
+    let db = NodeDbLite::open(storage).await.unwrap();
     let results = db
         .text_search(
             "entries",
@@ -76,7 +76,7 @@ async fn fts_returns_only_live_versions_after_reopen() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .unwrap();
-        let db = NodeDbLite::open(storage, 1).await.unwrap();
+        let db = NodeDbLite::open(storage).await.unwrap();
         db.execute_sql("CREATE COLLECTION entries WITH (bitemporal=true)", &[])
             .await
             .unwrap();
@@ -97,7 +97,7 @@ async fn fts_returns_only_live_versions_after_reopen() {
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
         .await
         .unwrap();
-    let db = NodeDbLite::open(storage, 1).await.unwrap();
+    let db = NodeDbLite::open(storage).await.unwrap();
 
     let r_live = db
         .text_search(
@@ -149,7 +149,7 @@ async fn fts_still_works_for_non_bitemporal_collections_after_reopen() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .unwrap();
-        let db = NodeDbLite::open(storage, 1).await.unwrap();
+        let db = NodeDbLite::open(storage).await.unwrap();
         // No WITH (bitemporal=true) — plain schemaless collection (no DDL needed).
         let mut doc = Document::new("p1");
         doc.set("content", Value::String("plain text".into()));
@@ -161,7 +161,7 @@ async fn fts_still_works_for_non_bitemporal_collections_after_reopen() {
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
         .await
         .unwrap();
-    let db = NodeDbLite::open(storage, 1).await.unwrap();
+    let db = NodeDbLite::open(storage).await.unwrap();
     let results = db
         .text_search("plain", "", "plain", 10, TextSearchParams::default(), None)
         .await

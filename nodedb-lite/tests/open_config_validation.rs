@@ -25,7 +25,7 @@ async fn open_rejects_incoherent_engine_percentages() {
     };
 
     // `NodeDbLite` is not `Debug`, so match rather than `expect_err`.
-    match NodeDbLite::open_with_config(storage, 1, config).await {
+    match NodeDbLite::open_with_config(storage, config).await {
         Ok(_) => panic!("engine percentages summing to 105% must be rejected at open"),
         Err(e) => {
             let msg = e.to_string();
@@ -51,7 +51,7 @@ async fn open_rejects_percentage_over_one_hundred() {
         ..LiteConfig::default()
     };
 
-    match NodeDbLite::open_with_config(storage, 1, config).await {
+    match NodeDbLite::open_with_config(storage, config).await {
         Ok(_) => panic!("hnsw_percent of 101 must be rejected at open"),
         Err(e) => {
             let msg = e.to_string();
@@ -76,7 +76,7 @@ async fn open_rejects_zero_kv_cache_capacity() {
         ..LiteConfig::default()
     };
 
-    match NodeDbLite::open_with_config(storage, 1, config).await {
+    match NodeDbLite::open_with_config(storage, config).await {
         Ok(_) => panic!("kv_cache_capacity of 0 must be rejected at open"),
         Err(e) => {
             let msg = e.to_string();

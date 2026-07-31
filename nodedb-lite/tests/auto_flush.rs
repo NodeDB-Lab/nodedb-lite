@@ -39,7 +39,7 @@ async fn auto_flush_persists_without_explicit_flush() {
             ..LiteConfig::default()
         };
         let db = Arc::new(
-            NodeDbLite::open_with_config(storage, 1, config)
+            NodeDbLite::open_with_config(storage, config)
                 .await
                 .expect("open db"),
         );
@@ -60,7 +60,7 @@ async fn auto_flush_persists_without_explicit_flush() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("reopen storage");
-        let db = NodeDbLite::open(storage, 1).await.expect("reopen db");
+        let db = NodeDbLite::open(storage).await.expect("reopen db");
         let got = db.kv_get("col", "key").await.expect("kv_get after reopen");
         assert_eq!(
             got.as_deref(),
@@ -92,7 +92,7 @@ async fn disabled_auto_flush_does_not_persist() {
             ..LiteConfig::default()
         };
         let db = Arc::new(
-            NodeDbLite::open_with_config(storage, 1, config)
+            NodeDbLite::open_with_config(storage, config)
                 .await
                 .expect("open db"),
         );
@@ -108,7 +108,7 @@ async fn disabled_auto_flush_does_not_persist() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("reopen storage");
-        let db = NodeDbLite::open(storage, 1).await.expect("reopen db");
+        let db = NodeDbLite::open(storage).await.expect("reopen db");
         let got = db.kv_get("col", "key").await.expect("kv_get after reopen");
         assert!(
             got.is_none(),
@@ -138,7 +138,7 @@ async fn open_with_config_honors_auto_flush_ms() {
             auto_flush_ms: 200,
             ..LiteConfig::default()
         };
-        let db = NodeDbLite::open_with_config(storage, 1, config)
+        let db = NodeDbLite::open_with_config(storage, config)
             .await
             .expect("open db");
 
@@ -156,7 +156,7 @@ async fn open_with_config_honors_auto_flush_ms() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("reopen storage");
-        let db = NodeDbLite::open(storage, 1).await.expect("reopen db");
+        let db = NodeDbLite::open(storage).await.expect("reopen db");
         let got = db.kv_get("col", "key").await.expect("kv_get after reopen");
         assert_eq!(
             got.as_deref(),
@@ -192,7 +192,7 @@ async fn open_with_config_bounds_crdt_state_durability() {
             auto_flush_ms: 200,
             ..LiteConfig::default()
         };
-        let db = NodeDbLite::open_with_config(storage, 1, config)
+        let db = NodeDbLite::open_with_config(storage, config)
             .await
             .expect("open db");
 
@@ -217,7 +217,7 @@ async fn open_with_config_bounds_crdt_state_durability() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("reopen storage");
-        let db = NodeDbLite::open(storage, 1).await.expect("reopen db");
+        let db = NodeDbLite::open(storage).await.expect("reopen db");
 
         let fetched = db
             .document_get("bt_notes", "note3")
@@ -256,7 +256,7 @@ async fn open_honors_default_auto_flush_ms() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("open storage");
-        let db = NodeDbLite::open(storage, 1).await.expect("open db");
+        let db = NodeDbLite::open(storage).await.expect("open db");
 
         db.kv_put("col", "key", b"default_flushed")
             .await
@@ -270,7 +270,7 @@ async fn open_honors_default_auto_flush_ms() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("reopen storage");
-        let db = NodeDbLite::open(storage, 1).await.expect("reopen db");
+        let db = NodeDbLite::open(storage).await.expect("reopen db");
         let got = db.kv_get("col", "key").await.expect("kv_get after reopen");
         assert_eq!(
             got.as_deref(),
@@ -296,7 +296,7 @@ async fn open_with_budget_honors_default_auto_flush_ms() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("open storage");
-        let db = NodeDbLite::open_with_budget(storage, 1, 64 * 1024 * 1024)
+        let db = NodeDbLite::open_with_budget(storage, 64 * 1024 * 1024)
             .await
             .expect("open db");
 
@@ -311,7 +311,7 @@ async fn open_with_budget_honors_default_auto_flush_ms() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("reopen storage");
-        let db = NodeDbLite::open(storage, 1).await.expect("reopen db");
+        let db = NodeDbLite::open(storage).await.expect("reopen db");
         let got = db.kv_get("col", "key").await.expect("kv_get after reopen");
         assert_eq!(
             got.as_deref(),
@@ -337,7 +337,7 @@ async fn open_at_path_with_config_honors_auto_flush_ms() {
             auto_flush_ms: 200,
             ..LiteConfig::default()
         };
-        let db = NodeDbLite::open_at_path_with_config(&path, 1, Encryption::Plaintext, config)
+        let db = NodeDbLite::open_at_path_with_config(&path, Encryption::Plaintext, config)
             .await
             .expect("open db at path");
 
@@ -349,7 +349,7 @@ async fn open_at_path_with_config_honors_auto_flush_ms() {
     }
 
     {
-        let db = NodeDbLite::open_at_path(&path, 1, Encryption::Plaintext)
+        let db = NodeDbLite::open_at_path(&path, Encryption::Plaintext)
             .await
             .expect("reopen db at path");
         let got = db.kv_get("col", "key").await.expect("kv_get after reopen");
@@ -382,7 +382,7 @@ async fn open_with_config_auto_flush_ms_zero_leaves_writes_unflushed() {
             auto_flush_ms: 0,
             ..LiteConfig::default()
         };
-        let db = NodeDbLite::open_with_config(storage, 1, config)
+        let db = NodeDbLite::open_with_config(storage, config)
             .await
             .expect("open db");
 
@@ -396,7 +396,7 @@ async fn open_with_config_auto_flush_ms_zero_leaves_writes_unflushed() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("reopen storage");
-        let db = NodeDbLite::open(storage, 1).await.expect("reopen db");
+        let db = NodeDbLite::open(storage).await.expect("reopen db");
         let got = db.kv_get("col", "key").await.expect("kv_get after reopen");
         assert!(
             got.is_none(),

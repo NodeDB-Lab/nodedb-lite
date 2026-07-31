@@ -54,11 +54,11 @@ impl NodeDbLiteWasm {
     ///
     /// Memory budget is resolved from the default (100 MiB).
     #[wasm_bindgen(js_name = "openInMemory")]
-    pub async fn open_in_memory(peer_id: u64) -> Result<NodeDbLiteWasm, JsError> {
+    pub async fn open_in_memory() -> Result<NodeDbLiteWasm, JsError> {
         let storage = PagedbStorageMem::open_in_memory()
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
-        let db = NodeDbLite::open(storage, peer_id)
+        let db = NodeDbLite::open(storage)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(Self {
@@ -70,8 +70,8 @@ impl NodeDbLiteWasm {
     ///
     /// Memory budget is resolved from the default (100 MiB).
     #[wasm_bindgen]
-    pub async fn open(peer_id: u64) -> Result<NodeDbLiteWasm, JsError> {
-        Self::open_in_memory(peer_id).await
+    pub async fn open() -> Result<NodeDbLiteWasm, JsError> {
+        Self::open_in_memory().await
     }
 
     /// Create a new in-memory NodeDB-Lite database with an explicit memory budget.
@@ -79,15 +79,12 @@ impl NodeDbLiteWasm {
     /// `memory_mb` — total memory budget in mebibytes.
     /// Pass `None` (or `undefined` from JS) to use the default 100 MiB.
     #[wasm_bindgen(js_name = "openWithConfig")]
-    pub async fn open_with_config(
-        peer_id: u64,
-        memory_mb: Option<u32>,
-    ) -> Result<NodeDbLiteWasm, JsError> {
+    pub async fn open_with_config(memory_mb: Option<u32>) -> Result<NodeDbLiteWasm, JsError> {
         let config = config_from_memory_mb(memory_mb);
         let storage = PagedbStorageMem::open_in_memory()
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
-        let db = NodeDbLite::open_with_config(storage, peer_id, config)
+        let db = NodeDbLite::open_with_config(storage, config)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(Self {
@@ -125,7 +122,6 @@ impl NodeDbLiteWasm {
     #[wasm_bindgen(js_name = "openPersistent")]
     pub async fn open_persistent(
         filename: &str,
-        peer_id: u64,
         worker_url: &str,
         passphrase: String,
     ) -> Result<NodeDbLiteWasm, JsError> {
@@ -137,7 +133,7 @@ impl NodeDbLiteWasm {
         let storage = PagedbStorageOpfs::open_opfs(filename, worker_url, enc)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
-        let db = NodeDbLite::open(storage, peer_id)
+        let db = NodeDbLite::open(storage)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(Self {
@@ -160,7 +156,6 @@ impl NodeDbLiteWasm {
     #[wasm_bindgen(js_name = "openPersistentWithConfig")]
     pub async fn open_persistent_with_config(
         filename: &str,
-        peer_id: u64,
         worker_url: &str,
         passphrase: String,
         memory_mb: Option<u32>,
@@ -174,7 +169,7 @@ impl NodeDbLiteWasm {
         let storage = PagedbStorageOpfs::open_opfs(filename, worker_url, enc)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
-        let db = NodeDbLite::open_with_config(storage, peer_id, config)
+        let db = NodeDbLite::open_with_config(storage, config)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(Self {

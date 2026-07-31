@@ -37,12 +37,6 @@ pub struct SyncClient {
     pub(super) compensation: Arc<CompensationRegistry>,
     /// Session ID assigned by Origin after handshake.
     pub(super) session_id: Arc<Mutex<Option<String>>>,
-    /// Peer ID of this Lite client (for CRDT identity).
-    pub(super) peer_id: u64,
-    /// Lite instance identity (UUID v7) for fork detection.
-    pub(super) lite_id: Option<String>,
-    /// Monotonic epoch counter for fork detection.
-    pub(super) epoch: Option<u64>,
     /// Sequence tracker: per-shape, the last LSN received from Origin.
     pub(super) last_seen_lsn: Arc<Mutex<std::collections::HashMap<String, u64>>>,
     /// Whether a re-sync request has been sent for this connection.
@@ -117,20 +111,30 @@ pub struct SyncClient {
     /// is only allocated the first time a given collection is seen.
     pub(super) row_push_watermark:
         Arc<Mutex<std::collections::HashMap<u64, std::collections::HashMap<String, u64>>>>,
+    /// What each pushed mutation targets: `mutation_id → (collection, document_id)`.
+    ///
+    /// `DeltaAckMsg` and `DeltaRejectMsg` identify a delta by mutation id
+    /// alone, so this is the only way a rejection can be reported to the
+    /// application against the row it refused. Entries are removed when the
+    /// mutation is acknowledged or rejected, so the map tracks the in-flight
+    /// window rather than growing with the session.
+    pub(super) delta_targets: Arc<Mutex<std::collections::HashMap<u64, (String, String)>>>,
 }
 
 impl SyncClient {
     /// Create a new sync client (does not connect yet).
-    pub fn new(config: SyncConfig, peer_id: u64) -> Self {
-        Self::with_flow_control(config, peer_id, FlowControlConfig::default())
+    ///
+    /// The client holds no copy of the instance's identity. `lite_id`, `epoch`,
+    /// and the Loro peer id are read from the delegate at the moment each frame
+    /// is built, because all three change while a client is alive — a peer-id
+    /// rotation or a fork recovery replaces them — and a cached copy would keep
+    /// stamping outbound frames with the identity Origin just refused.
+    pub fn new(config: SyncConfig) -> Self {
+        Self::with_flow_control(config, FlowControlConfig::default())
     }
 
     /// Create a new sync client with custom flow control config.
-    pub fn with_flow_control(
-        config: SyncConfig,
-        peer_id: u64,
-        flow_config: FlowControlConfig,
-    ) -> Self {
+    pub fn with_flow_control(config: SyncConfig, flow_config: FlowControlConfig) -> Self {
         Self {
             config,
             state: Arc::new(Mutex::new(SyncState::Disconnected)),
@@ -138,9 +142,6 @@ impl SyncClient {
             shapes: Arc::new(Mutex::new(ShapeManager::new())),
             compensation: Arc::new(CompensationRegistry::new()),
             session_id: Arc::new(Mutex::new(None)),
-            peer_id,
-            lite_id: None,
-            epoch: None,
             last_seen_lsn: Arc::new(Mutex::new(std::collections::HashMap::new())),
             resync_requested: Arc::new(Mutex::new(false)),
             pending_resync: Arc::new(Mutex::new(None)),
@@ -159,13 +160,8 @@ impl SyncClient {
             )),
             announced_collections: Arc::new(Mutex::new(std::collections::HashSet::new())),
             row_push_watermark: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            delta_targets: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
-    }
-
-    /// Set the Lite identity for fork detection (called after LiteIdentity::load_or_create).
-    pub fn set_identity(&mut self, lite_id: String, epoch: u64) {
-        self.lite_id = Some(lite_id);
-        self.epoch = Some(epoch);
     }
 
     /// Current connection state.
@@ -201,11 +197,6 @@ impl SyncClient {
     /// Access config.
     pub fn config(&self) -> &SyncConfig {
         &self.config
-    }
-
-    /// Peer ID.
-    pub fn peer_id(&self) -> u64 {
-        self.peer_id
     }
 
     /// Access the flow controller.
@@ -339,7 +330,7 @@ mod tests {
 
     #[tokio::test]
     async fn initial_state_is_disconnected() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
         assert_eq!(client.state().await, SyncState::Disconnected);
     }
 
@@ -349,7 +340,7 @@ mod tests {
     /// local state.
     #[tokio::test]
     async fn duplicate_sequence_is_admitted_once() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
 
         assert!(client.admit_row_push(1, "orders", 5).await);
         assert!(
@@ -363,7 +354,7 @@ mod tests {
     /// as the final applied state.
     #[tokio::test]
     async fn lower_sequence_after_higher_is_refused() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
 
         assert!(client.admit_row_push(1, "orders", 10).await);
         assert!(!client.admit_row_push(1, "orders", 3).await);
@@ -374,7 +365,7 @@ mod tests {
     /// own monotonic counter on Origin) must both be admitted.
     #[tokio::test]
     async fn same_sequence_different_collections_both_admitted() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
 
         assert!(client.admit_row_push(1, "orders", 1).await);
         assert!(
@@ -388,7 +379,7 @@ mod tests {
     /// must never move the watermark for its collection.
     #[tokio::test]
     async fn unsequenced_frames_always_admit_and_never_gate() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
 
         assert!(client.admit_row_push(1, "system_alerts", 0).await);
         assert!(client.admit_row_push(1, "system_alerts", 0).await);

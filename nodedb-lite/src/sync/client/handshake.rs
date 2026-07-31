@@ -7,8 +7,13 @@ use super::config::SyncState;
 use super::state::SyncClient;
 
 impl SyncClient {
-    /// Build a handshake message from current state.
-    pub async fn build_handshake(&self) -> HandshakeMsg {
+    /// Build a handshake message from current state and the instance identity.
+    ///
+    /// The identity is a parameter rather than client state because it changes
+    /// while the client is alive: a reported fork replaces it wholesale, and a
+    /// peer-id collision rotates part of it. A handshake built from a cached
+    /// copy would re-present the identity Origin just rejected.
+    pub async fn build_handshake(&self, identity: &crate::identity::LiteIdentity) -> HandshakeMsg {
         let clock = self.clock.lock().await;
         let shapes = self.shapes.lock().await;
 
@@ -23,8 +28,8 @@ impl SyncClient {
             vector_clock,
             subscribed_shapes: shapes.active_shape_ids(),
             client_version: self.config.client_version.clone(),
-            lite_id: self.lite_id.clone().unwrap_or_default(),
-            epoch: self.epoch.unwrap_or(0),
+            lite_id: identity.lite_id.clone(),
+            epoch: identity.epoch,
             wire_version: WIRE_FORMAT_VERSION,
         }
     }
@@ -78,7 +83,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_handshake() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
 
         {
             let mut shapes = client.shapes().lock().await;
@@ -94,14 +99,19 @@ mod tests {
             });
         }
 
-        let hs = client.build_handshake().await;
+        let identity = crate::identity::LiteIdentity {
+            lite_id: "lite-1".into(),
+            epoch: 3,
+            peer_id: 42,
+        };
+        let hs = client.build_handshake(&identity).await;
         assert_eq!(hs.jwt_token, "test.jwt.token");
         assert_eq!(hs.subscribed_shapes, vec!["s1"]);
     }
 
     #[tokio::test]
     async fn handle_handshake_ack_success() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
         let ack = HandshakeAckMsg {
             success: true,
             session_id: "sess-123".into(),
@@ -121,7 +131,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_handshake_ack_failure() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
         let ack = HandshakeAckMsg {
             success: false,
             session_id: String::new(),

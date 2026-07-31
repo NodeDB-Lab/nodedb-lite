@@ -10,13 +10,13 @@ use nodedb_lite_wasm::NodeDbLiteWasm;
 
 #[wasm_bindgen_test]
 async fn open_in_memory() {
-    let db = NodeDbLiteWasm::open(1).await.unwrap();
+    let db = NodeDbLiteWasm::open().await.unwrap();
     db.flush().await.unwrap();
 }
 
 #[wasm_bindgen_test]
 async fn vector_insert_and_search() {
-    let db = NodeDbLiteWasm::open(1).await.unwrap();
+    let db = NodeDbLiteWasm::open().await.unwrap();
 
     db.vector_insert("vecs", "v1", &[1.0f32, 0.0, 0.0])
         .await
@@ -33,7 +33,7 @@ async fn vector_insert_and_search() {
 
 #[wasm_bindgen_test]
 async fn graph_insert_and_traverse() {
-    let db = NodeDbLiteWasm::open(2).await.unwrap();
+    let db = NodeDbLiteWasm::open().await.unwrap();
 
     let edge_id = db
         .graph_insert_edge("social", "alice", "bob", "KNOWS")
@@ -47,7 +47,7 @@ async fn graph_insert_and_traverse() {
 
 #[wasm_bindgen_test]
 async fn document_crud() {
-    let db = NodeDbLiteWasm::open(3).await.unwrap();
+    let db = NodeDbLiteWasm::open().await.unwrap();
 
     // Put.
     db.document_put("notes", "n1", r#"{"title":{"String":"Hello"}}"#)
@@ -66,7 +66,7 @@ async fn document_crud() {
 
 #[wasm_bindgen_test]
 async fn multi_modal() {
-    let db = NodeDbLiteWasm::open(4).await.unwrap();
+    let db = NodeDbLiteWasm::open().await.unwrap();
 
     // Vector + graph + document in one session.
     db.vector_insert("kb", "concept-ai", &[1.0, 0.0])

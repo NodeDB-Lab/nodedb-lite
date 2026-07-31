@@ -5,5 +5,6 @@
 mod crdt;
 mod indexed_crud;
 mod memory_engines;
+mod peer_identity;
 mod spatial;
 mod text_index;

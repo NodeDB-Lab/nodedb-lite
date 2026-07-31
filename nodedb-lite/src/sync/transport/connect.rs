@@ -59,7 +59,7 @@ pub(super) async fn connect_and_run(
     let (mut sink, mut stream) = ws_stream.split();
 
     // ── Handshake ──
-    let handshake = client.build_handshake().await;
+    let handshake = client.build_handshake(&delegate.sync_identity()).await;
     let frame = SyncFrame::try_encode(SyncMessageType::Handshake, &handshake).ok_or_else(|| {
         LiteError::Sync {
             detail: "failed to encode handshake frame".to_string(),
@@ -110,6 +110,27 @@ pub(super) async fn connect_and_run(
     if !client.handle_handshake_ack(&ack).await {
         return Err(LiteError::Sync {
             detail: format!("handshake rejected: {}", ack.error.unwrap_or_default()),
+        });
+    }
+
+    // Origin holds a history under this `lite_id` that this instance's local
+    // state diverged from — a restored backup, a rolled-back device, a cloned
+    // store. Resuming the producer stream would push operations Origin cannot
+    // order against what it already has, so the instance becomes a new
+    // producer and re-announces its state under it. This must happen before
+    // any delta is pushed, which is why it sits on the connect path rather
+    // than being left to the application to notice in a log.
+    if ack.fork_detected {
+        tracing::warn!(
+            session = %ack.session_id,
+            "Origin reports this instance as forked — regenerating the producer identity"
+        );
+        delegate.regenerate_identity().await;
+        // The identity that just changed is the one the accepted handshake was
+        // built from, so this session is over: reconnecting presents the new
+        // identity from the first frame.
+        return Err(LiteError::Sync {
+            detail: "producer identity regenerated after fork; reconnecting".to_string(),
         });
     }
 

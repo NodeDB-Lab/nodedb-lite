@@ -157,7 +157,7 @@ mod tests {
 
     #[tokio::test]
     async fn shape_snapshot_updates_manager() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
         {
             let mut shapes = client.shapes().lock().await;
             shapes.subscribe(nodedb_types::sync::shape::ShapeDefinition {
@@ -189,7 +189,7 @@ mod tests {
 
     #[tokio::test]
     async fn sequence_gap_detection_no_gap() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
         assert!(client.check_sequence_gap("s1", 1).await.is_none());
         assert!(client.check_sequence_gap("s1", 2).await.is_none());
         assert!(client.check_sequence_gap("s1", 3).await.is_none());
@@ -197,7 +197,7 @@ mod tests {
 
     #[tokio::test]
     async fn sequence_gap_detection_with_gap() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
         assert!(client.check_sequence_gap("s1", 1).await.is_none());
         let resync = client.check_sequence_gap("s1", 5).await;
         assert!(resync.is_some());
@@ -214,7 +214,7 @@ mod tests {
 
     #[tokio::test]
     async fn sequence_gap_only_one_resync_per_connection() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
         assert!(client.check_sequence_gap("s1", 1).await.is_none());
         assert!(client.check_sequence_gap("s1", 10).await.is_some());
         assert!(client.check_sequence_gap("s1", 20).await.is_none());
@@ -222,7 +222,7 @@ mod tests {
 
     #[tokio::test]
     async fn array_ack_merge_keeps_highest_hlc() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
 
         // Lower HLC bytes first.
         let lower = ArrayAckMsg {
@@ -250,7 +250,7 @@ mod tests {
 
     #[tokio::test]
     async fn array_ack_merge_keeps_higher_over_lower() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
 
         // Insert higher first, then lower — should still keep higher.
         let mut higher_bytes = [0x00u8; 18];
@@ -284,7 +284,7 @@ mod tests {
 
     #[tokio::test]
     async fn array_ack_merge_separate_arrays_both_drained() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
 
         client
             .set_pending_array_ack(ArrayAckMsg {
@@ -314,7 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn reset_sequence_tracking_clears_state() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
         assert!(client.check_sequence_gap("s1", 1).await.is_none());
         assert!(client.check_sequence_gap("s1", 10).await.is_some());
 

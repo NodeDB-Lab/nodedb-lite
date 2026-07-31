@@ -23,9 +23,7 @@ async fn open_lite() -> Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()
         .await
         .expect("open_in_memory");
-    NodeDbLite::open(storage, 1)
-        .await
-        .expect("NodeDbLite::open")
+    NodeDbLite::open(storage).await.expect("NodeDbLite::open")
 }
 
 /// A pure-vector collection created only via `vector_insert` (no

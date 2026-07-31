@@ -29,7 +29,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// so calling it is only needed to change the interval afterwards:
     ///
     /// ```ignore
-    /// let db = NodeDbLite::open(storage, peer_id).await?;
+    /// let db = NodeDbLite::open(storage).await?;
     /// db.start_auto_flush(5_000); // slow the flusher down to five seconds
     /// ```
     ///

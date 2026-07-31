@@ -67,7 +67,7 @@ fn float_attrs(v: f64) -> Vec<CellValue> {
 
 #[wasm_bindgen_test]
 async fn create_put_slice_roundtrip() {
-    let db = NodeDbLiteWasm::open(1u64).await.expect("open");
+    let db = NodeDbLiteWasm::open().await.expect("open");
     let schema = encode(&two_d_schema());
     db.array_create("a", &schema).await.expect("create");
 

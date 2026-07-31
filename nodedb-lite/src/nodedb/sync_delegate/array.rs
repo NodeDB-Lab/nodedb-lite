@@ -1,7 +1,7 @@
-//! Free functions extracted from the array-related `SyncDelegate` methods.
+//! Free functions behind the array-related `SyncDelegate` methods.
 //!
-//! These are called from the thin delegation methods in `mod.rs` to keep the
-//! `impl SyncDelegate` block concise.
+//! These are called from the thin delegation methods in `delegate_impl.rs` to
+//! keep the `impl SyncDelegate` block concise.
 
 use crate::nodedb::core::NodeDbLite;
 use crate::storage::engine::StorageEngine;
@@ -100,54 +100,6 @@ pub(super) fn handle_array_delta_batch_impl<S: StorageEngine>(
                 "SyncDelegate::handle_array_delta_batch: apply failed"
             );
             None
-        }
-    }
-}
-
-pub(super) fn handle_reject_with_policy_impl<S: StorageEngine>(
-    db: &NodeDbLite<S>,
-    mutation_id: u64,
-    hint: &nodedb_types::sync::compensation::CompensationHint,
-) {
-    use crate::nodedb::lock_ext::LockExt;
-
-    let mut crdt = db.crdt.lock_or_recover();
-    match crdt.reject_delta_with_policy(mutation_id, hint) {
-        Some(nodedb_crdt::PolicyResolution::AutoResolved(action)) => {
-            tracing::info!(
-                mutation_id,
-                action = ?action,
-                "SyncDelegate: delta auto-resolved by policy"
-            );
-        }
-        Some(nodedb_crdt::PolicyResolution::Deferred {
-            retry_after_ms,
-            attempt,
-            ..
-        }) => {
-            tracing::info!(
-                mutation_id,
-                retry_after_ms,
-                attempt,
-                "SyncDelegate: delta deferred for retry"
-            );
-        }
-        Some(nodedb_crdt::PolicyResolution::Escalate { .. }) => {
-            tracing::warn!(mutation_id, "SyncDelegate: delta escalated to DLQ (policy)");
-        }
-        Some(nodedb_crdt::PolicyResolution::WebhookRequired { webhook_url, .. }) => {
-            tracing::warn!(
-                mutation_id,
-                webhook_url,
-                "SyncDelegate: delta requires webhook (not supported on Lite)"
-            );
-            let _ = crdt.reject_delta(mutation_id);
-        }
-        None => {
-            tracing::debug!(
-                mutation_id,
-                "SyncDelegate: reject_with_policy — delta not found"
-            );
         }
     }
 }

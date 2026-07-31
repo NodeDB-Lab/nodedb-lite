@@ -39,7 +39,6 @@
 //! // Must be called from any execution context (main thread or worker).
 //! const db = await NodeDbLiteWasm.openPersistent(
 //!     "mydb.pagedb",        // logical database name (used as OPFS sub-directory)
-//!     1n,                   // peer_id
 //!     "./opfs_worker.js",   // URL of the worker bootstrap script
 //! );
 //! ```

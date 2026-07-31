@@ -27,7 +27,7 @@ impl SyncGate for PublicOnlyGate {
 #[tokio::test]
 async fn gate_withholds_non_public_from_pending_deltas() {
     let s = PagedbStorageMem::open_in_memory().await.unwrap();
-    let db = NodeDbLite::open(s, 1).await.unwrap();
+    let db = NodeDbLite::open(s).await.unwrap();
     db.set_sync_gate(Arc::new(PublicOnlyGate));
 
     // Public doc → should sync.
@@ -62,7 +62,7 @@ async fn gate_withholds_non_public_from_pending_deltas() {
 #[tokio::test]
 async fn without_gate_everything_syncs() {
     let s = PagedbStorageMem::open_in_memory().await.unwrap();
-    let db = NodeDbLite::open(s, 1).await.unwrap();
+    let db = NodeDbLite::open(s).await.unwrap();
 
     let mut d = Document::new("priv-1");
     d.set("share", Value::String("private".into()));

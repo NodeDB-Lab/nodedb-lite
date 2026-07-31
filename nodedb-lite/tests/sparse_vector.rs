@@ -18,7 +18,7 @@ async fn open_mem() -> std::sync::Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()
         .await
         .expect("open in-memory storage");
-    NodeDbLite::open(storage, 7).await.expect("open NodeDbLite")
+    NodeDbLite::open(storage).await.expect("open NodeDbLite")
 }
 
 /// A document whose `terms` field holds a sparse-vector literal.
@@ -190,9 +190,7 @@ async fn index_survives_flush_close_and_reopen() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("open storage");
-        let db = NodeDbLite::open(storage, 42)
-            .await
-            .expect("open NodeDbLite");
+        let db = NodeDbLite::open(storage).await.expect("open NodeDbLite");
 
         for (id, literal) in [
             ("a", "{1: 3.0, 2: 1.0}"),
@@ -217,9 +215,7 @@ async fn index_survives_flush_close_and_reopen() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("reopen storage");
-        let db = NodeDbLite::open(storage, 42)
-            .await
-            .expect("reopen NodeDbLite");
+        let db = NodeDbLite::open(storage).await.expect("reopen NodeDbLite");
 
         let post_restart = db
             .sparse_search(COLLECTION, FIELD, &[(1, 1.0), (2, 1.0)], 10)

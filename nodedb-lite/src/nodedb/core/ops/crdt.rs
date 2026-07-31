@@ -137,19 +137,12 @@ impl<S: StorageEngine> NodeDbLite<S> {
         self: &Arc<Self>,
         config: crate::sync::SyncConfig,
     ) -> Arc<crate::sync::SyncClient> {
-        let mut client_inner = crate::sync::SyncClient::new(config, self.peer_id());
-        client_inner.set_identity(self.sync_lite_id.clone(), self.sync_epoch);
-        let client = Arc::new(client_inner);
+        let client = Arc::new(crate::sync::SyncClient::new(config));
         let delegate: Arc<dyn crate::sync::SyncDelegate> = Arc::clone(self) as _;
         let client_clone = Arc::clone(&client);
         tokio::spawn(async move {
             crate::sync::run_sync_loop(client_clone, delegate).await;
         });
         client
-    }
-
-    /// Get the peer ID (from the CRDT engine).
-    pub fn peer_id(&self) -> u64 {
-        self.crdt.lock().map(|c| c.peer_id()).unwrap_or(0)
     }
 }

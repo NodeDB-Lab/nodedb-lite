@@ -60,9 +60,7 @@ async fn open_lite() -> Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()
         .await
         .expect("open_in_memory");
-    NodeDbLite::open(storage, 1)
-        .await
-        .expect("NodeDbLite::open")
+    NodeDbLite::open(storage).await.expect("NodeDbLite::open")
 }
 
 // ── Helper: wait for sync connection ────────────────────────────────────────
@@ -109,7 +107,7 @@ async fn timeseries_inserts_replicate_to_origin() {
 
     // Wire up sync transport.
     let sync_config = SyncConfig::new(common::origin::ORIGIN_WS, "");
-    let sync_client = Arc::new(SyncClient::new(sync_config, 1));
+    let sync_client = Arc::new(SyncClient::new(sync_config));
     let delegate = Arc::clone(&lite) as Arc<dyn nodedb_lite::sync::SyncDelegate>;
     let client_clone = Arc::clone(&sync_client);
     tokio::spawn(async move {
@@ -191,7 +189,7 @@ async fn timeseries_pre_connection_inserts_sync_after_connect() {
 
     // Now start sync transport.
     let sync_config = SyncConfig::new(common::origin::ORIGIN_WS, "");
-    let sync_client = Arc::new(SyncClient::new(sync_config, 2));
+    let sync_client = Arc::new(SyncClient::new(sync_config));
     let delegate = Arc::clone(&lite) as Arc<dyn nodedb_lite::sync::SyncDelegate>;
     let client_clone = Arc::clone(&sync_client);
     tokio::spawn(async move {
@@ -243,7 +241,7 @@ async fn timeseries_collection_registers_on_origin_via_announce() {
         .expect("Lite CREATE TIMESERIES ts_sync_test");
 
     let sync_config = SyncConfig::new(common::origin::ORIGIN_WS, "");
-    let sync_client = Arc::new(SyncClient::new(sync_config, 3));
+    let sync_client = Arc::new(SyncClient::new(sync_config));
     let delegate = Arc::clone(&lite) as Arc<dyn nodedb_lite::sync::SyncDelegate>;
     let client_clone = Arc::clone(&sync_client);
     tokio::spawn(async move {

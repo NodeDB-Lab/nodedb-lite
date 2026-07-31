@@ -37,7 +37,7 @@ async fn open_lite_with_array(array_name: &str) -> Arc<NodeDbLite<PagedbStorageM
     let storage = PagedbStorageMem::open_in_memory()
         .await
         .expect("open_in_memory");
-    let lite = NodeDbLite::open(storage, 1).await.expect("open");
+    let lite = NodeDbLite::open(storage).await.expect("open");
     lite.create_array(array_name, simple_schema(array_name))
         .await
         .expect("create_array");

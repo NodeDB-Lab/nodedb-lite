@@ -30,7 +30,7 @@ async fn vector_is_durable_without_an_explicit_flush() {
     let vector: Vec<f32> = (0..8).map(|i| i as f32).collect();
 
     {
-        let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+        let db = NodeDbLite::open_at_path(path, nodedb_lite::Encryption::Plaintext)
             .await
             .unwrap();
         db.document_put_with_vector(COLLECTION, doc("a"), COLLECTION, "a", &vector)
@@ -41,7 +41,7 @@ async fn vector_is_durable_without_an_explicit_flush() {
         drop(db);
     }
 
-    let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+    let db = NodeDbLite::open_at_path(path, nodedb_lite::Encryption::Plaintext)
         .await
         .unwrap();
     let hits = db
@@ -66,7 +66,7 @@ async fn vector_survives_reopen_after_flush() {
     let vector: Vec<f32> = (0..8).map(|i| (8 - i) as f32).collect();
 
     {
-        let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+        let db = NodeDbLite::open_at_path(path, nodedb_lite::Encryption::Plaintext)
             .await
             .unwrap();
         db.document_put_with_vector(COLLECTION, doc("b"), COLLECTION, "b", &vector)
@@ -76,7 +76,7 @@ async fn vector_survives_reopen_after_flush() {
         drop(db);
     }
 
-    let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+    let db = NodeDbLite::open_at_path(path, nodedb_lite::Encryption::Plaintext)
         .await
         .unwrap();
     let hits = db
@@ -99,7 +99,7 @@ async fn reopened_search_returns_document_ids() {
     let path = dir.path();
 
     {
-        let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+        let db = NodeDbLite::open_at_path(path, nodedb_lite::Encryption::Plaintext)
             .await
             .unwrap();
         for (i, id) in ["x", "y", "z"].iter().enumerate() {
@@ -111,7 +111,7 @@ async fn reopened_search_returns_document_ids() {
         drop(db);
     }
 
-    let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+    let db = NodeDbLite::open_at_path(path, nodedb_lite::Encryption::Plaintext)
         .await
         .unwrap();
     let probe: Vec<f32> = (0..8).map(|k| k as f32).collect();
@@ -150,7 +150,7 @@ async fn second_flush_after_graph_only_restore_preserves_vectors() {
 
     // Generation 1: write and flush. The segment now holds the real vectors.
     {
-        let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+        let db = NodeDbLite::open_at_path(path, nodedb_lite::Encryption::Plaintext)
             .await
             .unwrap();
         for (id, v) in ids.iter().zip(&vectors) {
@@ -165,7 +165,7 @@ async fn second_flush_after_graph_only_restore_preserves_vectors() {
     // Generation 2: reopen (graph-only restore) and flush again WITHOUT writing
     // anything. This is the flush that used to poison the segment.
     {
-        let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+        let db = NodeDbLite::open_at_path(path, nodedb_lite::Encryption::Plaintext)
             .await
             .unwrap();
         db.flush().await.unwrap();
@@ -173,7 +173,7 @@ async fn second_flush_after_graph_only_restore_preserves_vectors() {
     }
 
     // Generation 3: every vector must still be findable.
-    let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+    let db = NodeDbLite::open_at_path(path, nodedb_lite::Encryption::Plaintext)
         .await
         .unwrap();
     for (id, v) in ids.iter().zip(&vectors) {
@@ -200,7 +200,7 @@ async fn eviction_after_graph_only_restore_preserves_vectors() {
     let vector: Vec<f32> = (0..8).map(|i| (i * 3) as f32).collect();
 
     {
-        let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+        let db = NodeDbLite::open_at_path(path, nodedb_lite::Encryption::Plaintext)
             .await
             .unwrap();
         db.document_put_with_vector(COLLECTION, doc("e"), COLLECTION, "e", &vector)
@@ -212,7 +212,7 @@ async fn eviction_after_graph_only_restore_preserves_vectors() {
 
     {
         // Reopened index has empty per-node storage; evict it in that state.
-        let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+        let db = NodeDbLite::open_at_path(path, nodedb_lite::Encryption::Plaintext)
             .await
             .unwrap();
         db.vector_search(COLLECTION, &vector, 1, None, None)
@@ -222,7 +222,7 @@ async fn eviction_after_graph_only_restore_preserves_vectors() {
         drop(db);
     }
 
-    let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+    let db = NodeDbLite::open_at_path(path, nodedb_lite::Encryption::Plaintext)
         .await
         .unwrap();
     let hits = db
@@ -246,7 +246,7 @@ async fn deleted_vector_does_not_resurrect_on_rebuild() {
     let vector: Vec<f32> = (0..8).map(|i| i as f32).collect();
 
     {
-        let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+        let db = NodeDbLite::open_at_path(path, nodedb_lite::Encryption::Plaintext)
             .await
             .unwrap();
         db.document_put_with_vector(COLLECTION, doc("gone"), COLLECTION, "gone", &vector)
@@ -256,7 +256,7 @@ async fn deleted_vector_does_not_resurrect_on_rebuild() {
         drop(db);
     }
 
-    let db = NodeDbLite::open_at_path(path, 1, nodedb_lite::Encryption::Plaintext)
+    let db = NodeDbLite::open_at_path(path, nodedb_lite::Encryption::Plaintext)
         .await
         .unwrap();
     let hits = db

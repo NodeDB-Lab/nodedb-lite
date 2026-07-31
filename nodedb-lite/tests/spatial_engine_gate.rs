@@ -60,7 +60,7 @@ async fn open_in_memory() -> std::sync::Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()
         .await
         .expect("open in-memory storage");
-    NodeDbLite::open(storage, 1).await.expect("open NodeDbLite")
+    NodeDbLite::open(storage).await.expect("open NodeDbLite")
 }
 
 // ── Test 1: Insert 5 points — bbox query returns expected subset ──────────────
@@ -209,9 +209,7 @@ async fn spatial_index_persists_across_restart() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("open storage");
-        let db = NodeDbLite::open(storage, 42)
-            .await
-            .expect("open NodeDbLite");
+        let db = NodeDbLite::open(storage).await.expect("open NodeDbLite");
 
         for (id, geom) in sample_points() {
             db.spatial_insert(COLLECTION, FIELD, id, &geom);
@@ -252,9 +250,7 @@ async fn spatial_index_persists_across_restart() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("reopen storage");
-        let db = NodeDbLite::open(storage, 42)
-            .await
-            .expect("reopen NodeDbLite");
+        let db = NodeDbLite::open(storage).await.expect("reopen NodeDbLite");
 
         let results_after = db.spatial_search_bbox(
             COLLECTION,
@@ -302,7 +298,7 @@ async fn upsert_and_delete_after_restart() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("open storage");
-        let db = NodeDbLite::open(storage, 1).await.expect("open db");
+        let db = NodeDbLite::open(storage).await.expect("open db");
         db.spatial_insert(
             COLLECTION,
             FIELD,
@@ -316,7 +312,7 @@ async fn upsert_and_delete_after_restart() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("reopen storage");
-        let db = NodeDbLite::open(storage, 1).await.expect("reopen db");
+        let db = NodeDbLite::open(storage).await.expect("reopen db");
 
         // Upsert london to a totally different location (south Atlantic).
         db.spatial_insert(COLLECTION, FIELD, "london", &Geometry::point(-25.0, -40.0));

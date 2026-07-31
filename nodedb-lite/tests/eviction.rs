@@ -6,9 +6,7 @@ use nodedb_lite::{Encryption, NodeDbLite, PagedbStorageDefault, PagedbStorageMem
 
 async fn open_db_with_budget(budget: usize) -> std::sync::Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory().await.unwrap();
-    NodeDbLite::open_with_budget(storage, 1, budget)
-        .await
-        .unwrap()
+    NodeDbLite::open_with_budget(storage, budget).await.unwrap()
 }
 
 #[tokio::test]
@@ -132,7 +130,7 @@ async fn startup_loads_only_persisted_collections() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .unwrap();
-        let db = NodeDbLite::open(storage, 1).await.unwrap();
+        let db = NodeDbLite::open(storage).await.unwrap();
 
         db.batch_vector_insert("active", &[("v1", &[1.0f32, 0.0][..])])
             .await
@@ -148,7 +146,7 @@ async fn startup_loads_only_persisted_collections() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .unwrap();
-        let db = NodeDbLite::open(storage, 1).await.unwrap();
+        let db = NodeDbLite::open(storage).await.unwrap();
 
         let loaded = db.loaded_collections().unwrap();
         assert!(

@@ -42,9 +42,7 @@ async fn fts_index_persists_across_restart() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("open storage");
-        let db = NodeDbLite::open(storage, 42)
-            .await
-            .expect("open NodeDbLite");
+        let db = NodeDbLite::open(storage).await.expect("open NodeDbLite");
 
         for i in 0..DOC_COUNT {
             let (_id, doc) = make_doc(i);
@@ -94,9 +92,7 @@ async fn fts_index_persists_across_restart() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .expect("reopen storage");
-        let db = NodeDbLite::open(storage, 42)
-            .await
-            .expect("reopen NodeDbLite");
+        let db = NodeDbLite::open(storage).await.expect("reopen NodeDbLite");
 
         let results = db
             .text_search(

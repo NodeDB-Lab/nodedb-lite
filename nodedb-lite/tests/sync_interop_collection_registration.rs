@@ -64,15 +64,13 @@ async fn open_lite() -> Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()
         .await
         .expect("open_in_memory");
-    NodeDbLite::open(storage, 1)
-        .await
-        .expect("NodeDbLite::open")
+    NodeDbLite::open(storage).await.expect("NodeDbLite::open")
 }
 
 /// Wire up the sync transport and wait until the connection is established.
-async fn start_sync(lite: Arc<NodeDbLite<PagedbStorageMem>>, peer_id: u64) -> Arc<SyncClient> {
+async fn start_sync(lite: Arc<NodeDbLite<PagedbStorageMem>>) -> Arc<SyncClient> {
     let sync_config = SyncConfig::new(common::origin::ORIGIN_WS, "");
-    let sync_client = Arc::new(SyncClient::new(sync_config, peer_id));
+    let sync_client = Arc::new(SyncClient::new(sync_config));
     let delegate = Arc::clone(&lite) as Arc<dyn nodedb_lite::sync::SyncDelegate>;
     let client_clone = Arc::clone(&sync_client);
     tokio::spawn(async move {
@@ -133,7 +131,7 @@ async fn document_collection_registers_on_origin_via_announce() {
         .await
         .expect("Lite create_collection doc_reg_test");
 
-    let _sync = start_sync(Arc::clone(&lite), 20).await;
+    let _sync = start_sync(Arc::clone(&lite)).await;
 
     // Insert 3 documents with distinct ids.
     let ids = ["doc-a", "doc-b", "doc-c"];
@@ -234,7 +232,7 @@ async fn sql_ddl_bitemporal_collection_registers_and_serves_via_announce() {
     .await
     .expect("Lite CREATE COLLECTION ... WITH (bitemporal=true)");
 
-    let _sync = start_sync(Arc::clone(&lite), 21).await;
+    let _sync = start_sync(Arc::clone(&lite)).await;
 
     let ids = ["ddl-a", "ddl-b", "ddl-c"];
     for id in ids {

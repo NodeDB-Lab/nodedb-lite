@@ -109,24 +109,24 @@ pub struct NodeDbLite<S: StorageEngine> {
     /// Durable outbound queue for timeseries-profile columnar insert sync. `None` when sync is disabled.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) timeseries_outbound: Option<Arc<crate::sync::TimeseriesOutbound<S>>>,
-    /// Stable UUID v7 that identifies this Lite instance to Origin.
+    /// This instance's durable identity: `lite_id`, `epoch`, and the Loro peer
+    /// id every local operation is authored under.
     ///
-    /// Loaded once at `open()` via `LiteIdentity::load_or_create`. Sent in every
-    /// sync handshake so Origin can assign a stable producer_id and enforce the
-    /// idempotent-producer gate.
+    /// Loaded at `open()` via `LiteIdentity::load_or_create` and mutable
+    /// thereafter: Origin can refuse the peer id as another replica's, or
+    /// report the whole producer identity as forked, and both are recovered by
+    /// replacing the identity in place rather than by reopening the database.
+    /// Every change is persisted before it is adopted, so a rotation cannot be
+    /// forgotten across a restart and resurrect an id Origin already refused.
+    pub(crate) identity: Mutex<crate::identity::LiteIdentity>,
+    /// Serializes identity replacements against each other.
     ///
-    /// Read only by the sync handshake, which is compiled out on wasm32.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) sync_lite_id: String,
-    /// Monotonic epoch counter, incremented on every `open()`.
-    ///
-    /// A new epoch fences out any still-in-flight writes from the previous
-    /// process incarnation. Origin rejects handshakes where
-    /// `epoch <= last_seen_epoch[lite_id]`.
-    ///
-    /// Read only by the sync handshake, which is compiled out on wasm32.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) sync_epoch: u64,
+    /// Replacing an identity spans an await (it persists before it is adopted),
+    /// which `identity`'s guard cannot. Two refusals in flight would otherwise
+    /// interleave — each minting from the same starting value, the second
+    /// overwriting the first — leaving the documents re-authored under an id
+    /// the persisted record no longer names.
+    pub(crate) identity_change: tokio::sync::Mutex<()>,
     /// When `false`, KV operations go directly to storage, bypassing Loro.
     pub(crate) sync_enabled: bool,
     /// Buffered KV writes awaiting batch commit to storage.

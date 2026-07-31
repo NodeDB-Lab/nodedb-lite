@@ -26,6 +26,27 @@ use crate::sync::outbound::vector::{PendingVectorDelete, PendingVectorInsert};
 /// state may stay sync.
 #[async_trait::async_trait]
 pub trait SyncDelegate: Send + Sync + 'static {
+    /// This instance's durable identity: `lite_id`, `epoch`, and the Loro peer
+    /// id local operations are authored under.
+    ///
+    /// Read for every frame rather than cached by the transport. All three
+    /// change while a session is alive — a `peer_id_collision` refusal rotates
+    /// the peer id, a reported fork replaces the whole identity — and a frame
+    /// stamped from a stale copy carries exactly the identity Origin refused.
+    fn sync_identity(&self) -> crate::identity::LiteIdentity;
+
+    /// Replace this instance's producer identity after Origin reports a fork,
+    /// re-authoring local state under it.
+    ///
+    /// Async because it persists the new identity and flushes the rebuilt
+    /// documents; a rotation that is not durable resumes the forked identity
+    /// on the next open.
+    async fn regenerate_identity(&self);
+
+    /// Adopt a new Loro peer id after Origin refuses the current one as
+    /// another replica's, re-authoring local state under it.
+    async fn rotate_peer_id(&self);
+
     /// Get all pending CRDT deltas to push to Origin.
     fn pending_deltas(&self) -> Vec<PendingDelta>;
     /// Assign a stable stream seq to a pending CRDT delta (first-send only).

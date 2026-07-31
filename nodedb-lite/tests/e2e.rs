@@ -10,7 +10,7 @@ use nodedb_types::value::Value;
 
 async fn open_db() -> std::sync::Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory().await.unwrap();
-    NodeDbLite::open(storage, 1).await.unwrap()
+    NodeDbLite::open(storage).await.unwrap()
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -58,11 +58,11 @@ async fn e2e_two_lite_instances_crdt_convergence() {
     // Simulate two Lite devices making independent edits, then merging.
     let db1 = {
         let s = PagedbStorageMem::open_in_memory().await.unwrap();
-        NodeDbLite::open(s, 1).await.unwrap()
+        NodeDbLite::open(s).await.unwrap()
     };
     let db2 = {
         let s = PagedbStorageMem::open_in_memory().await.unwrap();
-        NodeDbLite::open(s, 2).await.unwrap()
+        NodeDbLite::open(s).await.unwrap()
     };
 
     // Device 1 writes.

@@ -192,7 +192,12 @@ where
         .update_pending_stats(pending.len(), pending_bytes)
         .await;
 
-    let mut msgs = client.build_delta_pushes(&pending).await;
+    // Read the peer id now, not at connect: a collision refusal earlier in this
+    // session rotates it, and the rows queued by that rotation must go out
+    // under the new identity or be refused again.
+    let mut msgs = client
+        .build_delta_pushes(&pending, delegate.sync_identity().peer_id)
+        .await;
     if msgs.is_empty() {
         return ControlFlow::Continue(()); // flow control window full — wait for ACKs
     }

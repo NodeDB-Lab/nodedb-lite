@@ -27,7 +27,7 @@ async fn vector_search_returns_real_doc_id_after_flush_and_reopen() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .unwrap();
-        let db = NodeDbLite::open(storage, 1).await.unwrap();
+        let db = NodeDbLite::open(storage).await.unwrap();
 
         let embedding = make_embedding(0.1, 384);
         db.vector_insert("embeds", "my-real-doc-id", &embedding, None)
@@ -42,7 +42,7 @@ async fn vector_search_returns_real_doc_id_after_flush_and_reopen() {
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
         .await
         .unwrap();
-    let db = NodeDbLite::open(storage, 1).await.unwrap();
+    let db = NodeDbLite::open(storage).await.unwrap();
 
     let query = make_embedding(0.1, 384);
     let results = db
@@ -72,7 +72,7 @@ async fn vector_search_multiple_collections_preserve_ids_after_reopen() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .unwrap();
-        let db = NodeDbLite::open(storage, 1).await.unwrap();
+        let db = NodeDbLite::open(storage).await.unwrap();
 
         // alpha: doc-a0 and doc-a1
         for (i, id) in ["doc-a0", "doc-a1"].iter().enumerate() {
@@ -93,7 +93,7 @@ async fn vector_search_multiple_collections_preserve_ids_after_reopen() {
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
         .await
         .unwrap();
-    let db = NodeDbLite::open(storage, 1).await.unwrap();
+    let db = NodeDbLite::open(storage).await.unwrap();
 
     // Query close to doc-a0's embedding.
     let query_a = make_embedding(1.0, 64);

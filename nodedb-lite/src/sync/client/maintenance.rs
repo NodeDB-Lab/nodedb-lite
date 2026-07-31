@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn backoff_exponential_with_cap() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
         assert_eq!(client.backoff_duration(0), Duration::from_secs(1));
         assert_eq!(client.backoff_duration(1), Duration::from_secs(2));
         assert_eq!(client.backoff_duration(2), Duration::from_secs(4));
@@ -81,7 +81,7 @@ mod tests {
 
     #[test]
     fn ping_frame_is_valid() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
         let frame = client.build_ping().expect("ping encode");
         assert_eq!(frame.msg_type, SyncMessageType::PingPong);
         assert!(!frame.body.is_empty());
@@ -89,7 +89,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_metrics_snapshot() {
-        let client = SyncClient::new(make_config(), 1);
+        let client = SyncClient::new(make_config());
         let snap = client.sync_metrics().await;
         assert_eq!(snap.state, "disconnected");
         assert_eq!(snap.pending_count, 0);

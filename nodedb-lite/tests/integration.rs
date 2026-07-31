@@ -13,7 +13,7 @@ use nodedb_types::value::Value;
 
 async fn open_test_db() -> Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory().await.unwrap();
-    NodeDbLite::open(storage, 1).await.unwrap()
+    NodeDbLite::open(storage).await.unwrap()
 }
 
 // ─── 1K Vector Insert + Search ───────────────────────────────────────
@@ -179,7 +179,7 @@ async fn flush_and_reopen_persists_all() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .unwrap();
-        let db = NodeDbLite::open(storage, 1).await.unwrap();
+        let db = NodeDbLite::open(storage).await.unwrap();
 
         db.batch_vector_insert("vecs", &[("v1", &[1.0, 2.0, 3.0][..])])
             .await
@@ -197,7 +197,7 @@ async fn flush_and_reopen_persists_all() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .unwrap();
-        let db = NodeDbLite::open(storage, 1).await.unwrap();
+        let db = NodeDbLite::open(storage).await.unwrap();
 
         let doc = db.document_get("docs", "d1").await.unwrap();
         assert!(doc.is_some(), "document should persist across restart");
@@ -249,7 +249,7 @@ async fn all_operations_generate_deltas() {
 async fn arc_dyn_nodedb_pattern() {
     let storage = PagedbStorageMem::open_in_memory().await.unwrap();
     // `open` already yields an `Arc`, which coerces straight to the trait object.
-    let db: Arc<dyn NodeDb> = NodeDbLite::open(storage, 1).await.unwrap();
+    let db: Arc<dyn NodeDb> = NodeDbLite::open(storage).await.unwrap();
 
     db.vector_insert("coll", "v1", &[1.0, 0.0], None)
         .await

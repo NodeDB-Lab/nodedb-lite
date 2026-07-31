@@ -21,7 +21,7 @@ use nodedb_lite::{Encryption, PagedbStorageDefault};
 #[tokio::test]
 async fn select_after_create_works_without_flush() {
     let storage = PagedbStorageMem::open_in_memory().await.unwrap();
-    let db = NodeDbLite::open(storage, 1).await.unwrap();
+    let db = NodeDbLite::open(storage).await.unwrap();
 
     db.execute_sql("CREATE COLLECTION foo WITH (bitemporal=true)", &[])
         .await
@@ -47,7 +47,7 @@ async fn select_after_create_works_without_flush() {
 #[tokio::test]
 async fn select_on_empty_bitemporal_collection_succeeds() {
     let storage = PagedbStorageMem::open_in_memory().await.unwrap();
-    let db = NodeDbLite::open(storage, 1).await.unwrap();
+    let db = NodeDbLite::open(storage).await.unwrap();
 
     db.execute_sql("CREATE COLLECTION bar WITH (bitemporal=true)", &[])
         .await
@@ -81,7 +81,7 @@ async fn select_after_reopen_works() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .unwrap();
-        let db = NodeDbLite::open(storage, 1).await.unwrap();
+        let db = NodeDbLite::open(storage).await.unwrap();
 
         db.execute_sql("CREATE COLLECTION baz WITH (bitemporal=true)", &[])
             .await
@@ -99,7 +99,7 @@ async fn select_after_reopen_works() {
         let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
             .await
             .unwrap();
-        let db = NodeDbLite::open(storage, 1).await.unwrap();
+        let db = NodeDbLite::open(storage).await.unwrap();
 
         let result = db
             .execute_sql("SELECT id FROM baz", &[])

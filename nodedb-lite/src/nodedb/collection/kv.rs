@@ -690,7 +690,7 @@ mod tests {
         let storage = PagedbStorageMem::open_in_memory()
             .await
             .expect("open in-memory storage");
-        NodeDbLite::open(storage, 1).await.expect("open NodeDbLite")
+        NodeDbLite::open(storage).await.expect("open NodeDbLite")
     }
 
     async fn open_db_with_cache_capacity(
@@ -703,7 +703,7 @@ mod tests {
             kv_cache_capacity: cap,
             ..LiteConfig::default()
         };
-        NodeDbLite::open_with_config(storage, 1, config)
+        NodeDbLite::open_with_config(storage, config)
             .await
             .expect("open NodeDbLite with config")
     }

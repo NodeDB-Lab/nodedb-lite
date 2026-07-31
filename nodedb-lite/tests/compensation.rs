@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use nodedb_client::NodeDb;
+use nodedb_lite::engine::crdt::engine::PendingDelta;
 use nodedb_lite::sync::*;
 use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 use nodedb_types::document::Document;
@@ -15,7 +16,18 @@ use nodedb_types::value::Value;
 
 async fn open_db() -> Arc<NodeDbLite<PagedbStorageMem>> {
     let s = PagedbStorageMem::open_in_memory().await.unwrap();
-    NodeDbLite::open(s, 1).await.unwrap()
+    NodeDbLite::open(s).await.unwrap()
+}
+
+/// The refusal Origin sends when a delta's Loro peer id is owned by another
+/// replica: a terminal reject carrying the `peer_id_collision` constraint.
+fn peer_id_collision_hint() -> CompensationHint {
+    CompensationHint::Custom {
+        constraint: CompensationHint::PEER_ID_COLLISION.into(),
+        detail: "PEER_ID_COLLISION: peer id 1 on collection 'users' is already owned by \
+                 another replica; generate a new peer id and resync"
+            .into(),
+    }
 }
 
 #[tokio::test]
@@ -60,10 +72,10 @@ async fn compensation_handler_receives_typed_hint() {
     let count_c = count.clone();
     let code_c = last_code.clone();
 
-    let client = Arc::new(SyncClient::new(
-        SyncConfig::new("wss://localhost/sync", "jwt"),
-        1,
-    ));
+    let client = Arc::new(SyncClient::new(SyncConfig::new(
+        "wss://localhost/sync",
+        "jwt",
+    )));
 
     client.set_compensation_handler(Arc::new(move |event: CompensationEvent| {
         count_c.fetch_add(1, Ordering::Relaxed);
@@ -117,6 +129,136 @@ async fn compensation_handler_receives_typed_hint() {
         .await;
     assert_eq!(count.load(Ordering::Relaxed), 4);
     assert_eq!(*last_code.lock().unwrap(), "RATE_LIMITED");
+}
+
+#[tokio::test]
+async fn peer_id_collision_is_not_resolved_by_conflict_policy() {
+    let db = open_db().await;
+
+    let mut doc = Document::new("user-alice");
+    doc.set("username", Value::String("alice".into()));
+    db.document_put("users", doc).await.unwrap();
+    let mid = db.pending_crdt_deltas().unwrap()[0].mutation_id;
+
+    SyncDelegate::reject_with_policy(&*db, mid, &peer_id_collision_hint());
+
+    // Nothing about the row was refused — only the identity it travelled
+    // under. Resolving it as a constraint violation deletes the row and drops
+    // the delta, turning an identity fault into silent data loss.
+    assert!(
+        db.document_get("users", "user-alice")
+            .await
+            .unwrap()
+            .is_some(),
+        "a peer-id collision must not roll back the local row"
+    );
+    assert!(
+        db.pending_crdt_deltas()
+            .unwrap()
+            .iter()
+            .any(|d| d.document_id == "user-alice"),
+        "a peer-id collision must not discard the refused write"
+    );
+}
+
+#[tokio::test]
+async fn rotating_the_peer_id_adopts_a_new_identity() {
+    let db = open_db().await;
+    let before = db.peer_id();
+
+    let mut doc = Document::new("user-alice");
+    doc.set("username", Value::String("alice".into()));
+    db.document_put("users", doc).await.unwrap();
+
+    SyncDelegate::rotate_peer_id(&*db).await;
+
+    let after = db.peer_id();
+    assert_ne!(
+        after, before,
+        "keeping the refused peer id makes every later write refusable forever"
+    );
+    assert_ne!(after, 0, "a rotated peer id must be a usable Loro peer id");
+}
+
+#[tokio::test]
+async fn rotating_the_peer_id_preserves_and_requeues_local_writes() {
+    let db = open_db().await;
+
+    let mut doc = Document::new("user-alice");
+    doc.set("username", Value::String("alice".into()));
+    db.document_put("users", doc).await.unwrap();
+
+    SyncDelegate::rotate_peer_id(&*db).await;
+
+    assert!(
+        db.document_get("users", "user-alice")
+            .await
+            .unwrap()
+            .is_some(),
+        "the rotation must carry local rows onto the new identity"
+    );
+    // Origin has never seen the rebuilt document: its operations are authored
+    // by an id Origin has no history for. Rotation is only a recovery if the
+    // rows go out again under it.
+    assert!(
+        db.pending_crdt_deltas()
+            .unwrap()
+            .iter()
+            .any(|d| d.collection == "users" && d.document_id == "user-alice"),
+        "every row must be queued for re-push after a rotation"
+    );
+}
+
+#[tokio::test]
+async fn compensation_event_names_the_rejected_collection_and_document() {
+    let client = Arc::new(SyncClient::new(SyncConfig::new(
+        "wss://localhost/sync",
+        "jwt",
+    )));
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+    let seen_c = seen.clone();
+    client.set_compensation_handler(Arc::new(move |event: CompensationEvent| {
+        seen_c
+            .lock()
+            .unwrap()
+            .push((event.collection.clone(), event.document_id.clone()));
+    }));
+
+    client
+        .build_delta_pushes(
+            &[PendingDelta {
+                mutation_id: 7,
+                collection: "orders".into(),
+                document_id: "o1".into(),
+                delta_bytes: vec![1, 2, 3],
+                seq: 0,
+            }],
+            42,
+        )
+        .await;
+
+    client
+        .handle_delta_reject(&DeltaRejectMsg {
+            mutation_id: 7,
+            reason: "unique".into(),
+            compensation: Some(CompensationHint::UniqueViolation {
+                field: "sku".into(),
+                conflicting_value: "abc".into(),
+            }),
+        })
+        .await;
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "one rejection, one compensation event");
+    // An event that names neither target is undispatchable: the application
+    // cannot roll back, retry, or prompt without knowing what was refused.
+    assert!(
+        !seen[0].0.is_empty() && !seen[0].1.is_empty(),
+        "compensation event must carry its target, got {:?}",
+        seen[0]
+    );
+    assert_eq!(seen[0], ("orders".to_string(), "o1".to_string()));
 }
 
 #[tokio::test]

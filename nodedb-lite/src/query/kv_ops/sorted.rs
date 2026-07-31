@@ -28,7 +28,7 @@ mod tests {
 
     async fn make_db() -> std::sync::Arc<NodeDbLite<PagedbStorageMem>> {
         let storage = PagedbStorageMem::open_in_memory().await.unwrap();
-        NodeDbLite::open(storage, 1).await.unwrap()
+        NodeDbLite::open(storage).await.unwrap()
     }
 
     /// Register a tumbling sorted index, write entries inside and outside the

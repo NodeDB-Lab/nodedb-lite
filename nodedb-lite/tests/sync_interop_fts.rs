@@ -53,15 +53,13 @@ async fn open_lite() -> Arc<NodeDbLite<PagedbStorageMem>> {
     let storage = PagedbStorageMem::open_in_memory()
         .await
         .expect("open_in_memory");
-    NodeDbLite::open(storage, 1)
-        .await
-        .expect("NodeDbLite::open")
+    NodeDbLite::open(storage).await.expect("NodeDbLite::open")
 }
 
 /// Wire up the sync transport and wait until the connection is established.
-async fn start_sync(lite: Arc<NodeDbLite<PagedbStorageMem>>, peer_id: u64) -> Arc<SyncClient> {
+async fn start_sync(lite: Arc<NodeDbLite<PagedbStorageMem>>) -> Arc<SyncClient> {
     let sync_config = SyncConfig::new(common::origin::ORIGIN_WS, "");
-    let sync_client = Arc::new(SyncClient::new(sync_config, peer_id));
+    let sync_client = Arc::new(SyncClient::new(sync_config));
     let delegate = Arc::clone(&lite) as Arc<dyn nodedb_lite::sync::SyncDelegate>;
     let client_clone = Arc::clone(&sync_client);
     tokio::spawn(async move {
@@ -108,7 +106,7 @@ async fn fts_inserts_replicate_to_origin() {
     pg.execute(CREATE_ORIGIN).await;
 
     let lite = open_lite().await;
-    let _sync = start_sync(Arc::clone(&lite), 10).await;
+    let _sync = start_sync(Arc::clone(&lite)).await;
 
     // Insert 3 documents with a common search term.
     for i in 0u32..3 {
@@ -167,7 +165,7 @@ async fn fts_delete_replicates_to_origin() {
     pg.execute(CREATE_ORIGIN).await;
 
     let lite = open_lite().await;
-    let _sync = start_sync(Arc::clone(&lite), 11).await;
+    let _sync = start_sync(Arc::clone(&lite)).await;
 
     // Insert 2 background documents and 1 target document.
     for i in 0u32..2 {
@@ -297,7 +295,7 @@ async fn fts_pre_connection_inserts_sync_after_connect() {
     }
 
     // Now start sync transport.
-    let _sync = start_sync(Arc::clone(&lite), 12).await;
+    let _sync = start_sync(Arc::clone(&lite)).await;
 
     // Wait up to 8 s for Origin to have both documents in FTS.
     let mut origin_count: usize = 0;
