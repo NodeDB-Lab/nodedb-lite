@@ -46,6 +46,8 @@ impl CrdtEngine {
             policies: nodedb_crdt::PolicyRegistry::new(),
             registered_collections: std::collections::HashSet::new(),
             deferred: Vec::new(),
+            flushed_versions: HashMap::new(),
+            snapshot_exports: AtomicU64::new(0),
         })
     }
 
@@ -176,9 +178,7 @@ impl CrdtEngine {
         let Some(state) = self.states.get(collection) else {
             return Ok(Vec::new());
         };
-        state.export_snapshot().map_err(|e| LiteError::Storage {
-            detail: format!("snapshot export for '{collection}' failed: {e}"),
-        })
+        self.export_one(collection, state)
     }
 
     /// Export every collection's snapshot as `(collection, snapshot_bytes)`,
@@ -186,12 +186,61 @@ impl CrdtEngine {
     pub fn export_all_snapshots(&self) -> Result<Vec<(String, Vec<u8>)>, LiteError> {
         let mut out = Vec::with_capacity(self.states.len());
         for (collection, state) in &self.states {
-            let bytes = state.export_snapshot().map_err(|e| LiteError::Storage {
-                detail: format!("snapshot export for '{collection}' failed: {e}"),
-            })?;
+            let bytes = self.export_one(collection, state)?;
             out.push((collection.clone(), bytes));
         }
         Ok(out)
+    }
+
+    /// Export only the collections whose oplog frontier has moved since their
+    /// snapshot was last persisted.
+    ///
+    /// Each entry carries the frontier the bytes were taken at; pass it back to
+    /// [`Self::mark_snapshots_flushed`] once the write has committed, so a
+    /// failed write is retried rather than silently skipped. Writes landing
+    /// between the export and the mark are not lost either — they advance the
+    /// frontier past the recorded one, leaving the collection dirty.
+    ///
+    /// An unmodified collection is absent from the result entirely, so an idle
+    /// store performs no export work.
+    pub fn export_dirty_snapshots(
+        &self,
+    ) -> Result<Vec<(String, Vec<u8>, loro::VersionVector)>, LiteError> {
+        let mut out = Vec::new();
+        for (collection, state) in &self.states {
+            let version = state.oplog_version_vector();
+            if self.flushed_versions.get(collection) == Some(&version) {
+                continue;
+            }
+            let bytes = self.export_one(collection, state)?;
+            out.push((collection.clone(), bytes, version));
+        }
+        Ok(out)
+    }
+
+    /// Record the frontiers whose snapshots are now durable.
+    ///
+    /// Call only after the write has committed — see
+    /// [`Self::export_dirty_snapshots`].
+    pub fn mark_snapshots_flushed(
+        &mut self,
+        flushed: impl IntoIterator<Item = (String, loro::VersionVector)>,
+    ) {
+        self.flushed_versions.extend(flushed);
+    }
+
+    /// Number of full snapshot exports performed since this engine was created.
+    pub fn snapshot_export_count(&self) -> u64 {
+        self.snapshot_exports
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn export_one(&self, collection: &str, state: &CrdtState) -> Result<Vec<u8>, LiteError> {
+        self.snapshot_exports
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        state.export_snapshot().map_err(|e| LiteError::Storage {
+            detail: format!("snapshot export for '{collection}' failed: {e}"),
+        })
     }
 
     /// Compact Loro history on every collection to prevent unbounded growth.
@@ -204,6 +253,10 @@ impl CrdtEngine {
                 detail: format!("history compaction for '{collection}' failed: {e}"),
             })?;
         }
+        // Compaction rewrites the document without advancing its frontier, so
+        // the persisted snapshot no longer matches what the document would
+        // export. Dropping the marks forces the next flush to rewrite it.
+        self.flushed_versions.clear();
         Ok(())
     }
 
@@ -267,6 +320,10 @@ impl CrdtEngine {
             .compact_at_version(version)
             .map_err(|e| LiteError::Storage {
                 detail: format!("compact_at_version '{collection}': {e}"),
-            })
+            })?;
+        // See `compact_history`: the frontier is unchanged but the exported
+        // bytes are not, so the collection must be re-persisted.
+        self.flushed_versions.remove(collection);
+        Ok(())
     }
 }

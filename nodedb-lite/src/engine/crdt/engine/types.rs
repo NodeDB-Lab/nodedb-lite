@@ -64,6 +64,19 @@ pub struct CrdtEngine {
     /// Deferred writes awaiting `flush_deltas()`, in the order they were
     /// applied.
     pub(super) deferred: Vec<DeferredOp>,
+    /// Oplog frontier each collection had when its snapshot was last written to
+    /// storage.
+    ///
+    /// A snapshot export is O(document), not O(new operations), so exporting a
+    /// collection whose frontier has not moved rewrites the identical bytes.
+    /// Comparing against this map is what lets an idle store do no snapshot
+    /// work at all.
+    pub(in crate::engine::crdt) flushed_versions: HashMap<String, loro::VersionVector>,
+    /// Number of full snapshot exports performed for persistence.
+    ///
+    /// Exposed through [`CrdtEngine::snapshot_export_count`] so callers can
+    /// assert on export volume directly instead of inferring it from timings.
+    pub(in crate::engine::crdt) snapshot_exports: AtomicU64,
 }
 
 /// One deferred write awaiting `flush_deltas`, with the exact counter range

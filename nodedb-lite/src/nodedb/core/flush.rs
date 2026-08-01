@@ -15,6 +15,17 @@ use super::types::{
 };
 
 impl<S: StorageEngine> NodeDbLite<S> {
+    /// Number of full CRDT snapshot exports performed since this handle was
+    /// opened.
+    ///
+    /// A snapshot export costs O(document), so this is the term that decides
+    /// both flush latency and how much the file grows per tick. It is a
+    /// counter, not a timing, so a caller can assert on it directly: an idle
+    /// store must not advance it.
+    pub fn crdt_snapshot_export_count(&self) -> u64 {
+        self.crdt.lock_or_recover().snapshot_export_count()
+    }
+
     /// Persist all in-memory state to storage (call before shutdown).
     pub async fn flush(&self) -> NodeDbResult<()> {
         // Drain the buffered KV writes first — they have their own batch-commit
@@ -40,16 +51,26 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // ── Persist one CRDT snapshot per collection (CRC32C wrapped) ──
         // Each collection owns its own Loro document, so each gets its own
         // storage entry under `loro_snapshot:<collection>`.
-        {
+        //
+        // Only collections whose oplog frontier moved since their last durable
+        // snapshot are exported. A snapshot export costs O(document), so
+        // exporting on every tick regardless of writes rewrote the whole
+        // document once per `auto_flush_ms` — unbounded file growth on an
+        // otherwise idle store, and an export duty cycle that starved readers
+        // once the document outgrew the interval.
+        let flushed_versions = {
             let crdt = self.crdt.lock_or_recover();
-            for (collection, snapshot) in
-                crdt.export_all_snapshots().map_err(NodeDbError::storage)?
-            {
+            let dirty = crdt
+                .export_dirty_snapshots()
+                .map_err(NodeDbError::storage)?;
+            let mut flushed = Vec::with_capacity(dirty.len());
+            for (collection, snapshot, version) in dirty {
                 ops.push(WriteOp::Put {
                     ns: Namespace::LoroState,
                     key: CrdtEngine::snapshot_key_for(&collection),
                     value: crate::storage::checksum::wrap(&snapshot),
                 });
+                flushed.push((collection, version));
             }
 
             // Write pending deltas individually (append-only persistence).
@@ -97,7 +118,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 key: META_LAST_FLUSHED_MID.to_vec(),
                 value: max_mid.to_le_bytes().to_vec(),
             });
-        }
+
+            flushed
+        };
 
         // ── Persist per-collection CSR indices ──
         // When the pagedb segment extension is available (native PagedbStorage):
@@ -274,6 +297,13 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .batch_write(&ops)
             .await
             .map_err(NodeDbError::storage)?;
+
+        // The snapshots are durable now, so record the frontiers they were
+        // taken at. Doing this only after the write means a failed batch leaves
+        // every collection dirty and the next flush retries it.
+        self.crdt
+            .lock_or_recover()
+            .mark_snapshots_flushed(flushed_versions);
 
         // ── Write HNSW vector segments to pagedb (native PagedbStorage only) ──
         #[cfg(not(target_arch = "wasm32"))]
