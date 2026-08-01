@@ -137,7 +137,20 @@ impl CrdtEngine {
 
     // ─── Snapshot & Persistence ──────────────────────────────────────
 
-    /// Import a full Loro snapshot into a collection's document.
+    /// Import a full Loro snapshot this device wrote itself — a collection
+    /// restored from durable storage at cold start.
+    ///
+    /// Admitted as local. The size ceilings on [`Self::import_remote`] bound
+    /// how much work an untrusted peer may cause; applied to a store's own
+    /// snapshot they instead cap how large a document this device may reload
+    /// after writing it, and the export side has no such bound. A store that
+    /// grew past the ceiling by succeeding at writes would refuse to open, with
+    /// no way to recover from inside the library — raising one limit only moves
+    /// the wall to the next. Every structural check still runs: authenticated
+    /// metadata, per-peer ranges that do not regress, pending dependencies.
+    ///
+    /// Peer snapshots do not come through here — sync routes them to
+    /// [`Self::import_remote`], which stays capped.
     ///
     /// See [`Self::import_remote`] for why the admission is returned rather
     /// than discarded.
@@ -146,12 +159,12 @@ impl CrdtEngine {
         collection: &str,
         snapshot: &[u8],
     ) -> Result<ImportAdmission, LiteError> {
-        let admission =
-            self.state_mut(collection)?
-                .import(snapshot)
-                .map_err(|e| LiteError::Storage {
-                    detail: format!("snapshot import for '{collection}' failed: {e}"),
-                })?;
+        let admission = self
+            .state_mut(collection)?
+            .import_local(snapshot)
+            .map_err(|e| LiteError::Storage {
+                detail: format!("snapshot import for '{collection}' failed: {e}"),
+            })?;
         warn_if_fully_trimmed(collection, "snapshot", &admission);
         Ok(admission)
     }
