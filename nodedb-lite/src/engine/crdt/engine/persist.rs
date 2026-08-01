@@ -4,7 +4,9 @@
 
 use std::sync::atomic::Ordering;
 
-use super::types::{CrdtEngine, DELTA_KEY_PREFIX, PendingDelta, SNAPSHOT_KEY, VCLOCK_KEY};
+use super::types::{
+    CrdtEngine, DELTA_KEY_PREFIX, PendingDelta, SNAPSHOT_KEY, STATE_DELTA_KEY, VCLOCK_KEY,
+};
 
 impl CrdtEngine {
     // ─── Persistence Helpers ─────────────────────────────────────────
@@ -81,6 +83,39 @@ impl CrdtEngine {
     /// Prefix shared by every per-collection snapshot key, for prefix scans.
     pub fn snapshot_key_prefix() -> &'static [u8] {
         SNAPSHOT_KEY
+    }
+
+    /// Key for one incremental update on top of a collection's snapshot:
+    /// `loro_delta:<collection>:<seq:016x>`.
+    ///
+    /// Zero-padded hex so lexicographic key order is replay order, which is
+    /// what a prefix scan returns them in.
+    pub fn state_delta_key_for(collection: &str, seq: u64) -> Vec<u8> {
+        let mut key = Vec::with_capacity(STATE_DELTA_KEY.len() + collection.len() + 17);
+        key.extend_from_slice(STATE_DELTA_KEY);
+        key.extend_from_slice(collection.as_bytes());
+        key.extend_from_slice(format!(":{seq:016x}").as_bytes());
+        key
+    }
+
+    /// Prefix shared by every state-update key, for prefix scans.
+    pub fn state_delta_key_prefix() -> &'static [u8] {
+        STATE_DELTA_KEY
+    }
+
+    /// Recover `(collection, seq)` from a key produced by
+    /// [`Self::state_delta_key_for`].
+    ///
+    /// Returns `None` for keys that do not carry the prefix, whose collection
+    /// is not UTF-8, or whose sequence does not parse — such an entry cannot be
+    /// routed or ordered, so the caller must skip it rather than guess.
+    pub fn state_delta_from_key(key: &[u8]) -> Option<(&str, u64)> {
+        let suffix = std::str::from_utf8(key.strip_prefix(STATE_DELTA_KEY)?).ok()?;
+        let (collection, seq) = suffix.rsplit_once(':')?;
+        if collection.is_empty() {
+            return None;
+        }
+        Some((collection, u64::from_str_radix(seq, 16).ok()?))
     }
 
     /// Recover the collection name from a snapshot key produced by

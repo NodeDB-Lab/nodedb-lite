@@ -6,7 +6,7 @@ use crate::storage::engine::{StorageEngine, WriteOp};
 use nodedb_types::Namespace;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 
-use crate::engine::crdt::CrdtEngine;
+use crate::engine::crdt::{CrdtEngine, CrdtWriteKind};
 use crate::nodedb::lock_ext::LockExt;
 
 use super::types::{
@@ -52,25 +52,44 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // Each collection owns its own Loro document, so each gets its own
         // storage entry under `loro_snapshot:<collection>`.
         //
-        // Only collections whose oplog frontier moved since their last durable
-        // snapshot are exported. A snapshot export costs O(document), so
-        // exporting on every tick regardless of writes rewrote the whole
-        // document once per `auto_flush_ms` — unbounded file growth on an
-        // otherwise idle store, and an export duty cycle that starved readers
-        // once the document outgrew the interval.
-        let flushed_versions = {
+        // A collection whose frontier has not moved is not written at all; one
+        // that has moved is written as an update since its last persisted
+        // frontier, and only periodically as a fresh snapshot. Exporting a full
+        // snapshot per collection per tick cost O(document) regardless of the
+        // write rate — unbounded file growth on an otherwise idle store, and an
+        // export duty cycle that starved readers once the document outgrew the
+        // flush interval.
+        let persisted = {
             let crdt = self.crdt.lock_or_recover();
-            let dirty = crdt
-                .export_dirty_snapshots()
-                .map_err(NodeDbError::storage)?;
-            let mut flushed = Vec::with_capacity(dirty.len());
-            for (collection, snapshot, version) in dirty {
-                ops.push(WriteOp::Put {
-                    ns: Namespace::LoroState,
-                    key: CrdtEngine::snapshot_key_for(&collection),
-                    value: crate::storage::checksum::wrap(&snapshot),
-                });
-                flushed.push((collection, version));
+            let plan = crdt.plan_persistence().map_err(NodeDbError::storage)?;
+            let mut persisted = Vec::with_capacity(plan.len());
+            for write in plan {
+                persisted.push(write.persisted());
+                match write.kind {
+                    CrdtWriteKind::Checkpoint { superseded_deltas } => {
+                        // In the same batch as the new base, so no restore ever
+                        // sees a base with updates in front of it that it
+                        // already contains.
+                        for seq in 0..superseded_deltas {
+                            ops.push(WriteOp::Delete {
+                                ns: Namespace::LoroState,
+                                key: CrdtEngine::state_delta_key_for(&write.collection, seq),
+                            });
+                        }
+                        ops.push(WriteOp::Put {
+                            ns: Namespace::LoroState,
+                            key: CrdtEngine::snapshot_key_for(&write.collection),
+                            value: crate::storage::checksum::wrap(&write.bytes),
+                        });
+                    }
+                    CrdtWriteKind::Delta { seq } => {
+                        ops.push(WriteOp::Put {
+                            ns: Namespace::LoroState,
+                            key: CrdtEngine::state_delta_key_for(&write.collection, seq),
+                            value: crate::storage::checksum::wrap(&write.bytes),
+                        });
+                    }
+                }
             }
 
             // Write pending deltas individually (append-only persistence).
@@ -119,7 +138,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 value: max_mid.to_le_bytes().to_vec(),
             });
 
-            flushed
+            persisted
         };
 
         // ── Persist per-collection CSR indices ──
@@ -298,12 +317,11 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .await
             .map_err(NodeDbError::storage)?;
 
-        // The snapshots are durable now, so record the frontiers they were
-        // taken at. Doing this only after the write means a failed batch leaves
-        // every collection dirty and the next flush retries it.
-        self.crdt
-            .lock_or_recover()
-            .mark_snapshots_flushed(flushed_versions);
+        // The CRDT writes are durable now, so advance the frontiers and the
+        // checkpoint accounting. Doing this only after the write means a failed
+        // batch leaves every collection outstanding and the next flush retries
+        // it.
+        self.crdt.lock_or_recover().mark_persisted(persisted);
 
         // ── Write HNSW vector segments to pagedb (native PagedbStorage only) ──
         #[cfg(not(target_arch = "wasm32"))]

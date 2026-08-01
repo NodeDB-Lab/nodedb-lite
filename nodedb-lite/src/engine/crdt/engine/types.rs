@@ -22,8 +22,29 @@ pub(super) const DELTA_KEY_PREFIX: &[u8] = b"delta:";
 /// Each collection owns its own Loro document, so each gets its own entry:
 /// `loro_snapshot:<collection>`.
 pub(super) const SNAPSHOT_KEY: &[u8] = b"loro_snapshot:";
+/// Key prefix for the incremental updates written on top of a collection's
+/// snapshot in the `LoroState` namespace: `loro_delta:<collection>:<seq>`.
+///
+/// Distinct from [`DELTA_KEY_PREFIX`], which holds the unsent-to-Origin sync
+/// queue. These entries are durability, not sync: they are replayed on open
+/// and deleted when the base snapshot that contains them is rewritten,
+/// whereas a sync delta is deleted when Origin acknowledges it.
+pub(super) const STATE_DELTA_KEY: &[u8] = b"loro_delta:";
 /// Key for the vector clock in the `Meta` namespace.
 pub(super) const VCLOCK_KEY: &[u8] = b"vector_clock";
+
+/// Rewrite a collection's base snapshot once its accumulated updates reach
+/// this fraction of it — a ratio, so the bound holds at any collection size.
+///
+/// Restore replays every update written since the base, so this also bounds
+/// the replay: open costs the base plus at most this fraction again.
+pub(super) const DELTA_CHECKPOINT_RATIO: usize = 4;
+/// Never rewrite the base for less than this many accumulated update bytes.
+///
+/// A fraction of a small document is a few hundred bytes, which would restore
+/// the full-rewrite-per-flush behaviour for precisely the collections where
+/// incremental writes cost least.
+pub(super) const DELTA_CHECKPOINT_MIN_BYTES: usize = 64 * 1024;
 
 /// CRDT engine for edge devices.
 ///
@@ -72,6 +93,16 @@ pub struct CrdtEngine {
     /// Comparing against this map is what lets an idle store do no snapshot
     /// work at all.
     pub(in crate::engine::crdt) flushed_versions: HashMap<String, loro::VersionVector>,
+    /// Size of each collection's base snapshot as last written.
+    ///
+    /// The denominator of the checkpoint decision: updates are folded back
+    /// into the base once they reach a fraction of it.
+    pub(in crate::engine::crdt) checkpoint_bytes: HashMap<String, usize>,
+    /// Update bytes written on top of each collection's current base.
+    pub(in crate::engine::crdt) delta_bytes: HashMap<String, usize>,
+    /// Sequence the next update for each collection is stored under. Also the
+    /// count of updates a checkpoint must delete.
+    pub(in crate::engine::crdt) next_delta_seq: HashMap<String, u64>,
     /// Number of full snapshot exports performed for persistence.
     ///
     /// Exposed through [`CrdtEngine::snapshot_export_count`] so callers can

@@ -57,6 +57,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let snapshot_entries = storage
             .scan_prefix(Namespace::LoroState, CrdtEngine::snapshot_key_prefix())
             .await?;
+        let mut base_bytes: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         for (key, envelope) in &snapshot_entries {
             let Some(collection) = CrdtEngine::collection_from_snapshot_key(key) else {
                 tracing::error!(
@@ -67,6 +69,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             };
             match crate::storage::checksum::unwrap(envelope) {
                 Some(snapshot) => {
+                    base_bytes.insert(collection.to_string(), snapshot.len());
                     crdt.import_snapshot(collection, &snapshot).map_err(|e| {
                         NodeDbError::storage(format!("CRDT restore of '{collection}' failed: {e}"))
                     })?;
@@ -81,6 +84,61 @@ impl<S: StorageEngine> NodeDbLite<S> {
                     let _ = storage.delete(Namespace::LoroState, key).await;
                 }
             }
+        }
+
+        // ── Replay the incremental updates written on top of each snapshot ──
+        // Flush writes a full snapshot only periodically; between checkpoints it
+        // appends `loro_delta:<collection>:<seq>` entries. A prefix scan returns
+        // them in key order, which the zero-padded sequence makes replay order.
+        // Skipping this loop would silently roll a collection back to its last
+        // checkpoint, so a corrupt entry is an error rather than a warning.
+        let mut delta_bytes: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut next_delta_seq: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        let delta_entries = storage
+            .scan_prefix(Namespace::LoroState, CrdtEngine::state_delta_key_prefix())
+            .await?;
+        for (key, envelope) in &delta_entries {
+            let Some((collection, seq)) = CrdtEngine::state_delta_from_key(key) else {
+                tracing::error!(
+                    "CRDT update key is not a valid `loro_delta:<collection>:<seq>` entry — \
+                     skipping; its collection cannot be determined without guessing."
+                );
+                continue;
+            };
+            let Some(update) = crate::storage::checksum::unwrap(envelope) else {
+                return Err(NodeDbError::segment_corrupted(format!(
+                    "CRDT update '{collection}' #{seq} failed its CRC32C check; the writes it \
+                     carries are not in the snapshot behind it, so opening without it would \
+                     silently roll the collection back"
+                )));
+            };
+            delta_bytes
+                .entry(collection.to_string())
+                .and_modify(|n| *n += update.len())
+                .or_insert(update.len());
+            next_delta_seq.insert(collection.to_string(), seq + 1);
+            crdt.import_snapshot(collection, &update).map_err(|e| {
+                NodeDbError::storage(format!(
+                    "CRDT update replay for '{collection}' #{seq} failed: {e}"
+                ))
+            })?;
+        }
+
+        // Seed the checkpoint accounting from what was on disk, so the first
+        // flush after open does not rewrite a base that is already current.
+        for (collection, base) in &base_bytes {
+            let Some(version) = crdt.state(collection).map(|s| s.oplog_version_vector()) else {
+                continue;
+            };
+            crdt.adopt_persisted_state(
+                collection,
+                version,
+                *base,
+                delta_bytes.get(collection).copied().unwrap_or(0),
+                next_delta_seq.get(collection).copied().unwrap_or(0),
+            );
         }
 
         // Rebuild the CRDT's registered-collection set from persisted bitemporal

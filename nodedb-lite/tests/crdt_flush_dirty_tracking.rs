@@ -77,13 +77,14 @@ async fn idle_flush_exports_no_snapshots() {
 }
 
 // ---------------------------------------------------------------------------
-// flush_after_write_exports_again
+// write_after_flush_is_persisted
 // ---------------------------------------------------------------------------
 
-/// Dirty tracking must not turn into never-export: a write after a flush is
-/// exported by the next one, and reads back after a reopen.
+/// Skipping unchanged collections must not turn into skipping changed ones: a
+/// write made after a flush is persisted by the next one and reads back after a
+/// reopen.
 #[tokio::test]
-async fn flush_after_write_exports_again() {
+async fn write_after_flush_is_persisted() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("dirty_after_write.pagedb");
 
@@ -95,14 +96,9 @@ async fn flush_after_write_exports_again() {
 
         put_note(&db, "note0", "first").await;
         db.flush().await.expect("flush first write");
-        let after_first = db.crdt_snapshot_export_count();
 
         put_note(&db, "note1", "second").await;
         db.flush().await.expect("flush second write");
-        assert!(
-            db.crdt_snapshot_export_count() > after_first,
-            "a collection written since its last flush must be exported again"
-        );
     }
 
     let db = open_manual_flush(&path).await;
@@ -121,4 +117,83 @@ async fn flush_after_write_exports_again() {
         "the collection's CRDT snapshot must be on disk, not just its row: {:?}",
         dump.storage_counts
     );
+}
+
+// ---------------------------------------------------------------------------
+// sustained_writes_do_not_export_a_snapshot_per_flush
+// ---------------------------------------------------------------------------
+
+/// Under sustained writes — the workload dirty-tracking alone does not help —
+/// flush writes updates, not a fresh snapshot per tick.
+#[tokio::test]
+async fn sustained_writes_do_not_export_a_snapshot_per_flush() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = open_manual_flush(&dir.path().join("sustained.pagedb")).await;
+
+    db.execute_sql("CREATE COLLECTION bt_notes WITH (bitemporal=true)", &[])
+        .await
+        .expect("create bitemporal collection");
+    put_note(&db, "note0", "first").await;
+    db.flush().await.expect("flush the first write");
+    let after_first = db.crdt_snapshot_export_count();
+
+    for i in 1..64 {
+        put_note(&db, &format!("note{i}"), &format!("body {i}")).await;
+        db.flush().await.expect("flush");
+    }
+
+    assert_eq!(
+        db.crdt_snapshot_export_count(),
+        after_first,
+        "63 flushes, each with one small write behind it, exported {} full snapshots; a write of \
+         a few hundred bytes must cost a few hundred bytes of update, not a rewrite of the \
+         collection",
+        db.crdt_snapshot_export_count() - after_first
+    );
+}
+
+// ---------------------------------------------------------------------------
+// updates_written_between_checkpoints_survive_reopen
+// ---------------------------------------------------------------------------
+
+/// The writes that reach disk as updates rather than as part of a snapshot must
+/// come back on open. Losing them is invisible until a reopen, so this asserts
+/// the replay directly.
+#[tokio::test]
+async fn updates_written_between_checkpoints_survive_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("update_replay.pagedb");
+
+    {
+        let db = open_manual_flush(&path).await;
+        db.execute_sql("CREATE COLLECTION bt_notes WITH (bitemporal=true)", &[])
+            .await
+            .expect("create bitemporal collection");
+
+        put_note(&db, "note0", "checkpointed").await;
+        db.flush().await.expect("flush the checkpoint");
+        let exports = db.crdt_snapshot_export_count();
+
+        for i in 1..8 {
+            put_note(&db, &format!("note{i}"), &format!("update {i}")).await;
+            db.flush().await.expect("flush an update");
+        }
+        assert_eq!(
+            db.crdt_snapshot_export_count(),
+            exports,
+            "these writes must have gone to disk as updates for this test to mean anything"
+        );
+    }
+
+    let db = open_manual_flush(&path).await;
+    for i in 1..8 {
+        assert!(
+            db.document_get("bt_notes", &format!("note{i}"))
+                .await
+                .expect("document_get after reopen")
+                .is_some(),
+            "note{i} was written as an update after the last checkpoint and must be replayed on \
+             open, not rolled back to the checkpoint"
+        );
+    }
 }
