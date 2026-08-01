@@ -28,8 +28,8 @@ pub(crate) fn lower_create_array<'a, S: StorageEngine + 'a>(
     cell_order: ArrayCellOrderAst,
     tile_order: ArrayTileOrderAst,
     prefix_bits: u8,
-    _audit_retain_ms: Option<u64>,
-    _minimum_audit_retain_ms: Option<u64>,
+    audit_retain_ms: Option<u64>,
+    minimum_audit_retain_ms: Option<u64>,
 ) -> Result<LiteFut<'a>, LiteError> {
     let schema = build_schema(name, dims, attrs, tile_extents, cell_order, tile_order)?;
     let schema_bytes = zerompk::to_msgpack_vec(&schema).map_err(|e| LiteError::Serialization {
@@ -37,11 +37,28 @@ pub(crate) fn lower_create_array<'a, S: StorageEngine + 'a>(
     })?;
     let schema_hash = crate::engine::array::catalog::hash_schema(&schema)?;
     let aid = ArrayId::new(LITE_TENANT, name);
+    // Retention is held as milliseconds since epoch arithmetic downstream
+    // (`now_ms - audit_retain_ms`), so it is signed there. A value past
+    // `i64::MAX` is refused rather than cast: wrapping it negative would put
+    // the purge horizon in the future and delete every tile version the array
+    // has, which is the opposite of what a retention setting asks for.
+    let audit_retain_ms = match audit_retain_ms {
+        Some(ms) => Some(i64::try_from(ms).map_err(|_| LiteError::BadRequest {
+            detail: format!(
+                "CREATE ARRAY {name}: audit_retain_ms {ms} exceeds the maximum \
+                 supported retention of {} ms",
+                i64::MAX
+            ),
+        })?),
+        None => None,
+    };
     let op = ArrayOp::OpenArray {
         array_id: aid,
         schema_msgpack: schema_bytes,
         schema_hash,
         prefix_bits,
+        audit_retain_ms,
+        minimum_audit_retain_ms,
     };
     let mut phys = LiteDataPlaneVisitor { engine };
     let fut = phys.array(&op)?;

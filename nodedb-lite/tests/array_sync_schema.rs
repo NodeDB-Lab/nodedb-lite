@@ -84,7 +84,13 @@ async fn schema_import_from_origin_enables_op_apply() {
     {
         let mut state = receiver.array_state.lock().await;
         state
-            .create_array(&receiver.storage, "cross", two_attr_schema("cross"))
+            .create_array(
+                &receiver.storage,
+                "cross",
+                two_attr_schema("cross"),
+                None,
+                None,
+            )
             .await
             .expect("create_array");
     }
@@ -148,7 +154,13 @@ async fn ops_with_imported_schema_hlc_apply_correctly() {
     {
         let mut state = receiver.array_state.lock().await;
         state
-            .create_array(&receiver.storage, "remote", common::simple_schema("remote"))
+            .create_array(
+                &receiver.storage,
+                "remote",
+                common::simple_schema("remote"),
+                None,
+                None,
+            )
             .await
             .expect("create");
     }

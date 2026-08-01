@@ -40,10 +40,14 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
         ArrayOp::OpenArray {
             array_id,
             schema_msgpack,
+            audit_retain_ms,
+            minimum_audit_retain_ms,
             ..
         } => {
             let name = array_id.name.clone();
             let schema_bytes = schema_msgpack.clone();
+            let audit_retain_ms = *audit_retain_ms;
+            let minimum_audit_retain_ms = *minimum_audit_retain_ms;
             let array_state = Arc::clone(&engine.array_state);
             let storage = Arc::clone(&engine.storage);
             Ok(Box::pin(async move {
@@ -52,7 +56,15 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                         detail: format!("decode ArraySchema: {e}"),
                     })?;
                 let mut state = array_state.lock().await;
-                state.create_array(&storage, &name, schema).await?;
+                state
+                    .create_array(
+                        &storage,
+                        &name,
+                        schema,
+                        audit_retain_ms,
+                        minimum_audit_retain_ms,
+                    )
+                    .await?;
                 Ok(QueryResult {
                     columns: vec![],
                     rows: vec![],
@@ -214,6 +226,31 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                 })
             }))
         }
+
+        // Origin stages `DROP ARRAY` reversibly — the store is closed and its
+        // directory renamed to a tombstone — and then compensates across cores
+        // with these two ops. Lite's `DropArray` deletes the manifest and
+        // catalog entry outright, so there is no tombstone here to restore or
+        // to purge, and no planner in this process emits either op.
+        //
+        // Answering `Ok` would report a compensation that did not happen: a
+        // restore would claim recovered data that is gone. If Lite ever gains a
+        // reversible drop, these arms are where it gets wired in.
+        ArrayOp::RestoreArrayDrop { array_id } => Err(LiteError::BadRequest {
+            detail: format!(
+                "restore of a staged array drop is not supported in NodeDB-Lite \
+                 (array '{}'): a Lite drop is immediate and cannot be undone",
+                array_id.name
+            ),
+        }),
+
+        ArrayOp::PurgeArrayDrop { array_id } => Err(LiteError::BadRequest {
+            detail: format!(
+                "purge of a staged array drop is not supported in NodeDB-Lite \
+                 (array '{}'): a Lite drop leaves no tombstone to purge",
+                array_id.name
+            ),
+        }),
 
         ArrayOp::Project {
             array_id,

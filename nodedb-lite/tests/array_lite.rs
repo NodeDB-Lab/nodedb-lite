@@ -43,7 +43,7 @@ async fn create_put_slice_roundtrip() {
     let mut engine = open_engine(&storage).await;
 
     engine
-        .create_array(&storage, "grid", schema())
+        .create_array(&storage, "grid", schema(), None, None)
         .await
         .unwrap();
     engine
@@ -103,7 +103,10 @@ async fn bitemporal_as_of_system_time() {
     let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
     let mut engine = open_engine(&storage).await;
 
-    engine.create_array(&storage, "bt", schema()).await.unwrap();
+    engine
+        .create_array(&storage, "bt", schema(), None, None)
+        .await
+        .unwrap();
 
     // v1 written at system_time=100.
     engine
@@ -170,7 +173,7 @@ async fn restart_durability() {
     {
         let mut engine = open_engine(&storage).await;
         engine
-            .create_array(&storage, "durable", schema())
+            .create_array(&storage, "durable", schema(), None, None)
             .await
             .unwrap();
         engine
@@ -220,7 +223,7 @@ async fn tombstone_coord_not_found() {
     let mut engine = open_engine(&storage).await;
 
     engine
-        .create_array(&storage, "del", schema())
+        .create_array(&storage, "del", schema(), None, None)
         .await
         .unwrap();
     engine
@@ -270,7 +273,7 @@ async fn gdpr_erasure() {
     let mut engine = open_engine(&storage).await;
 
     engine
-        .create_array(&storage, "gdpr", schema())
+        .create_array(&storage, "gdpr", schema(), None, None)
         .await
         .unwrap();
     engine

@@ -26,7 +26,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
         self.array_state
             .lock()
             .await
-            .create_array(&self.storage, name, schema)
+            // This direct API takes no retention policy; one is only expressed
+            // through `CREATE ARRAY ... WITH (audit_retain_ms = ...)`, which
+            // reaches the engine through the SQL lowering.
+            .create_array(&self.storage, name, schema, None, None)
             .await
             .map_err(NodeDbError::storage)?;
 

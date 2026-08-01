@@ -98,11 +98,19 @@ impl ArrayEngineState {
     }
 
     /// Create a new array. Returns `Err` if an array named `name` already exists.
+    /// `audit_retain_ms` / `minimum_audit_retain_ms` come from
+    /// `CREATE ARRAY ... WITH (...)`. They are stored rather than defaulted:
+    /// the retention merge in `ops::compact` and the inline purge in
+    /// `retention` both read them, so an array created with a retention policy
+    /// that was dropped on the way in would keep every tile version while
+    /// reporting the policy as set.
     pub async fn create_array<S: StorageEngine>(
         &mut self,
         storage: &Arc<S>,
         name: &str,
         schema: ArraySchema,
+        audit_retain_ms: Option<i64>,
+        minimum_audit_retain_ms: Option<u64>,
     ) -> Result<(), LiteError> {
         if self.arrays.contains_key(name) {
             return Err(LiteError::BadRequest {
@@ -118,8 +126,8 @@ impl ArrayEngineState {
             name: name.to_owned(),
             schema_bytes,
             schema_hash,
-            audit_retain_ms: None,
-            minimum_audit_retain_ms: None,
+            audit_retain_ms,
+            minimum_audit_retain_ms,
         };
         let mut catalog = ArrayCatalog::open(Arc::clone(storage)).await?;
         catalog.insert(entry).await?;
@@ -130,7 +138,7 @@ impl ArrayEngineState {
                 schema_hash,
                 manifest: ArrayManifest::new(),
                 memtable: ArrayMemtable::new(),
-                audit_retain_ms: None,
+                audit_retain_ms,
             },
         );
         Ok(())
@@ -604,11 +612,48 @@ mod tests {
         Arc::new(PagedbStorageMem::open_in_memory().await.unwrap())
     }
 
+    /// A retention policy set at CREATE must reach the array, and survive a
+    /// reopen. The purge in `retention` and the merge in `ops::compact` both
+    /// read it, so an array that silently defaulted to `None` would keep every
+    /// tile version while reporting the policy as set.
+    #[tokio::test]
+    async fn create_array_keeps_its_retention_policy() {
+        let s = storage().await;
+        let mut engine = ArrayEngineState::open(&s).await.unwrap();
+        engine
+            .create_array(&s, "retained", schema(), Some(86_400_000), Some(3_600_000))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            engine
+                .arrays
+                .get("retained")
+                .and_then(|a| a.audit_retain_ms),
+            Some(86_400_000),
+            "the retention policy must reach the live array state"
+        );
+
+        let reopened = ArrayEngineState::open(&s).await.unwrap();
+        assert_eq!(
+            reopened
+                .arrays
+                .get("retained")
+                .and_then(|a| a.audit_retain_ms),
+            Some(86_400_000),
+            "the retention policy must survive a reopen — it is persisted in \
+             the catalog entry, not just held in memory"
+        );
+    }
+
     #[tokio::test]
     async fn create_and_put_and_read() {
         let s = storage().await;
         let mut engine = ArrayEngineState::open(&s).await.unwrap();
-        engine.create_array(&s, "a", schema()).await.unwrap();
+        engine
+            .create_array(&s, "a", schema(), None, None)
+            .await
+            .unwrap();
         engine
             .put_cell(
                 &s,
@@ -634,7 +679,10 @@ mod tests {
     async fn delete_returns_none() {
         let s = storage().await;
         let mut engine = ArrayEngineState::open(&s).await.unwrap();
-        engine.create_array(&s, "b", schema()).await.unwrap();
+        engine
+            .create_array(&s, "b", schema(), None, None)
+            .await
+            .unwrap();
         engine
             .put_cell(
                 &s,
@@ -663,7 +711,10 @@ mod tests {
         let s = storage().await;
         {
             let mut engine = ArrayEngineState::open(&s).await.unwrap();
-            engine.create_array(&s, "persist", schema()).await.unwrap();
+            engine
+                .create_array(&s, "persist", schema(), None, None)
+                .await
+                .unwrap();
         }
         let engine2 = ArrayEngineState::open(&s).await.unwrap();
         assert!(engine2.arrays.contains_key("persist"));
@@ -673,7 +724,10 @@ mod tests {
     async fn bitemporal_as_of() {
         let s = storage().await;
         let mut engine = ArrayEngineState::open(&s).await.unwrap();
-        engine.create_array(&s, "bt", schema()).await.unwrap();
+        engine
+            .create_array(&s, "bt", schema(), None, None)
+            .await
+            .unwrap();
         engine
             .put_cell(
                 &s,

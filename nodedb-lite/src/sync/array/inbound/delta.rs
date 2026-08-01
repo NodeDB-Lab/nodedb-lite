@@ -71,7 +71,7 @@ mod tests {
         {
             let mut state = inbound.engine.array_state.lock().await;
             state
-                .create_array(&storage, "arr", simple_schema("arr"))
+                .create_array(&storage, "arr", simple_schema("arr"), None, None)
                 .await
                 .unwrap();
         }
@@ -113,7 +113,7 @@ mod tests {
         {
             let mut state = inbound.engine.array_state.lock().await;
             state
-                .create_array(&storage, "arr", simple_schema("arr"))
+                .create_array(&storage, "arr", simple_schema("arr"), None, None)
                 .await
                 .unwrap();
         }
@@ -190,7 +190,7 @@ mod tests {
         {
             let mut state = inbound.engine.array_state.lock().await;
             state
-                .create_array(&storage, "arr", simple_schema("arr"))
+                .create_array(&storage, "arr", simple_schema("arr"), None, None)
                 .await
                 .unwrap();
         }
@@ -234,7 +234,7 @@ mod tests {
         {
             let mut state = inbound.engine.array_state.lock().await;
             state
-                .create_array(&storage, "b", simple_schema("b"))
+                .create_array(&storage, "b", simple_schema("b"), None, None)
                 .await
                 .unwrap();
         }

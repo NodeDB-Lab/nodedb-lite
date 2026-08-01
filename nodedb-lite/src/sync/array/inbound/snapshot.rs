@@ -141,7 +141,7 @@ mod tests {
         {
             let mut state = inbound.engine.array_state.lock().await;
             state
-                .create_array(&storage, "snap", simple_schema("snap"))
+                .create_array(&storage, "snap", simple_schema("snap"), None, None)
                 .await
                 .unwrap();
         }
@@ -231,7 +231,7 @@ mod tests {
         {
             let mut state = inbound.engine.array_state.lock().await;
             state
-                .create_array(&storage, "p", simple_schema("p"))
+                .create_array(&storage, "p", simple_schema("p"), None, None)
                 .await
                 .unwrap();
         }

@@ -123,7 +123,7 @@ impl SyncHarness {
         self.array_state
             .lock()
             .await
-            .create_array(&self.storage, name, simple_schema(name))
+            .create_array(&self.storage, name, simple_schema(name), None, None)
             .await
             .expect("create_array");
     }
@@ -137,7 +137,7 @@ impl SyncHarness {
         self.array_state
             .lock()
             .await
-            .create_array(&self.storage, name, schema)
+            .create_array(&self.storage, name, schema, None, None)
             .await
             .expect("create_array");
     }
