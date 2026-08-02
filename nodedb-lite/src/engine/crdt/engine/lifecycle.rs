@@ -46,10 +46,12 @@ impl CrdtEngine {
             policies: nodedb_crdt::PolicyRegistry::new(),
             registered_collections: std::collections::HashSet::new(),
             deferred: Vec::new(),
+            unpersisted_deltas: std::collections::HashSet::new(),
             flushed_versions: HashMap::new(),
             checkpoint_bytes: HashMap::new(),
             delta_bytes: HashMap::new(),
             next_delta_seq: HashMap::new(),
+            delta_writes: AtomicU64::new(0),
             snapshot_exports: AtomicU64::new(0),
         })
     }

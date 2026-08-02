@@ -27,6 +27,9 @@ impl CrdtEngine {
                 // Advance mutation ID counter past any restored deltas.
                 let max_id = deltas.iter().map(|d| d.mutation_id).max().unwrap_or(0);
                 self.next_mutation_id.store(max_id + 1, Ordering::Relaxed);
+                // The bulk blob is the only copy these came from, so none of
+                // them is stored under its own key yet.
+                self.unpersisted_deltas = deltas.iter().map(|d| d.mutation_id).collect();
                 self.pending_deltas = deltas;
             }
             Err(e) => {
@@ -68,6 +71,9 @@ impl CrdtEngine {
         if let Some(max_id) = deltas.iter().map(|d| d.mutation_id).max() {
             self.next_mutation_id.store(max_id + 1, Ordering::Relaxed);
         }
+        // Every one of these was just read from its own key, so the stored
+        // form matches by construction.
+        self.unpersisted_deltas.clear();
         self.pending_deltas = deltas;
     }
 

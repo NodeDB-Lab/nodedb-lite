@@ -103,6 +103,20 @@ pub struct CrdtEngine {
     /// Sequence the next update for each collection is stored under. Also the
     /// count of updates a checkpoint must delete.
     pub(in crate::engine::crdt) next_delta_seq: HashMap<String, u64>,
+    /// Pending deltas whose stored form is not known to match the queue.
+    ///
+    /// The queue is append-only and each entry is written under its own key,
+    /// so an entry already on disk does not need rewriting. Only the ones
+    /// added — or edited, when a send assigns a `seq` — since the last flush
+    /// do. Without this the whole outbox is rewritten every tick, which for a
+    /// replica with no Origin to acknowledge it means an unbounded queue
+    /// rewritten in full once per `auto_flush_ms`.
+    pub(in crate::engine::crdt) unpersisted_deltas: std::collections::HashSet<u64>,
+    /// Number of queue entries handed out for writing.
+    ///
+    /// Exposed through [`CrdtEngine::pending_delta_write_count`] so callers can
+    /// assert on write volume directly: an idle store must not advance it.
+    pub(in crate::engine::crdt) delta_writes: AtomicU64,
     /// Number of full snapshot exports performed for persistence.
     ///
     /// Exposed through [`CrdtEngine::snapshot_export_count`] so callers can

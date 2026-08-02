@@ -26,6 +26,15 @@ impl<S: StorageEngine> NodeDbLite<S> {
         self.crdt.lock_or_recover().snapshot_export_count()
     }
 
+    /// Number of unsent-delta queue entries written since this handle was
+    /// opened.
+    ///
+    /// The queue is append-only, so this advances by what was added, not by
+    /// the queue's length. An idle store must not advance it at all.
+    pub fn crdt_delta_write_count(&self) -> u64 {
+        self.crdt.lock_or_recover().pending_delta_write_count()
+    }
+
     /// Persist all in-memory state to storage (call before shutdown).
     pub async fn flush(&self) -> NodeDbResult<()> {
         // Drain the buffered KV writes first — they have their own batch-commit
@@ -94,7 +103,13 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
             // Write pending deltas individually (append-only persistence).
             // Each delta is stored under `crdt:delta:{mutation_id:016x}`.
-            // Also write the legacy bulk blob for backward compatibility.
+            //
+            // Only the entries added or edited since the last flush are
+            // written. The queue is append-only and each entry owns its key,
+            // so rewriting an unchanged one stores bytes identical to the ones
+            // already there — and a replica with no Origin to acknowledge its
+            // deltas accumulates them without bound, which made that rewrite
+            // the whole outbox, once per `auto_flush_ms`.
             let pending = crdt.pending_deltas();
             let max_mid = pending.iter().map(|d| d.mutation_id).max().unwrap_or(0);
 
@@ -102,8 +117,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 .iter()
                 .map(|d| CrdtEngine::delta_storage_key(d.mutation_id))
                 .collect();
+            let mut retired_any = false;
             for key in persisted_delta_keys {
                 if !live_keys.contains(&key) {
+                    retired_any = true;
                     ops.push(WriteOp::Delete {
                         ns: Namespace::Crdt,
                         key,
@@ -111,7 +128,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 }
             }
 
-            for delta in pending {
+            for delta in crdt.pending_deltas_needing_write() {
                 let key = CrdtEngine::delta_storage_key(delta.mutation_id);
                 let value = CrdtEngine::serialize_delta(delta).map_err(NodeDbError::storage)?;
                 ops.push(WriteOp::Put {
@@ -121,15 +138,20 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 });
             }
 
-            // Legacy bulk blob (for clients that haven't upgraded to incremental restore).
-            let deltas_bulk = crdt
-                .serialize_pending_deltas()
-                .map_err(NodeDbError::storage)?;
-            ops.push(WriteOp::Put {
-                ns: Namespace::Crdt,
-                key: META_CRDT_DELTAS.to_vec(),
-                value: deltas_bulk,
-            });
+            // Legacy bulk blob (for clients that haven't upgraded to incremental
+            // restore). It duplicates every entry above, so it is rewritten only
+            // when the queue actually changed rather than on every tick.
+            let queue_changed = retired_any || crdt.has_unpersisted_deltas();
+            if queue_changed {
+                let deltas_bulk = crdt
+                    .serialize_pending_deltas()
+                    .map_err(NodeDbError::storage)?;
+                ops.push(WriteOp::Put {
+                    ns: Namespace::Crdt,
+                    key: META_CRDT_DELTAS.to_vec(),
+                    value: deltas_bulk,
+                });
+            }
 
             // Write the last-flushed mutation_id for partial flush safety.
             ops.push(WriteOp::Put {
@@ -321,7 +343,11 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // checkpoint accounting. Doing this only after the write means a failed
         // batch leaves every collection outstanding and the next flush retries
         // it.
-        self.crdt.lock_or_recover().mark_persisted(persisted);
+        {
+            let mut crdt = self.crdt.lock_or_recover();
+            crdt.mark_persisted(persisted);
+            crdt.mark_pending_deltas_persisted();
+        }
 
         // ── Write HNSW vector segments to pagedb (native PagedbStorage only) ──
         #[cfg(not(target_arch = "wasm32"))]

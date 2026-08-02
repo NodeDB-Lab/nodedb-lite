@@ -197,3 +197,86 @@ async fn updates_written_between_checkpoints_survive_reopen() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// idle_flush_does_not_rewrite_the_sync_queue
+// ---------------------------------------------------------------------------
+
+/// The unsent-delta queue is append-only and each entry owns its key, so an
+/// idle flush must write none of it.
+///
+/// A replica with no Origin never has a delta acknowledged, so the queue only
+/// grows — and rewriting it in full per tick is the same unbounded cost the
+/// snapshot rewrite had, one layer over.
+#[tokio::test]
+async fn idle_flush_does_not_rewrite_the_sync_queue() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("idle_queue.pagedb");
+    let db = open_manual_flush(&path).await;
+
+    db.execute_sql("CREATE COLLECTION bt_notes WITH (bitemporal=true)", &[])
+        .await
+        .expect("create bitemporal collection");
+    for i in 0..32 {
+        put_note(&db, &format!("note{i}"), &format!("body {i}")).await;
+    }
+    db.flush().await.expect("flush the writes");
+
+    let after_writes = db.crdt_delta_write_count();
+    assert!(
+        after_writes >= 32,
+        "the flush that persists the queue must write its entries"
+    );
+
+    for _ in 0..8 {
+        db.flush().await.expect("idle flush");
+    }
+
+    assert_eq!(
+        db.crdt_delta_write_count(),
+        after_writes,
+        "an idle store must write none of the queue: 8 flushes with nothing queued in between \
+         rewrote {} entries, and a replica with no Origin never retires any of them",
+        db.crdt_delta_write_count() - after_writes
+    );
+}
+
+// ---------------------------------------------------------------------------
+// queued_deltas_survive_reopen
+// ---------------------------------------------------------------------------
+
+/// Writing only the changed entries must still leave the whole queue on disk:
+/// the deltas are what a replica has yet to send, so losing them loses writes
+/// that no Origin has seen.
+#[tokio::test]
+async fn queued_deltas_survive_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("queue_reopen.pagedb");
+
+    {
+        let db = open_manual_flush(&path).await;
+        db.execute_sql("CREATE COLLECTION bt_notes WITH (bitemporal=true)", &[])
+            .await
+            .expect("create bitemporal collection");
+
+        // Two batches with a flush in between, so the second flush writes only
+        // the second batch and the first must already be durable.
+        for i in 0..4 {
+            put_note(&db, &format!("first{i}"), "a").await;
+        }
+        db.flush().await.expect("flush first batch");
+        for i in 0..4 {
+            put_note(&db, &format!("second{i}"), "b").await;
+        }
+        db.flush().await.expect("flush second batch");
+    }
+
+    let db = open_manual_flush(&path).await;
+    let dump = db.diagnostic_dump().await;
+    assert!(
+        dump.storage_counts.crdt >= 8,
+        "every queued delta must be readable after reopen, from both batches; \
+         storage_counts: {:?}",
+        dump.storage_counts
+    );
+}
