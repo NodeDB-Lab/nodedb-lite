@@ -11,6 +11,12 @@ homepage.workspace = true
 
 [features]
 default = []
+graphalytics-runner = []
+
+[[bin]]
+name = "nodedb-lite-graphalytics"
+path = "src/bin/nodedb-lite-graphalytics.rs"
+required-features = ["graphalytics-runner"]
 
 [dependencies]
 nodedb-types = { workspace = true }

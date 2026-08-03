@@ -19,7 +19,7 @@ use crate::storage::engine::{StorageEngine, WriteOp};
 /// Upsert edge properties into the Namespace::Graph storage table.
 ///
 /// Key layout: `{collection}\x00{src}\x00{label}\x00{dst}`
-fn edge_store_key(collection: &str, src: &str, label: &str, dst: &str) -> Vec<u8> {
+pub(crate) fn edge_store_key(collection: &str, src: &str, label: &str, dst: &str) -> Vec<u8> {
     let mut k = collection.as_bytes().to_vec();
     k.push(0);
     k.extend_from_slice(src.as_bytes());
@@ -30,7 +30,18 @@ fn edge_store_key(collection: &str, src: &str, label: &str, dst: &str) -> Vec<u8
     k
 }
 
-fn edge_to_value(
+fn edge_weight(properties: &[u8]) -> f64 {
+    let Ok(Value::Object(properties)) = zerompk::from_msgpack::<Value>(properties) else {
+        return 1.0;
+    };
+    match properties.get("weight") {
+        Some(Value::Float(weight)) => *weight,
+        Some(Value::Integer(weight)) => *weight as f64,
+        _ => 1.0,
+    }
+}
+
+pub(crate) fn edge_to_value(
     collection: &str,
     src: &str,
     label: &str,
@@ -70,7 +81,19 @@ pub async fn edge_put<S: StorageEngine>(
         let csr = map
             .entry(collection.to_string())
             .or_insert_with(CsrIndex::new);
-        csr.add_edge(src_id, label, dst_id)
+        let weight = edge_weight(properties);
+        if !weight.is_finite() || weight < 0.0 {
+            return Err(LiteError::Storage {
+                detail: format!("edge weight must be finite and non-negative, got {weight}"),
+            });
+        }
+        if csr.edge_weight(src_id, label, dst_id).is_some() {
+            csr.remove_edge(src_id, label, dst_id);
+            csr.compact().map_err(|e| LiteError::Storage {
+                detail: e.to_string(),
+            })?;
+        }
+        csr.add_edge_weighted(src_id, label, dst_id, weight)
             .map_err(|e| LiteError::Storage {
                 detail: e.to_string(),
             })?;
@@ -265,6 +288,16 @@ mod tests {
         assert!(s.contains("alice"));
         assert!(s.contains("KNOWS"));
         assert!(s.contains("bob"));
+    }
+
+    #[test]
+    fn edge_weight_reads_zerompk_properties() {
+        let properties = zerompk::to_msgpack_vec(&Value::Object(HashMap::from([(
+            "weight".to_string(),
+            Value::Float(3.5),
+        )])))
+        .unwrap();
+        assert_eq!(edge_weight(&properties), 3.5);
     }
 
     #[test]

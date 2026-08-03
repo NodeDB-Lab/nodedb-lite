@@ -3,7 +3,8 @@
 //! Graph algorithm dispatch: PageRank, WCC, SSSP, LCC, LPA, Closeness,
 //! Betweenness, Harmonic, Degree, Louvain, Triangles, Diameter, kCore.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use nodedb_graph::params::{AlgoParams, GraphAlgorithm};
@@ -54,6 +55,18 @@ pub fn run_algo(
     })
 }
 
+fn both_neighbors(csr: &CsrIndex, node: u32) -> Vec<u32> {
+    let mut neighbors: HashSet<u32> = csr
+        .iter_out_edges_raw(node)
+        .map(|(_, destination)| destination)
+        .chain(csr.iter_in_edges_raw(node).map(|(_, source)| source))
+        .collect();
+    neighbors.remove(&node);
+    let mut neighbors: Vec<u32> = neighbors.into_iter().collect();
+    neighbors.sort_unstable();
+    neighbors
+}
+
 // ── PageRank ─────────────────────────────────────────────────────────────────
 
 fn pagerank(csr: &CsrIndex, params: &AlgoParams) -> Vec<Vec<Value>> {
@@ -95,19 +108,33 @@ fn pagerank(csr: &CsrIndex, params: &AlgoParams) -> Vec<Vec<Value>> {
 
     // Initial rank distribution equals the teleport distribution.
     let mut rank = teleport.clone();
-    let out_degrees: Vec<usize> = (0..n).map(|i| csr.out_degree_raw(i as u32)).collect();
+    let both = params.direction.as_deref() == Some("both");
+    let adjacency: Vec<Vec<u32>> = (0..n as u32)
+        .map(|node| {
+            if both {
+                both_neighbors(csr, node)
+            } else {
+                csr.iter_out_edges_raw(node).map(|(_, dst)| dst).collect()
+            }
+        })
+        .collect();
 
     for _ in 0..max_iter {
-        // Teleport term uses the personalization distribution (uniform when no PPR).
-        let mut new_rank: Vec<f64> = (0..n).map(|i| (1.0 - d) * teleport[i]).collect();
-        for src in 0..n as u32 {
-            let od = out_degrees[src as usize];
-            if od == 0 {
+        let dangling_mass: f64 = rank
+            .iter()
+            .zip(&adjacency)
+            .filter_map(|(node_rank, neighbors)| neighbors.is_empty().then_some(*node_rank))
+            .sum();
+        let mut new_rank: Vec<f64> = (0..n)
+            .map(|i| (1.0 - d + d * dangling_mass) * teleport[i])
+            .collect();
+        for (src, neighbors) in adjacency.iter().enumerate() {
+            if neighbors.is_empty() {
                 continue;
             }
-            let contrib = d * rank[src as usize] / od as f64;
-            for (_, dst) in csr.iter_out_edges_raw(src) {
-                new_rank[dst as usize] += contrib;
+            let contribution = d * rank[src] / neighbors.len() as f64;
+            for &destination in neighbors {
+                new_rank[destination as usize] += contribution;
             }
         }
         let delta: f64 = rank
@@ -181,24 +208,39 @@ fn label_propagation(csr: &CsrIndex, params: &AlgoParams) -> Vec<Vec<Value>> {
     }
     let max_iter = params.iterations(10);
     let mut labels: Vec<u32> = (0..n as u32).collect();
+    let adjacency: Vec<Vec<u32>> = (0..n as u32)
+        .map(|node| both_neighbors(csr, node))
+        .collect();
 
     for _ in 0..max_iter {
+        let mut next_labels = labels.clone();
         let mut changed = false;
-        for node in 0..n as u32 {
-            let mut freq: HashMap<u32, usize> = HashMap::new();
-            for (_, nb) in csr.iter_out_edges_raw(node) {
-                *freq.entry(labels[nb as usize]).or_insert(0) += 1;
+        for (node, neighbors) in adjacency.iter().enumerate() {
+            let mut frequencies: HashMap<u32, usize> = HashMap::new();
+            for &neighbor in neighbors {
+                *frequencies.entry(labels[neighbor as usize]).or_insert(0) += 1;
             }
-            for (_, nb) in csr.iter_in_edges_raw(node) {
-                *freq.entry(labels[nb as usize]).or_insert(0) += 1;
-            }
-            if let Some(&best) = freq.iter().max_by_key(|&(_, v)| v).map(|(k, _)| k)
-                && best != labels[node as usize]
+            if let Some(best) = frequencies
+                .into_iter()
+                .max_by(|(left_label, left_count), (right_label, right_count)| {
+                    left_count.cmp(right_count).then_with(|| {
+                        let left_name = csr.node_name_raw(*left_label);
+                        let right_name = csr.node_name_raw(*right_label);
+                        let left_numeric = left_name.parse::<i128>();
+                        let right_numeric = right_name.parse::<i128>();
+                        match (left_numeric, right_numeric) {
+                            (Ok(left), Ok(right)) => right.cmp(&left),
+                            _ => right_name.cmp(left_name),
+                        }
+                    })
+                })
+                .map(|(label, _)| label)
             {
-                labels[node as usize] = best;
-                changed = true;
+                next_labels[node] = best;
+                changed |= best != labels[node];
             }
         }
+        labels = next_labels;
         if !changed {
             break;
         }
@@ -218,38 +260,70 @@ fn label_propagation(csr: &CsrIndex, params: &AlgoParams) -> Vec<Vec<Value>> {
 
 fn lcc(csr: &CsrIndex) -> Vec<Vec<Value>> {
     let n = csr.node_count();
+    let adjacency: Vec<HashSet<u32>> = (0..n as u32)
+        .map(|node| both_neighbors(csr, node).into_iter().collect())
+        .collect();
     (0..n)
         .map(|i| {
             let node = i as u32;
-            let neighbors: HashSet<u32> = csr
-                .iter_out_edges_raw(node)
-                .map(|(_, d)| d)
-                .chain(csr.iter_in_edges_raw(node).map(|(_, s)| s))
+            let mut neighbors: Vec<u32> = adjacency[i]
+                .iter()
+                .copied()
+                .filter(|neighbor| *neighbor != node)
                 .collect();
-            let k = neighbors.len();
-            let coeff = if k < 2 {
-                0.0f64
+            neighbors.sort_unstable();
+            let degree = neighbors.len();
+            let coefficient = if degree < 2 {
+                0.0
             } else {
                 let mut triangles = 0usize;
-                let nb_vec: Vec<u32> = neighbors.iter().copied().collect();
-                for &u in &nb_vec {
-                    for (_, v) in csr.iter_out_edges_raw(u) {
-                        if neighbors.contains(&v) {
+                for left in 0..neighbors.len() {
+                    for right in left + 1..neighbors.len() {
+                        if adjacency[neighbors[left] as usize].contains(&neighbors[right]) {
                             triangles += 1;
                         }
                     }
                 }
-                triangles as f64 / (k * (k - 1)) as f64
+                2.0 * triangles as f64 / (degree * (degree - 1)) as f64
             };
             vec![
                 Value::String(csr.node_name_raw(node).to_string()),
-                Value::Float(coeff),
+                Value::Float(coefficient),
             ]
         })
         .collect()
 }
 
-// ── SSSP (Dijkstra, unweighted = BFS) ────────────────────────────────────────
+// ── SSSP (Dijkstra) ──────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug)]
+struct QueueEntry {
+    distance: f64,
+    node: u32,
+}
+
+impl PartialEq for QueueEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.node == other.node && self.distance.to_bits() == other.distance.to_bits()
+    }
+}
+
+impl Eq for QueueEntry {}
+
+impl Ord for QueueEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .distance
+            .total_cmp(&self.distance)
+            .then_with(|| other.node.cmp(&self.node))
+    }
+}
+
+impl PartialOrd for QueueEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 fn sssp(csr: &CsrIndex, params: &AlgoParams) -> Vec<Vec<Value>> {
     let n = csr.node_count();
@@ -268,36 +342,54 @@ fn sssp(csr: &CsrIndex, params: &AlgoParams) -> Vec<Vec<Value>> {
             .collect();
     };
 
-    // BFS for unweighted; weighted edges use Dijkstra via priority queue.
-    let mut dist = vec![f64::INFINITY; n];
-    dist[src_id as usize] = 0.0;
-    let mut queue: VecDeque<u32> = VecDeque::new();
-    queue.push_back(src_id);
+    let both = params.direction.as_deref() == Some("both");
+    let mut distances = vec![f64::INFINITY; n];
+    distances[src_id as usize] = 0.0;
+    let mut queue = BinaryHeap::new();
+    queue.push(QueueEntry {
+        distance: 0.0,
+        node: src_id,
+    });
 
-    while let Some(u) = queue.pop_front() {
-        let d = dist[u as usize];
-        let weight = if csr.has_weighted_edges() { 0.0 } else { 1.0 };
-        for (_, v) in csr.iter_out_edges_raw(u) {
-            let edge_w = if csr.has_weighted_edges() {
-                // For weighted graphs, use Dijkstra — here simplified to BFS with weight 1
-                1.0f64
-            } else {
-                1.0
-            };
-            let nd = d + edge_w;
-            if nd < dist[v as usize] {
-                dist[v as usize] = nd;
-                queue.push_back(v);
+    while let Some(QueueEntry { distance, node }) = queue.pop() {
+        if distance > distances[node as usize] {
+            continue;
+        }
+        let mut edges: HashMap<u32, f64> = HashMap::new();
+        for (_, destination, weight) in csr.iter_out_edges_weighted_raw(node) {
+            edges
+                .entry(destination)
+                .and_modify(|current| *current = current.min(weight))
+                .or_insert(weight);
+        }
+        if both {
+            for (_, source, weight) in csr.iter_in_edges_weighted_raw(node) {
+                edges
+                    .entry(source)
+                    .and_modify(|current| *current = current.min(weight))
+                    .or_insert(weight);
             }
         }
-        let _ = weight; // silence unused warning
+        for (destination, weight) in edges {
+            if !weight.is_finite() || weight < 0.0 {
+                continue;
+            }
+            let candidate = distance + weight;
+            if candidate < distances[destination as usize] {
+                distances[destination as usize] = candidate;
+                queue.push(QueueEntry {
+                    distance: candidate,
+                    node: destination,
+                });
+            }
+        }
     }
 
     (0..n)
         .map(|i| {
             vec![
                 Value::String(csr.node_name_raw(i as u32).to_string()),
-                Value::Float(dist[i]),
+                Value::Float(distances[i]),
             ]
         })
         .collect()
@@ -699,6 +791,106 @@ mod tests {
             })
             .sum();
         assert!((total - 1.0).abs() < 0.01, "total={total}");
+    }
+
+    #[test]
+    fn pagerank_redistributes_dangling_mass() {
+        let mut csr = CsrIndex::new();
+        csr.add_edge("a", "E", "b").unwrap();
+        let result = run_algo(
+            &make_csr_map(csr),
+            GraphAlgorithm::PageRank,
+            &default_params("g"),
+        )
+        .unwrap();
+        let total: f64 = result
+            .rows
+            .iter()
+            .map(|row| match row[1] {
+                Value::Float(rank) => rank,
+                _ => panic!("expected rank"),
+            })
+            .sum();
+        assert!((total - 1.0).abs() < 1e-12, "total={total}");
+    }
+
+    #[test]
+    fn sssp_uses_edge_weights() {
+        let mut csr = CsrIndex::new();
+        csr.add_edge_weighted("a", "E", "c", 10.0).unwrap();
+        csr.add_edge_weighted("a", "E", "b", 2.0).unwrap();
+        csr.add_edge_weighted("b", "E", "c", 2.0).unwrap();
+        let params = AlgoParams {
+            collection: "g".to_string(),
+            source_node: Some("a".to_string()),
+            ..Default::default()
+        };
+        let result = run_algo(&make_csr_map(csr), GraphAlgorithm::Sssp, &params).unwrap();
+        let distance = result
+            .rows
+            .iter()
+            .find(|row| row[0] == Value::String("c".to_string()))
+            .map(|row| row[1].clone());
+        assert_eq!(distance, Some(Value::Float(4.0)));
+    }
+
+    #[test]
+    fn sssp_uses_lightest_parallel_edge() {
+        let mut csr = CsrIndex::new();
+        csr.add_edge_weighted("a", "slow", "b", 10.0).unwrap();
+        csr.add_edge_weighted("a", "fast", "b", 2.0).unwrap();
+        let params = AlgoParams {
+            collection: "g".to_string(),
+            source_node: Some("a".to_string()),
+            ..Default::default()
+        };
+        let result = run_algo(&make_csr_map(csr), GraphAlgorithm::Sssp, &params).unwrap();
+        let distance = result
+            .rows
+            .iter()
+            .find(|row| row[0] == Value::String("b".to_string()))
+            .map(|row| row[1].clone());
+        assert_eq!(distance, Some(Value::Float(2.0)));
+    }
+
+    #[test]
+    fn label_propagation_is_synchronous_and_breaks_ties_by_smallest_label() {
+        let mut csr = CsrIndex::new();
+        csr.add_edge("a", "E", "b").unwrap();
+        csr.add_edge("c", "E", "b").unwrap();
+        let params = AlgoParams {
+            collection: "g".to_string(),
+            max_iterations: Some(1),
+            ..Default::default()
+        };
+        let result = run_algo(
+            &make_csr_map(csr),
+            GraphAlgorithm::LabelPropagation,
+            &params,
+        )
+        .unwrap();
+        let labels: Vec<i64> = result
+            .rows
+            .iter()
+            .map(|row| match row[1] {
+                Value::Integer(label) => label,
+                _ => panic!("expected label"),
+            })
+            .collect();
+        assert_eq!(labels, vec![1, 0, 1]);
+    }
+
+    #[test]
+    fn lcc_treats_single_arc_edges_as_undirected() {
+        let result = run_algo(
+            &make_csr_map(make_triangle_csr()),
+            GraphAlgorithm::Lcc,
+            &default_params("g"),
+        )
+        .unwrap();
+        for row in result.rows {
+            assert_eq!(row[1], Value::Float(1.0));
+        }
     }
 
     #[test]

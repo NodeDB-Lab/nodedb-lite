@@ -39,6 +39,8 @@ pub mod config;
 pub mod engine;
 pub mod error;
 pub mod event;
+#[cfg(feature = "graphalytics-runner")]
+pub mod graphalytics;
 pub mod identity;
 pub mod memory;
 pub mod nodedb;

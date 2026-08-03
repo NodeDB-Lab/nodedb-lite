@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 use nodedb_types::Namespace;
 use nodedb_types::id::EdgeId;
+use nodedb_types::value::Value;
 
 use crate::engine::graph::history::SYSTEM_TO_CURRENT;
 use crate::engine::graph::index::CsrIndex;
@@ -27,6 +28,44 @@ use crate::nodedb::core::types::NodeDbLite;
 
 /// Meta key prefix for the graph bitemporal flag (mirrors `engine::graph::history`).
 const META_GRAPH_BITEMPORAL_PREFIX: &str = "graph_bitemporal:";
+
+fn stored_edge_weight(value: &[u8]) -> f64 {
+    let Ok(Value::Object(fields)) = zerompk::from_msgpack::<Value>(value) else {
+        return 1.0;
+    };
+    let Some(Value::Bytes(properties)) = fields.get("props") else {
+        return 1.0;
+    };
+    let Ok(Value::Object(properties)) = zerompk::from_msgpack::<Value>(properties) else {
+        return 1.0;
+    };
+    match properties.get("weight") {
+        Some(Value::Float(weight)) => *weight,
+        Some(Value::Integer(weight)) => *weight as f64,
+        _ => 1.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_edge_weight_reads_nested_properties() {
+        let properties = zerompk::to_msgpack_vec(&Value::Object(HashMap::from([(
+            "weight".to_string(),
+            Value::Float(2.5),
+        )])))
+        .unwrap();
+        let stored = zerompk::to_msgpack_vec(&Value::Object(HashMap::from([(
+            "props".to_string(),
+            Value::Bytes(properties),
+        )])))
+        .unwrap();
+
+        assert_eq!(stored_edge_weight(&stored), 2.5);
+    }
+}
 
 /// Trailer size of each `Namespace::GraphHistory` value:
 /// 8-byte big-endian `system_to_ms`.
@@ -101,7 +140,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         {
             let mut csr_map = self.csr.lock_or_recover();
-            for (key, _value) in &graph_entries {
+            for (key, value) in &graph_entries {
                 // Only process keys that split into exactly 4 NUL-separated segments.
                 let parts: Vec<&[u8]> = key.splitn(4, |&b| b == 0).collect();
                 if parts.len() != 4 {
@@ -131,7 +170,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 let csr = csr_map
                     .entry(collection.to_string())
                     .or_insert_with(CsrIndex::new);
-                let _ = csr.add_edge(src, label, dst);
+                let weight = stored_edge_weight(value);
+                let _ = csr.add_edge_weighted(src, label, dst, weight);
                 indexed.insert(tuple);
             }
         }
