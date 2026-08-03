@@ -14,7 +14,9 @@
 use std::sync::Arc;
 
 use nodedb_client::NodeDb;
-use nodedb_lite::{Encryption, LiteConfig, NodeDbLite, PagedbStorageDefault};
+use nodedb_lite::engine::crdt::CrdtEngine;
+use nodedb_lite::{Encryption, LiteConfig, NodeDbLite, PagedbStorageDefault, StorageEngine};
+use nodedb_types::Namespace;
 use nodedb_types::document::Document;
 use nodedb_types::value::Value;
 
@@ -278,5 +280,82 @@ async fn queued_deltas_survive_reopen() {
         "every queued delta must be readable after reopen, from both batches; \
          storage_counts: {:?}",
         dump.storage_counts
+    );
+}
+
+// ---------------------------------------------------------------------------
+// a_corrupt_base_does_not_strand_its_updates
+// ---------------------------------------------------------------------------
+
+/// A collection whose base snapshot fails its CRC is dropped on open so the
+/// rest of the store still comes up. Its updates must be dropped with it.
+///
+/// Each update carries only the operations since that base, so without the base
+/// its causal predecessors are missing, Loro buffers it as pending, and the
+/// import reports an error. Replaying one would therefore fail the open — and
+/// because nothing else removes these keys, it would fail every open after it
+/// too, turning an isolated re-sync into a store that never opens again.
+#[tokio::test]
+async fn a_corrupt_base_does_not_strand_its_updates() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("corrupt_base.pagedb");
+
+    {
+        let db = open_manual_flush(&path).await;
+        db.execute_sql("CREATE COLLECTION bt_notes WITH (bitemporal=true)", &[])
+            .await
+            .expect("create bitemporal collection");
+
+        put_note(&db, "note0", "checkpointed").await;
+        db.flush().await.expect("flush the checkpoint");
+        for i in 1..4 {
+            put_note(&db, &format!("note{i}"), &format!("update {i}")).await;
+            db.flush().await.expect("flush an update");
+        }
+    }
+
+    // Corrupt the base the updates were exported against.
+    {
+        let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+            .await
+            .expect("open storage");
+        let updates = storage
+            .scan_prefix(Namespace::LoroState, CrdtEngine::state_delta_key_prefix())
+            .await
+            .expect("scan updates");
+        assert!(
+            !updates.is_empty(),
+            "this test only means something while there are updates sitting on top of the base"
+        );
+
+        let key = CrdtEngine::snapshot_key_for("bt_notes");
+        let mut envelope = storage
+            .get(Namespace::LoroState, &key)
+            .await
+            .expect("get base")
+            .expect("the base snapshot must be on disk");
+        let last = envelope.len() - 1;
+        envelope[last] ^= 0xff;
+        storage
+            .put(Namespace::LoroState, &key, &envelope)
+            .await
+            .expect("write the corrupted base");
+    }
+
+    // Opening must succeed rather than fail on updates it cannot apply.
+    drop(open_manual_flush(&path).await);
+
+    let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
+        .await
+        .expect("reopen storage");
+    let leftover = storage
+        .scan_prefix(Namespace::LoroState, CrdtEngine::state_delta_key_prefix())
+        .await
+        .expect("scan updates after recovery");
+    assert!(
+        leftover.is_empty(),
+        "an update whose base is gone can never be applied; leaving it on disk makes every \
+         future open fail on it — {} remain",
+        leftover.len()
     );
 }

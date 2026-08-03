@@ -127,6 +127,17 @@ pub struct NodeDbLite<S: StorageEngine> {
     /// overwriting the first — leaving the documents re-authored under an id
     /// the persisted record no longer names.
     pub(crate) identity_change: tokio::sync::Mutex<()>,
+    /// Serializes `flush` calls against each other.
+    ///
+    /// A flush plans its CRDT writes under the `crdt` guard, releases it while
+    /// the batch commits, then re-takes it to record what is now durable — a
+    /// span no `std::sync` guard can cover. Two flushes in flight would each
+    /// plan from the same bookkeeping and hand out the same update sequence,
+    /// so one batch's checkpoint could retire entries the other had just
+    /// written under those numbers, leaving updates on disk that no later
+    /// checkpoint knows to delete. Serializing them keeps the sequence a
+    /// single writer's to allocate.
+    pub(crate) flush_lock: tokio::sync::Mutex<()>,
     /// When `false`, KV operations go directly to storage, bypassing Loro.
     pub(crate) sync_enabled: bool,
     /// Buffered KV writes awaiting batch commit to storage.

@@ -80,8 +80,18 @@ impl<S: StorageEngine> NodeDbLite<S> {
                         "CRDT snapshot CRC32C mismatch — discarding corrupted snapshot for this \
                          collection. A full re-sync from Origin is needed for it."
                     );
-                    // Delete the corrupted snapshot so we don't re-read it.
-                    let _ = storage.delete(Namespace::LoroState, key).await;
+                    // Delete the corrupted snapshot so we don't re-read it. A
+                    // failed delete leaves it to be re-read and re-reported on
+                    // the next open, which is recoverable — but it must not be
+                    // silent, or the collection looks cleanly dropped.
+                    if let Err(e) = storage.delete(Namespace::LoroState, key).await {
+                        tracing::error!(
+                            collection = %collection,
+                            error = %e,
+                            "failed to delete the corrupted CRDT snapshot; it will be \
+                             re-read and discarded again on the next open"
+                        );
+                    }
                 }
             }
         }
@@ -90,8 +100,19 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // Flush writes a full snapshot only periodically; between checkpoints it
         // appends `loro_delta:<collection>:<seq>` entries. A prefix scan returns
         // them in key order, which the zero-padded sequence makes replay order.
-        // Skipping this loop would silently roll a collection back to its last
-        // checkpoint, so a corrupt entry is an error rather than a warning.
+        // Skipping an update whose base is present would silently roll that
+        // collection back to its last checkpoint, so a corrupt one is an error
+        // rather than a warning.
+        //
+        // An update whose base is *absent* is the opposite case. Every update is
+        // exported as the operations since a base that was written in an earlier
+        // batch, so without that base its causal predecessors are missing and
+        // Loro buffers it as pending — which `import_local` reports as an error.
+        // Replaying one would therefore fail the whole open, and since nothing
+        // removes these keys, it would fail every subsequent open too: a
+        // collection whose snapshot was discarded one line above would take the
+        // entire store down with it, permanently, instead of being the isolated
+        // re-sync the discard is there to make it. They are deleted instead.
         let mut delta_bytes: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
         let mut next_delta_seq: std::collections::HashMap<String, u64> =
@@ -99,6 +120,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let delta_entries = storage
             .scan_prefix(Namespace::LoroState, CrdtEngine::state_delta_key_prefix())
             .await?;
+        let mut orphaned_keys: Vec<Vec<u8>> = Vec::new();
         for (key, envelope) in &delta_entries {
             let Some((collection, seq)) = CrdtEngine::state_delta_from_key(key) else {
                 tracing::error!(
@@ -107,6 +129,18 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 );
                 continue;
             };
+            if !base_bytes.contains_key(collection) {
+                tracing::error!(
+                    collection = %collection,
+                    seq,
+                    "CRDT update has no base snapshot to apply to — discarding it. Its base \
+                     was corrupt or missing, so the operations it carries have no causal \
+                     predecessors and cannot be replayed. A full re-sync from Origin is \
+                     needed for this collection."
+                );
+                orphaned_keys.push(key.clone());
+                continue;
+            }
             let Some(update) = crate::storage::checksum::unwrap(envelope) else {
                 return Err(NodeDbError::segment_corrupted(format!(
                     "CRDT update '{collection}' #{seq} failed its CRC32C check; the writes it \
@@ -124,6 +158,17 @@ impl<S: StorageEngine> NodeDbLite<S> {
                     "CRDT update replay for '{collection}' #{seq} failed: {e}"
                 ))
             })?;
+        }
+        for key in orphaned_keys {
+            // A failed delete is recoverable — the entry is skipped by the same
+            // base-absent check on the next open — but never silent.
+            if let Err(e) = storage.delete(Namespace::LoroState, &key).await {
+                tracing::error!(
+                    error = %e,
+                    "failed to delete an orphaned CRDT update; it will be skipped and \
+                     reported again on the next open"
+                );
+            }
         }
 
         // Seed the checkpoint accounting from what was on disk, so the first

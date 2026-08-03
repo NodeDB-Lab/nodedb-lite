@@ -183,7 +183,7 @@ impl CrdtEngine {
                 delta_bytes,
                 seq: 0,
             });
-            self.unpersisted_deltas.insert(mutation_id);
+            self.mark_delta_unpersisted(mutation_id);
         }
 
         Ok(count)
@@ -256,7 +256,7 @@ impl CrdtEngine {
             delta_bytes,
             seq: 0,
         });
-        self.unpersisted_deltas.insert(mutation_id);
+        self.mark_delta_unpersisted(mutation_id);
         Ok((value, mutation_id))
     }
 }

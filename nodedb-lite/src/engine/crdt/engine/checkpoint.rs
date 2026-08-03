@@ -31,6 +31,11 @@ pub struct CrdtWrite {
     /// Frontier the payload was exported at. Report it back through
     /// [`CrdtEngine::mark_persisted`] once the write has committed.
     pub version: loro::VersionVector,
+    /// Compaction epoch the collection was at when this was planned. A
+    /// compaction landing before the write commits makes the payload stale in
+    /// a way the frontier cannot show, since compaction leaves the frontier
+    /// where it was; the epoch is what distinguishes the two.
+    pub epoch: u64,
 }
 
 /// Which of the two shapes a [`CrdtWrite`] carries.
@@ -47,10 +52,16 @@ pub enum CrdtWriteKind {
 /// A committed [`CrdtWrite`], reported back so the engine can advance its
 /// bookkeeping. Carries the payload's length rather than the payload.
 pub struct CrdtPersisted {
+    /// Collection the committed write belongs to.
     pub collection: String,
+    /// Whether it was a fresh base snapshot or an update on top of one.
     pub kind: CrdtWriteKind,
+    /// Length of the payload that was written.
     pub bytes: usize,
+    /// Frontier the payload was exported at.
     pub version: loro::VersionVector,
+    /// Compaction epoch the write was planned at — see [`CrdtWrite::epoch`].
+    pub epoch: u64,
 }
 
 impl CrdtWrite {
@@ -61,6 +72,7 @@ impl CrdtWrite {
             kind: self.kind,
             bytes: self.bytes.len(),
             version: self.version.clone(),
+            epoch: self.epoch,
         }
     }
 }
@@ -111,16 +123,38 @@ impl CrdtEngine {
                 kind,
                 bytes,
                 version,
+                epoch: self.state_epoch(collection),
             });
         }
         Ok(out)
     }
 
+    /// Compaction epoch a collection is currently at. Absent means never
+    /// compacted, which is epoch zero.
+    pub(in crate::engine::crdt) fn state_epoch(&self, collection: &str) -> u64 {
+        self.state_epochs.get(collection).copied().unwrap_or(0)
+    }
+
+    /// Record that a collection's document has been structurally rewritten, so
+    /// any write planned against the previous form is no longer describable by
+    /// its frontier. See [`CrdtEngine::state_epochs`].
+    pub(in crate::engine::crdt) fn advance_state_epoch(&mut self, collection: &str) {
+        *self.state_epochs.entry(collection.to_string()).or_insert(0) += 1;
+    }
+
     /// Advance the bookkeeping for writes that are now durable.
+    ///
+    /// A write whose collection was compacted between the plan and the commit
+    /// is discarded rather than recorded: the bytes on disk describe a document
+    /// that no longer exists, and the marks compaction dropped must stay
+    /// dropped so the next flush writes a fresh checkpoint.
     ///
     /// Call only after the batch has committed — see [`Self::plan_persistence`].
     pub fn mark_persisted(&mut self, persisted: impl IntoIterator<Item = CrdtPersisted>) {
         for entry in persisted {
+            if self.state_epoch(&entry.collection) != entry.epoch {
+                continue;
+            }
             match entry.kind {
                 CrdtWriteKind::Checkpoint { .. } => {
                     self.checkpoint_bytes

@@ -29,7 +29,10 @@ impl CrdtEngine {
                 self.next_mutation_id.store(max_id + 1, Ordering::Relaxed);
                 // The bulk blob is the only copy these came from, so none of
                 // them is stored under its own key yet.
-                self.unpersisted_deltas = deltas.iter().map(|d| d.mutation_id).collect();
+                self.unpersisted_deltas.clear();
+                for delta in &deltas {
+                    self.mark_delta_unpersisted(delta.mutation_id);
+                }
                 self.pending_deltas = deltas;
             }
             Err(e) => {

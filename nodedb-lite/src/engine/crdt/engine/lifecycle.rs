@@ -46,12 +46,14 @@ impl CrdtEngine {
             policies: nodedb_crdt::PolicyRegistry::new(),
             registered_collections: std::collections::HashSet::new(),
             deferred: Vec::new(),
-            unpersisted_deltas: std::collections::HashSet::new(),
+            unpersisted_deltas: HashMap::new(),
+            delta_revision: 0,
             flushed_versions: HashMap::new(),
             checkpoint_bytes: HashMap::new(),
             delta_bytes: HashMap::new(),
             next_delta_seq: HashMap::new(),
-            delta_writes: AtomicU64::new(0),
+            state_epochs: HashMap::new(),
+            delta_writes: 0,
             snapshot_exports: AtomicU64::new(0),
         })
     }
@@ -232,9 +234,17 @@ impl CrdtEngine {
         // forces a fresh checkpoint, which also deletes the stale updates —
         // `next_delta_seq` is deliberately kept, since it is the count of the
         // entries that checkpoint has to delete.
+        //
+        // Advancing the epoch is what keeps a flush that is committing right
+        // now from putting the marks back: its writes were exported from the
+        // document this call just replaced.
         self.flushed_versions.clear();
         self.checkpoint_bytes.clear();
         self.delta_bytes.clear();
+        let compacted: Vec<String> = self.states.keys().cloned().collect();
+        for collection in compacted {
+            self.advance_state_epoch(&collection);
+        }
         Ok(())
     }
 
@@ -306,6 +316,7 @@ impl CrdtEngine {
         self.flushed_versions.remove(collection);
         self.checkpoint_bytes.remove(collection);
         self.delta_bytes.remove(collection);
+        self.advance_state_epoch(collection);
         Ok(())
     }
 }

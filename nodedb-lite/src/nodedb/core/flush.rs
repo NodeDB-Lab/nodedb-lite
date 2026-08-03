@@ -37,6 +37,11 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
     /// Persist all in-memory state to storage (call before shutdown).
     pub async fn flush(&self) -> NodeDbResult<()> {
+        // One flush at a time: the CRDT update sequence is allocated under the
+        // `crdt` guard but committed after it is released, so concurrent
+        // flushes would hand out the same numbers. See `flush_lock`.
+        let _flush_guard = self.flush_lock.lock().await;
+
         // Drain the buffered KV writes first — they have their own batch-commit
         // path. Without this, `flush()` (and the auto-flush timer) would not
         // persist KV `put`s, contradicting "persist all in-memory state".
@@ -68,7 +73,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // write rate — unbounded file growth on an otherwise idle store, and an
         // export duty cycle that starved readers once the document outgrew the
         // flush interval.
-        let persisted = {
+        let (persisted, written_deltas) = {
             let crdt = self.crdt.lock_or_recover();
             let plan = crdt.plan_persistence().map_err(NodeDbError::storage)?;
             let mut persisted = Vec::with_capacity(plan.len());
@@ -128,9 +133,14 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 }
             }
 
-            for delta in crdt.pending_deltas_needing_write() {
+            // The revision each entry was written at travels with it: the
+            // acknowledgement below happens after an await, and an entry queued
+            // or re-sequenced in that window was never in this batch.
+            let mut written_deltas: Vec<(u64, u64)> = Vec::new();
+            for (delta, revision) in crdt.pending_deltas_needing_write() {
                 let key = CrdtEngine::delta_storage_key(delta.mutation_id);
                 let value = CrdtEngine::serialize_delta(delta).map_err(NodeDbError::storage)?;
+                written_deltas.push((delta.mutation_id, revision));
                 ops.push(WriteOp::Put {
                     ns: Namespace::Crdt,
                     key,
@@ -160,7 +170,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 value: max_mid.to_le_bytes().to_vec(),
             });
 
-            persisted
+            (persisted, written_deltas)
         };
 
         // ── Persist per-collection CSR indices ──
@@ -346,7 +356,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         {
             let mut crdt = self.crdt.lock_or_recover();
             crdt.mark_persisted(persisted);
-            crdt.mark_pending_deltas_persisted();
+            crdt.mark_pending_deltas_persisted(written_deltas);
         }
 
         // ── Write HNSW vector segments to pagedb (native PagedbStorage only) ──
