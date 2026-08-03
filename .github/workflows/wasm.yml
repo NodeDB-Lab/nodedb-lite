@@ -1,11 +1,32 @@
+# wasm32 build + node/browser test suites.
+#
+# Called by:
+#   - ci.yml              (PR checks — runs on every pull request)
+#   - release-prepare.yml (tag gate)
+#
+# Dependency resolution: see the header of test.yml. This workflow takes the
+# same `sources` input for the same reason.
+#
+# Stays on x86_64 while test.yml moved to ubuntu-24.04-arm: wasm-pack ships no
+# aarch64-linux binary from its install script, and Google publishes no Linux
+# arm64 Chrome for the headless browser run.
+
 name: WASM
 
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
   workflow_call:
+    inputs:
+      sources:
+        description: "`sibling` to build against checked-out nodedb/pagedb sources, `registry` for crates.io."
+        required: false
+        type: string
+        default: sibling
+      nodedb-ref:
+        description: Git ref of the Origin workspace to build against.
+        required: false
+        type: string
+        default: main
 
 concurrency:
   group: wasm-${{ github.ref }}
@@ -21,22 +42,23 @@ jobs:
   wasm-build:
     name: WASM Build and Test
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: wasm32-unknown-unknown
 
       - name: Restore cargo registry cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           prefix-key: wasm
           shared-key: lite-wasm
 
       - name: Restore wasm-pack cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/wasm-pack
           key: wasm-pack-${{ runner.os }}
@@ -44,9 +66,17 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
-      - name: Check workspace for wasm32 target
-        run: cargo check --workspace --target wasm32-unknown-unknown
+      - name: Set up workspace
+        uses: ./.github/actions/setup-workspace
+        with:
+          sources: ${{ inputs.sources }}
+          nodedb-ref: ${{ inputs.nodedb-ref }}
 
+      # `wasm-pack build` compiles the same crate graph for the same target, so
+      # a separate `cargo check --workspace --target wasm32` was a second cold
+      # compile that proved nothing the build below does not. test.yml's
+      # `cargo check -p nodedb-lite-wasm --target wasm32` covers the fast
+      # signal; this job covers the real artifact.
       - name: Build WASM release
         run: wasm-pack build --target web --release nodedb-lite-wasm
 
@@ -67,7 +97,7 @@ jobs:
         run: wasm-pack test --node nodedb-lite-wasm
 
       - name: Install Chrome for browser tests
-        uses: browser-actions/setup-chrome@v1
+        uses: browser-actions/setup-chrome@c785b87e244131f27c9f19c1a33e2ead956ab7ce # v1
 
       - name: Run WASM browser tests (headless Chrome)
         run: wasm-pack test --headless --chrome nodedb-lite-wasm

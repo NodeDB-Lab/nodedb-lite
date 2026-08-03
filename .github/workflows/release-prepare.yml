@@ -37,16 +37,27 @@ jobs:
 
   # Native lint + test suite. Calls test.yml directly rather than ci.yml, whose
   # draft-PR gate skips the run under workflow_call.
+  #
+  # `sources: registry` is deliberate and differs from the PR path. A tag is a
+  # promise that Lite can be published, and `cargo publish` rejects a manifest
+  # whose dependencies resolve through `[patch.crates-io]` path entries. So the
+  # release gate must build against exactly what crates.io serves: if the
+  # shared `nodedb-*` crates for this tag are not published yet, the release
+  # fails here rather than midway through publishing.
   ci:
     name: CI Gate
     needs: validate-version
     uses: ./.github/workflows/test.yml
+    with:
+      sources: registry
 
   # wasm build + node/browser tests.
   wasm:
     name: WASM Gate
     needs: validate-version
     uses: ./.github/workflows/wasm.yml
+    with:
+      sources: registry
 
   # ── FFI: Linux desktop / server libraries ────────────────────────────────────
   # cdylib + staticlib + the cbindgen-generated C header + the Kotlin bindings,

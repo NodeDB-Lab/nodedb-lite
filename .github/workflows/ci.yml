@@ -1,4 +1,13 @@
-# CI — thin wrapper that calls the reusable test workflow.
+# CI — the single pull-request entry point. Calls the reusable native and wasm
+# suites so a PR produces one stable set of check names to require in the
+# branch ruleset.
+#
+# Unlike the Origin workspace, whose suite is a ~10-minute cold compile behind
+# a `run-ci` label, Lite's runs unconditionally on every pull request. Lite is
+# small enough that opting in would only ever be forgotten.
+#
+# PRs build against the sibling nodedb/pagedb sources (the `sources` default);
+# the release path passes `registry` instead. See test.yml's header.
 
 name: CI
 
@@ -7,7 +16,6 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
-  workflow_call:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -17,7 +25,19 @@ permissions:
   contents: read
 
 jobs:
+  # A manual dispatch always runs; a pull request runs unless it is a draft.
+  # The previous `github.event.pull_request.draft == false` also skipped every
+  # workflow_dispatch run, where `github.event.pull_request` is null.
   test:
-    if: github.event.pull_request.draft == false
     name: Test Suite
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.draft != true
     uses: ./.github/workflows/test.yml
+
+  wasm:
+    name: WASM
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.draft != true
+    uses: ./.github/workflows/wasm.yml

@@ -46,23 +46,20 @@ sonic-rs = "0.5"
 zerompk = { version = "0.6", features = ["std", "derive"] }
 
 # Storage
-pagedb = { version = "0", default-features = false }
+# A caret requirement never matches a prerelease, so `version = "0"` could not
+# resolve against a registry that only publishes `0.1.0-beta.*`. Name the
+# prerelease explicitly.
+pagedb = { version = "0.1.0-beta.6", default-features = false }
 # Matches the `Bytes` type pagedb's txn API returns; must track pagedb's own
 # `bytes` major so the two resolve to one version and stay assignable.
 bytes = "1"
 roaring = "0.11"
-lru = "0.12"
+lru = "0.18"
 arrow = { version = "59", default-features = false, features = ["ipc"] }
 crc32c = "0.6"
 
 # CRDTs
 loro = "1"
-
-# WASM runtime
-wasmtime = { version = "30", default-features = false, features = [
-  "cranelift",
-  "runtime",
-] }
 
 # Crypto
 aes-gcm = "0.10"

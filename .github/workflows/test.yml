@@ -1,18 +1,36 @@
-# Reusable test workflow: fmt, clippy, native test suite, and wasm32 check.
+# Reusable test workflow: fmt, clippy, dependency audit, native test suite,
+# and a wasm32 build check.
 #
 # Called by:
-#   - ci.yml      (PR checks)
-#   - release.yml (pre-publish gate)
+#   - ci.yml              (PR checks — runs on every pull request)
+#   - release-prepare.yml (tag gate)
 #
-# Lite is a separate workspace from Origin. It consumes the nodedb-* shared
-# crates from crates.io. Local development uses `.cargo/config.toml`
-# [patch.crates-io] to resolve to a sibling Origin checkout; CI uses the
-# published versions.
+# Lite is a separate workspace from Origin and consumes the shared `nodedb-*`
+# crates (and `pagedb`) as registry dependencies. Because Lite tracks their
+# unreleased APIs, those requirements do not resolve against crates.io between
+# publishes; `.github/actions/setup-workspace` checks the sibling sources out
+# and patches cargo at them. Pass `sources: registry` to validate against what
+# crates.io actually serves instead — the correct mode for a publish gate, and
+# the wrong one for a PR.
+#
+# Cache strategy: both jobs share one `target/` cache via
+# `shared-key: lite-workspace`; the `lint` job seeds it on cold runs.
 
 name: Test
 
 on:
   workflow_call:
+    inputs:
+      sources:
+        description: "`sibling` to build against checked-out nodedb/pagedb sources, `registry` for crates.io."
+        required: false
+        type: string
+        default: sibling
+      nodedb-ref:
+        description: Git ref of the Origin workspace to build against.
+        required: false
+        type: string
+        default: main
 
 permissions:
   contents: read
@@ -23,15 +41,18 @@ env:
 jobs:
   lint:
     name: Lint & Check
-    runs-on: ubuntu-latest
+    # Free ARM64 runner for public repos — same rationale as the Origin
+    # workspace: ~40% faster per core at the same (zero) cost.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: lite-workspace
       - name: Install system deps
@@ -39,21 +60,33 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake clang libclang-dev pkg-config protobuf-compiler perl
+      - name: Set up workspace
+        uses: ./.github/actions/setup-workspace
+        with:
+          sources: ${{ inputs.sources }}
+          nodedb-ref: ${{ inputs.nodedb-ref }}
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --profile ci -- -D warnings
       - name: Check wasm32 target
         run: cargo check -p nodedb-lite-wasm --target wasm32-unknown-unknown
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2
+        with:
+          tool: cargo-deny@0.20.2
+      - name: Dependency audit
+        run: cargo deny check
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: lite-workspace
       - name: Install system deps
@@ -61,10 +94,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake clang libclang-dev pkg-config protobuf-compiler perl
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
+      - name: Set up workspace
+        uses: ./.github/actions/setup-workspace
         with:
-          tool: nextest
+          sources: ${{ inputs.sources }}
+          nodedb-ref: ${{ inputs.nodedb-ref }}
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2
+        with:
+          tool: nextest@0.9.140
       - name: Run tests
         run: |
           cargo nextest run \
@@ -73,7 +111,7 @@ jobs:
             --no-fail-fast
       - name: Upload JUnit report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: junit-report
           path: target/nextest/ci/junit.xml
