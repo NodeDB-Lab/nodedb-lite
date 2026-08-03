@@ -115,7 +115,8 @@ mod tests {
     #[test]
     fn setting_analyzer_leaves_fuzzy_default_unchanged() {
         let mut mgr = FtsCollectionManager::new();
-        mgr.index_document("col", "doc1", "the quick brown fox");
+        mgr.index_document("col", "doc1", "the quick brown fox")
+            .expect("index update must succeed");
 
         mgr.set_collection_fuzzy("col", true);
         mgr.set_collection_analyzer("col", "german");
@@ -132,7 +133,8 @@ mod tests {
     #[test]
     fn setting_fuzzy_default_leaves_analyzer_unchanged() {
         let mut mgr = FtsCollectionManager::new();
-        mgr.index_document("col", "doc1", "the quick brown fox");
+        mgr.index_document("col", "doc1", "the quick brown fox")
+            .expect("index update must succeed");
 
         mgr.set_collection_analyzer("col", "german");
         mgr.set_collection_fuzzy("col", true);
@@ -155,7 +157,8 @@ mod tests {
         mgr.set_collection_fuzzy("col", true);
         assert!(mgr.indices.is_empty());
 
-        mgr.index_document("col", "doc1", "der schnelle braune fuchs");
+        mgr.index_document("col", "doc1", "der schnelle braune fuchs")
+            .expect("index update must succeed");
 
         let (analyzer, fuzzy) = doc_index_config(&mgr);
         assert_eq!(analyzer.as_deref(), Some("german"));
@@ -168,7 +171,8 @@ mod tests {
         mgr.set_collection_analyzer("col", "german");
         mgr.set_collection_fuzzy("col", true);
 
-        mgr.index_field("col", "title", "doc1", "der schnelle braune fuchs");
+        mgr.index_field("col", "title", "doc1", "der schnelle braune fuchs")
+            .expect("index update must succeed");
 
         let key = "col:title";
         let idx = mgr.indices.get(key).expect("field index must exist");
@@ -189,7 +193,8 @@ mod tests {
         // The `SetTextConfig { analyzer_name: None, fuzzy_default: None }`
         // case: neither setter runs, so nothing is retained or persisted.
         let mut mgr = FtsCollectionManager::new();
-        mgr.index_document("col", "doc1", "the quick brown fox");
+        mgr.index_document("col", "doc1", "the quick brown fox")
+            .expect("index update must succeed");
 
         let (analyzer, fuzzy) = doc_index_config(&mgr);
         assert_eq!(analyzer, None);

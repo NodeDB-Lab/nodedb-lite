@@ -20,11 +20,21 @@ use nodedb_fts::posting::QueryMode as FtsQueryMode;
 use nodedb_types::Surrogate;
 use nodedb_types::text_search::{QueryMode, TextSearchParams};
 
+use crate::error::LiteError;
+
 /// A resolved FTS result with the original string doc_id restored.
 pub struct FtsResult {
     pub doc_id: String,
     pub score: f32,
     pub fuzzy: bool,
+}
+
+/// Wrap an index-layer failure as the typed error the write path propagates.
+fn fts_err(collection: &str, e: impl std::fmt::Display) -> LiteError {
+    LiteError::FtsIndex {
+        collection: collection.to_owned(),
+        detail: e.to_string(),
+    }
 }
 
 /// Manages per-collection (and per-field) in-memory full-text search indexes.
@@ -119,28 +129,40 @@ impl FtsCollectionManager {
     ///
     /// The document is stored under the `"{collection}:_doc"` key.
     /// Calling again with the same `doc_id` replaces the previous entry.
-    pub fn index_document(&mut self, collection: &str, doc_id: &str, text: &str) {
+    ///
+    /// Empty text is a removal, not a no-op: a document updated until it has
+    /// no indexable words must stop matching the words it used to contain.
+    pub fn index_document(
+        &mut self,
+        collection: &str,
+        doc_id: &str,
+        text: &str,
+    ) -> Result<(), LiteError> {
         if text.is_empty() {
-            return;
+            return self.remove_document(collection, doc_id);
         }
         let surrogate = self.surrogate_for(doc_id);
         let key = format!("{collection}:_doc");
         let fresh = self.new_index_for(&key);
         let idx = self.indices.entry(key.clone()).or_insert(fresh);
         // Remove old entry first (upsert semantics).
-        let _ = idx.remove_document(0, 0, &key, surrogate);
-        let _ = idx.index_document(0, 0, &key, surrogate, text);
+        idx.remove_document(0, 0, &key, surrogate)
+            .map_err(|e| fts_err(collection, e))?;
+        idx.index_document(0, 0, &key, surrogate, text)
+            .map_err(|e| fts_err(collection, e))
     }
 
     /// Remove a document from the whole-document index.
-    pub fn remove_document(&mut self, collection: &str, doc_id: &str) {
+    pub fn remove_document(&mut self, collection: &str, doc_id: &str) -> Result<(), LiteError> {
         let Some(surrogate) = self.lookup_surrogate(doc_id) else {
-            return;
+            return Ok(());
         };
         let key = format!("{collection}:_doc");
         if let Some(idx) = self.indices.get_mut(&key) {
-            let _ = idx.remove_document(0, 0, &key, surrogate);
+            idx.remove_document(0, 0, &key, surrogate)
+                .map_err(|e| fts_err(collection, e))?;
         }
+        Ok(())
     }
 
     /// Search the whole-document index for a collection.
@@ -402,17 +424,17 @@ impl FtsCollectionManager {
         &mut self,
         collection: &str,
         origin_surrogate: Surrogate,
-    ) -> Option<String> {
+    ) -> Result<Option<String>, LiteError> {
         let Some(doc_id) = self.origin_surrogate_to_doc_id.remove(&origin_surrogate.0) else {
             tracing::debug!(
                 collection,
                 sur = origin_surrogate.0,
                 "FtsDeleteDoc: no Lite mapping for Origin surrogate — document was never indexed here"
             );
-            return None;
+            return Ok(None);
         };
-        self.remove_document(collection, &doc_id);
-        Some(doc_id)
+        self.remove_document(collection, &doc_id)?;
+        Ok(Some(doc_id))
     }
 
     // ── Per-field indexing (used by strict collections via index_integration) ─
@@ -421,27 +443,45 @@ impl FtsCollectionManager {
     ///
     /// Key is `"{collection}:{field}"`. Calling again with the same `doc_id`
     /// replaces the previous entry (upsert semantics).
-    pub fn index_field(&mut self, collection: &str, field: &str, doc_id: &str, text: &str) {
+    ///
+    /// Empty text is a removal, not a no-op: clearing a field must stop the
+    /// document matching the words that field used to contain.
+    pub fn index_field(
+        &mut self,
+        collection: &str,
+        field: &str,
+        doc_id: &str,
+        text: &str,
+    ) -> Result<(), LiteError> {
         if text.is_empty() {
-            return;
+            return self.remove_field(collection, field, doc_id);
         }
         let surrogate = self.surrogate_for(doc_id);
         let key = format!("{collection}:{field}");
         let fresh = self.new_index_for(&key);
         let idx = self.indices.entry(key.clone()).or_insert(fresh);
-        let _ = idx.remove_document(0, 0, &key, surrogate);
-        let _ = idx.index_document(0, 0, &key, surrogate, text);
+        idx.remove_document(0, 0, &key, surrogate)
+            .map_err(|e| fts_err(collection, e))?;
+        idx.index_document(0, 0, &key, surrogate, text)
+            .map_err(|e| fts_err(collection, e))
     }
 
     /// Remove all field entries for a document across all fields in a collection.
-    pub fn remove_field(&mut self, collection: &str, field: &str, doc_id: &str) {
+    pub fn remove_field(
+        &mut self,
+        collection: &str,
+        field: &str,
+        doc_id: &str,
+    ) -> Result<(), LiteError> {
         let Some(surrogate) = self.lookup_surrogate(doc_id) else {
-            return;
+            return Ok(());
         };
         let key = format!("{collection}:{field}");
         if let Some(idx) = self.indices.get_mut(&key) {
-            let _ = idx.remove_document(0, 0, &key, surrogate);
+            idx.remove_document(0, 0, &key, surrogate)
+                .map_err(|e| fts_err(collection, e))?;
         }
+        Ok(())
     }
 
     /// Number of distinct collection prefixes with active indexes.
@@ -512,13 +552,60 @@ mod tests {
         }
     }
 
+    // ── Stale-posting retraction ──────────────────────────────────────────────
+
+    #[test]
+    fn clearing_a_document_removes_it_from_the_index() {
+        let mut mgr = FtsCollectionManager::new();
+        mgr.index_document("col", "doc1", "the quick brown fox")
+            .expect("index update must succeed");
+        assert_eq!(mgr.search("col", "quick", 10, &default_params()).len(), 1);
+
+        // An update that strips every indexable word is a removal, not a no-op:
+        // the document must stop matching the words it used to contain.
+        mgr.index_document("col", "doc1", "")
+            .expect("index update must succeed");
+        assert!(
+            mgr.search("col", "quick", 10, &default_params()).is_empty(),
+            "cleared document must not keep matching its prior terms"
+        );
+    }
+
+    #[test]
+    fn clearing_a_field_removes_it_from_the_field_index() {
+        let mut mgr = FtsCollectionManager::new();
+        mgr.index_field("col", "title", "doc1", "the quick brown fox")
+            .expect("index update must succeed");
+        assert!(
+            !mgr.indices
+                .get("col:title")
+                .expect("field index exists")
+                .memtable()
+                .is_empty(),
+            "field index must hold the document's postings"
+        );
+
+        mgr.index_field("col", "title", "doc1", "")
+            .expect("index update must succeed");
+        assert!(
+            mgr.indices
+                .get("col:title")
+                .expect("field index exists")
+                .memtable()
+                .is_empty(),
+            "cleared field must not keep its prior postings"
+        );
+    }
+
     // ── BM25ScoreScan ─────────────────────────────────────────────────────────
 
     #[test]
     fn bm25_score_scan_nonmatching_docs_get_zero_score() {
         let mut mgr = FtsCollectionManager::new();
-        mgr.index_document("col", "doc1", "the quick brown fox");
-        mgr.index_document("col", "doc2", "unrelated content about databases");
+        mgr.index_document("col", "doc1", "the quick brown fox")
+            .expect("index update must succeed");
+        mgr.index_document("col", "doc2", "unrelated content about databases")
+            .expect("index update must succeed");
 
         let scored = mgr.scan_all_with_scores("col", "quick", &default_params());
         let doc1_score = scored.iter().find(|(id, _)| id == "doc1").map(|(_, s)| *s);
@@ -554,8 +641,10 @@ mod tests {
     #[test]
     fn phrase_search_finds_exact_phrase() {
         let mut mgr = FtsCollectionManager::new();
-        mgr.index_document("col", "doc1", "the quick brown fox jumps over");
-        mgr.index_document("col", "doc2", "the brown quick fox");
+        mgr.index_document("col", "doc1", "the quick brown fox jumps over")
+            .expect("index update must succeed");
+        mgr.index_document("col", "doc2", "the brown quick fox")
+            .expect("index update must succeed");
 
         let terms: Vec<String> = vec!["quick".into(), "brown".into()];
         let results = mgr.phrase_search("col", &terms, 10, &default_params());
@@ -576,7 +665,8 @@ mod tests {
     #[test]
     fn phrase_search_no_results_for_nonexistent_phrase() {
         let mut mgr = FtsCollectionManager::new();
-        mgr.index_document("col", "doc1", "the quick brown fox");
+        mgr.index_document("col", "doc1", "the quick brown fox")
+            .expect("index update must succeed");
 
         let terms: Vec<String> = vec!["fox".into(), "jumps".into()];
         let results = mgr.phrase_search("col", &terms, 10, &default_params());
@@ -591,15 +681,20 @@ mod tests {
     #[test]
     fn fts_delete_doc_removes_only_targeted_doc() {
         let mut mgr = FtsCollectionManager::new();
-        mgr.index_document("col", "doc1", "rust programming language");
-        mgr.index_document("col", "doc2", "rust is fast and safe");
-        mgr.index_document("col", "doc3", "python is also great");
+        mgr.index_document("col", "doc1", "rust programming language")
+            .expect("index update must succeed");
+        mgr.index_document("col", "doc2", "rust is fast and safe")
+            .expect("index update must succeed");
+        mgr.index_document("col", "doc3", "python is also great")
+            .expect("index update must succeed");
 
         // Register origin surrogate for doc2 (as if FtsIndexDoc was dispatched).
         mgr.register_origin_surrogate(Surrogate(42), "doc2");
 
         // Delete via origin surrogate.
-        let removed = mgr.remove_by_origin_surrogate("col", Surrogate(42));
+        let removed = mgr
+            .remove_by_origin_surrogate("col", Surrogate(42))
+            .expect("removal must succeed");
         assert!(removed.is_some(), "doc2 must be found and removed");
 
         // doc1 and doc3 still searchable, doc2 not.
@@ -618,9 +713,12 @@ mod tests {
         use std::collections::HashSet;
 
         let mut mgr = FtsCollectionManager::new();
-        mgr.index_document("col", "doc-a", "rust programming language memory safe");
-        mgr.index_document("col", "doc-b", "rust is fast and compiled");
-        mgr.index_document("col", "doc-c", "python is also a language");
+        mgr.index_document("col", "doc-a", "rust programming language memory safe")
+            .expect("index update must succeed");
+        mgr.index_document("col", "doc-b", "rust is fast and compiled")
+            .expect("index update must succeed");
+        mgr.index_document("col", "doc-c", "python is also a language")
+            .expect("index update must succeed");
 
         let allowed: HashSet<String> = ["doc-a".to_string()].into_iter().collect();
         let params = TextSearchParams {
@@ -647,9 +745,12 @@ mod tests {
     #[test]
     fn fts_delete_doc_unknown_surrogate_returns_false() {
         let mut mgr = FtsCollectionManager::new();
-        mgr.index_document("col", "doc1", "hello world");
+        mgr.index_document("col", "doc1", "hello world")
+            .expect("index update must succeed");
 
-        let removed = mgr.remove_by_origin_surrogate("col", Surrogate(99));
+        let removed = mgr
+            .remove_by_origin_surrogate("col", Surrogate(99))
+            .expect("removal must succeed");
         assert!(removed.is_none(), "unknown surrogate must return None");
 
         // doc1 unaffected.

@@ -266,7 +266,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             // sparse catalog key even when empty, so this rebuild runs once.
             let fts_empty = db.fts_state.manager.lock_or_recover().is_empty();
             if fts_empty || !sparse_checkpoint_present {
-                db.rebuild_text_indices().await;
+                db.rebuild_text_indices().await?;
             }
         }
 

@@ -39,7 +39,11 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// prefix-scans `Namespace::DocumentHistory` for unique doc_ids, fetches the
     /// current live version of each, and indexes its string fields. Documents
     /// already indexed in Pass 1 are skipped to avoid duplicate work.
-    pub(crate) async fn rebuild_text_indices(&self) {
+    ///
+    /// Fails if any document cannot be indexed: the rebuild is the only thing
+    /// that populates the index on this path, so a swallowed failure would
+    /// leave the document permanently unsearchable.
+    pub(crate) async fn rebuild_text_indices(&self) -> Result<(), crate::error::LiteError> {
         // ── Pass 1: CRDT scan (non-bitemporal collections) ───────────────────
         // Collect doc_ids indexed in this pass so Pass 2 can skip duplicates.
         let mut indexed: HashSet<(String, String)> = HashSet::new();
@@ -71,7 +75,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                             })
                             .collect::<Vec<_>>()
                             .join(" ");
-                        fts.index_document(collection, id, &text);
+                        fts.index_document(collection, id, &text)?;
                         sparse.index_document_fields(collection, id, &doc.fields);
                         indexed.insert((collection.clone(), id.clone()));
                     }
@@ -132,7 +136,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                     self.fts_state
                         .manager
                         .lock_or_recover()
-                        .index_document(collection, doc_id, &text);
+                        .index_document(collection, doc_id, &text)?;
                     self.sparse_state
                         .manager
                         .lock_or_recover()
@@ -140,6 +144,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 }
             }
         }
+
+        Ok(())
     }
 
     /// Rebuild spatial indices from CRDT state (cold start fallback).

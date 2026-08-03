@@ -44,7 +44,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             &self.vector_state.hnsw_indices,
             &self.spatial,
             &self.fts_state.manager,
-        );
+        )?;
 
         // Update secondary B-tree indexes on non-PK columns.
         {
@@ -86,7 +86,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             &row_id,
             &schema.columns,
             &self.fts_state.manager,
-        );
+        )?;
 
         // Replicate delete to materialized columnar views (HTAP CDC).
         self.htap.replicate_delete(collection, pk, &self.columnar);
@@ -121,7 +121,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             &self.vector_state.hnsw_indices,
             &self.spatial,
             &self.fts_state.manager,
-        );
+        )?;
 
         // Spatial profile: compute geohash for Point geometries and store
         // in the text index for prefix-based proximity queries.
@@ -134,7 +134,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             self.fts_state
                 .manager
                 .lock_or_recover()
-                .index_field(collection, "_geohash", &row_id, &hash);
+                .index_field(collection, "_geohash", &row_id, &hash)?;
         }
         Ok(())
     }

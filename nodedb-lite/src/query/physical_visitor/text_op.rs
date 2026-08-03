@@ -430,7 +430,7 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                     .manager
                     .lock()
                     .map_err(|_| LiteError::LockPoisoned)?;
-                mgr.index_document(&collection, &text, &text);
+                mgr.index_document(&collection, &text, &text)?;
                 mgr.register_origin_surrogate(surrogate, &text);
                 drop(mgr);
                 // Stage for durable sync outbound (SQL path — no await needed).
@@ -461,7 +461,7 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                     .manager
                     .lock()
                     .map_err(|_| LiteError::LockPoisoned)?;
-                let removed_doc_id = mgr.remove_by_origin_surrogate(&collection, surrogate);
+                let removed_doc_id = mgr.remove_by_origin_surrogate(&collection, surrogate)?;
                 drop(mgr);
                 // Stage delete for durable sync outbound (SQL path — no await needed).
                 #[cfg(not(target_arch = "wasm32"))]

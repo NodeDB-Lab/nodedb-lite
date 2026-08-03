@@ -120,7 +120,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .map_err(NodeDbError::storage)?;
         }
 
-        self.index_document_text(collection, &doc_id, &doc.fields);
+        self.index_document_text(collection, &doc_id, &doc.fields)?;
         self.index_document_sparse(collection, &doc_id, &doc.fields);
 
         Ok(())
@@ -223,7 +223,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 .map_err(NodeDbError::storage)?;
         }
 
-        self.index_document_text(doc_collection, &doc_id, &doc.fields);
+        self.index_document_text(doc_collection, &doc_id, &doc.fields)?;
         self.index_document_sparse(doc_collection, &doc_id, &doc.fields);
 
         // HNSW insert (no CRDT lock needed — vector_state uses its own locks).
@@ -325,7 +325,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .await
             .map_err(NodeDbError::storage)?;
             // FTS removal still applies — the document is logically gone now.
-            self.remove_document_text(collection, id);
+            self.remove_document_text(collection, id)?;
             self.remove_document_sparse(collection, id);
             return Ok(());
         }
@@ -334,7 +334,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         crdt.delete(collection, id).map_err(NodeDbError::storage)?;
         drop(crdt);
 
-        self.remove_document_text(collection, id);
+        self.remove_document_text(collection, id)?;
         self.remove_document_sparse(collection, id);
 
         Ok(())
@@ -432,7 +432,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         .await
         .map_err(NodeDbError::storage)?;
 
-        self.index_document_text(collection, &doc_id, &doc.fields);
+        self.index_document_text(collection, &doc_id, &doc.fields)?;
         self.index_document_sparse(collection, &doc_id, &doc.fields);
 
         Ok(())

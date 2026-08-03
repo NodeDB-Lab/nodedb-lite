@@ -57,6 +57,15 @@ pub enum LiteError {
     /// recreates a fresh one, and retries the open exactly once.
     #[error("storage corrupted: {detail}")]
     Corrupted { detail: String },
+
+    /// A full-text index update failed while writing a document.
+    ///
+    /// The write that triggered it must fail too: the row and its postings are
+    /// written together, and nothing re-indexes the gap afterwards — the next
+    /// write to the document only indexes its new text, so a swallowed failure
+    /// leaves the document permanently missing from (or stale in) the index.
+    #[error("full-text index update failed for {collection}: {detail}")]
+    FtsIndex { collection: String, detail: String },
 }
 
 /// Returns `true` when `e` is the corruption-class variant that should drive

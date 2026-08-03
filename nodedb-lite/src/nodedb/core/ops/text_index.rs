@@ -16,7 +16,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         collection: &str,
         doc_id: &str,
         fields: &std::collections::HashMap<String, nodedb_types::Value>,
-    ) {
+    ) -> Result<(), crate::error::LiteError> {
         let text: String = fields
             .values()
             .filter_map(|v| match v {
@@ -26,11 +26,12 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .collect::<Vec<_>>()
             .join(" ");
 
-        // Always index locally so local search works.
+        // Always index locally so local search works. A failure here fails the
+        // write: nothing re-indexes the gap afterwards.
         self.fts_state
             .manager
             .lock_or_recover()
-            .index_document(collection, doc_id, &text);
+            .index_document(collection, doc_id, &text)?;
 
         // Propagate to Origin via sync outbound queue — unless the sync gate
         // keeps this document local-only.
@@ -42,19 +43,27 @@ impl<S: StorageEngine> NodeDbLite<S> {
         }
         #[cfg(target_arch = "wasm32")]
         let _ = text;
+
+        Ok(())
     }
 
     /// Remove a document from the text index.
-    pub(crate) fn remove_document_text(&self, collection: &str, doc_id: &str) {
+    pub(crate) fn remove_document_text(
+        &self,
+        collection: &str,
+        doc_id: &str,
+    ) -> Result<(), crate::error::LiteError> {
         self.fts_state
             .manager
             .lock_or_recover()
-            .remove_document(collection, doc_id);
+            .remove_document(collection, doc_id)?;
 
         // Propagate deletion to Origin via sync outbound queue.
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(q) = &self.fts_outbound {
             q.stage_delete(collection, doc_id);
         }
+
+        Ok(())
     }
 }
