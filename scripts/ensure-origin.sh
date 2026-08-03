@@ -64,8 +64,19 @@ fi
 # missing binary is now a REAL error, not a "no Origin available" skip — failing
 # here loudly is the whole point: a broken Origin build must fail the interop
 # suite rather than silently skip every test while the run still reports green.
+#
+# Request the same features as Origin's own local test runs (`--all-features`).
+# Both workspaces resolve to one shared target dir, so matching the feature set
+# means this reuses the closure Origin already built instead of compiling a
+# second, near-identical copy of it. The profile stays `dev` — `ci` is the
+# GitHub-runner profile and is never built locally.
+# Build from inside the Origin workspace rather than via `--manifest-path` from
+# here: cargo reads `.cargo/config.toml` relative to the CWD, so building from
+# Lite applied LITE's `[patch.crates-io]` table to Origin — which is how the
+# "patch `pagedb` was not used in the crate graph" warning appeared. Origin
+# resolves correctly only under its own config.
 echo "ensure-origin: building Origin binary (cargo build -p nodedb in $origin_root) ..." >&2
-if ! cargo build --manifest-path "$origin_root/Cargo.toml" -p nodedb --bin nodedb >&2; then
+if ! (cd "$origin_root" && cargo build -p nodedb --bin nodedb --all-features) >&2; then
     echo "ensure-origin: Origin build FAILED; failing the interop suite (Origin source is present, so this is a real error, not a skip)" >&2
     exit 1
 fi

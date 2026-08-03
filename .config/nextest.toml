@@ -9,7 +9,11 @@ experimental = ["setup-scripts"]
 
 [scripts.setup.build-origin]
 command = { command-line = "scripts/ensure-origin.sh", relative-to = "workspace-root" }
-slow-timeout = { period = "600s", terminate-after = 1 }
+# This script compiles the Origin workspace, so the ceiling has to cover a COLD
+# build of it, not the warm incremental case. 600s only ever passed because a
+# prior Origin build had left the tree warm; from cold it terminates mid-compile
+# and cancels the whole run before a single test executes.
+slow-timeout = { period = "2400s", terminate-after = 1 }
 capture-stderr = true
 
 [profile.default]
