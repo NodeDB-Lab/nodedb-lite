@@ -46,6 +46,15 @@ impl CrdtEngine {
             policies: nodedb_crdt::PolicyRegistry::new(),
             registered_collections: std::collections::HashSet::new(),
             deferred: Vec::new(),
+            unpersisted_deltas: HashMap::new(),
+            delta_revision: 0,
+            flushed_versions: HashMap::new(),
+            checkpoint_bytes: HashMap::new(),
+            delta_bytes: HashMap::new(),
+            next_delta_seq: HashMap::new(),
+            state_epochs: HashMap::new(),
+            delta_writes: 0,
+            snapshot_exports: AtomicU64::new(0),
         })
     }
 
@@ -176,9 +185,7 @@ impl CrdtEngine {
         let Some(state) = self.states.get(collection) else {
             return Ok(Vec::new());
         };
-        state.export_snapshot().map_err(|e| LiteError::Storage {
-            detail: format!("snapshot export for '{collection}' failed: {e}"),
-        })
+        self.export_one(collection, state)
     }
 
     /// Export every collection's snapshot as `(collection, snapshot_bytes)`,
@@ -186,12 +193,28 @@ impl CrdtEngine {
     pub fn export_all_snapshots(&self) -> Result<Vec<(String, Vec<u8>)>, LiteError> {
         let mut out = Vec::with_capacity(self.states.len());
         for (collection, state) in &self.states {
-            let bytes = state.export_snapshot().map_err(|e| LiteError::Storage {
-                detail: format!("snapshot export for '{collection}' failed: {e}"),
-            })?;
+            let bytes = self.export_one(collection, state)?;
             out.push((collection.clone(), bytes));
         }
         Ok(out)
+    }
+
+    /// Number of full snapshot exports performed since this engine was created.
+    pub fn snapshot_export_count(&self) -> u64 {
+        self.snapshot_exports
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(in crate::engine::crdt) fn export_one(
+        &self,
+        collection: &str,
+        state: &CrdtState,
+    ) -> Result<Vec<u8>, LiteError> {
+        self.snapshot_exports
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        state.export_snapshot().map_err(|e| LiteError::Storage {
+            detail: format!("snapshot export for '{collection}' failed: {e}"),
+        })
     }
 
     /// Compact Loro history on every collection to prevent unbounded growth.
@@ -203,6 +226,24 @@ impl CrdtEngine {
             state.compact_history().map_err(|e| LiteError::Storage {
                 detail: format!("history compaction for '{collection}' failed: {e}"),
             })?;
+        }
+        // Compaction rewrites the document without advancing its frontier, so
+        // neither the persisted base nor the updates on top of it describe the
+        // document any more, and the discarded history means an update export
+        // from the old frontier may not even be possible. Dropping both marks
+        // forces a fresh checkpoint, which also deletes the stale updates —
+        // `next_delta_seq` is deliberately kept, since it is the count of the
+        // entries that checkpoint has to delete.
+        //
+        // Advancing the epoch is what keeps a flush that is committing right
+        // now from putting the marks back: its writes were exported from the
+        // document this call just replaced.
+        self.flushed_versions.clear();
+        self.checkpoint_bytes.clear();
+        self.delta_bytes.clear();
+        let compacted: Vec<String> = self.states.keys().cloned().collect();
+        for collection in compacted {
+            self.advance_state_epoch(&collection);
         }
         Ok(())
     }
@@ -267,6 +308,15 @@ impl CrdtEngine {
             .compact_at_version(version)
             .map_err(|e| LiteError::Storage {
                 detail: format!("compact_at_version '{collection}': {e}"),
-            })
+            })?;
+        // See `compact_history`: the frontier is unchanged but the exported
+        // bytes are not, so the collection must be re-persisted — as a fresh
+        // checkpoint, since the updates on top of the old base no longer
+        // describe this document.
+        self.flushed_versions.remove(collection);
+        self.checkpoint_bytes.remove(collection);
+        self.delta_bytes.remove(collection);
+        self.advance_state_epoch(collection);
+        Ok(())
     }
 }

@@ -64,6 +64,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         crate::runtime::spawn(async move {
             let mut ticker = crate::runtime::interval(period);
+            // A compaction that outlasts its own period must not be followed by
+            // the ticks it missed, back to back — repacking is the heavier of
+            // the two periodic tasks, so a burst of it is worse.
+            ticker.delay_missed_ticks();
             // Consume the first tick so the initial period elapses before the
             // first compaction (matches Tokio's immediate-first-tick semantics
             // on native; on WASM the first tick already waits one period).

@@ -24,6 +24,64 @@ impl CrdtEngine {
     /// The CRDT state is authoritative — pending deltas are regenerated on next mutation.
     pub fn clear_pending_deltas(&mut self) {
         self.pending_deltas.clear();
+        self.unpersisted_deltas.clear();
+    }
+
+    /// Mark a queue entry as not matching its stored form, stamping it with a
+    /// fresh revision.
+    ///
+    /// Every path that adds an entry or edits one in place goes through here,
+    /// so an edit that lands while a flush is committing is distinguishable
+    /// from the state that flush actually wrote.
+    pub(in crate::engine::crdt) fn mark_delta_unpersisted(&mut self, mutation_id: u64) {
+        self.delta_revision += 1;
+        self.unpersisted_deltas
+            .insert(mutation_id, self.delta_revision);
+    }
+
+    /// The pending deltas whose stored form may not match the queue, each with
+    /// the revision to report back once it is durable.
+    ///
+    /// Entries already written under their own key are absent: the queue is
+    /// append-only, so an unchanged entry does not need rewriting. Report the
+    /// write back with [`Self::mark_pending_deltas_persisted`] once it has
+    /// committed, passing the revision handed out here — not the entry's
+    /// current one, which may have moved on since.
+    pub fn pending_deltas_needing_write(&self) -> impl Iterator<Item = (&PendingDelta, u64)> {
+        self.pending_deltas.iter().filter_map(|d| {
+            self.unpersisted_deltas
+                .get(&d.mutation_id)
+                .map(|&revision| (d, revision))
+        })
+    }
+
+    /// Number of queue entries written and acknowledged durable since this
+    /// engine was created.
+    pub fn pending_delta_write_count(&self) -> u64 {
+        self.delta_writes
+    }
+
+    /// Whether any pending delta needs writing.
+    pub fn has_unpersisted_deltas(&self) -> bool {
+        !self.unpersisted_deltas.is_empty()
+    }
+
+    /// Retire the dirty marks for queue entries that are now durable.
+    ///
+    /// Each `(mutation_id, revision)` pair must be one handed out by
+    /// [`Self::pending_deltas_needing_write`] for the batch that has just
+    /// committed. An entry whose revision has moved on since was added or
+    /// edited while that batch was in flight and so was never in it; its mark
+    /// stays, and the next flush writes it.
+    ///
+    /// Call only after the batch has committed.
+    pub fn mark_pending_deltas_persisted(&mut self, written: impl IntoIterator<Item = (u64, u64)>) {
+        for (mutation_id, revision) in written {
+            if self.unpersisted_deltas.get(&mutation_id) == Some(&revision) {
+                self.unpersisted_deltas.remove(&mutation_id);
+                self.delta_writes += 1;
+            }
+        }
     }
 
     /// Drop a single pending delta by `mutation_id` without touching CRDT state.
@@ -34,6 +92,7 @@ impl CrdtEngine {
     /// when the host's `SyncGate` rejects it for sync.
     pub fn drop_pending(&mut self, mutation_id: u64) {
         self.pending_deltas.retain(|d| d.mutation_id != mutation_id);
+        self.unpersisted_deltas.remove(&mutation_id);
     }
 
     /// Assign a stable stream seq to a pending delta the first time it is sent.
@@ -42,13 +101,20 @@ impl CrdtEngine {
     /// the call is a no-op — the existing seq is reused on reconnect re-sends
     /// so Origin can deduplicate rather than double-apply.
     pub fn set_pending_delta_seq(&mut self, mutation_id: u64, seq: u64) {
-        if let Some(d) = self
+        let assigned = match self
             .pending_deltas
             .iter_mut()
             .find(|d| d.mutation_id == mutation_id)
-            && d.seq == 0
         {
-            d.seq = seq;
+            Some(d) if d.seq == 0 => {
+                d.seq = seq;
+                true
+            }
+            _ => false,
+        };
+        if assigned {
+            // The stored entry now carries a stale seq.
+            self.mark_delta_unpersisted(mutation_id);
         }
     }
 
@@ -63,6 +129,7 @@ impl CrdtEngine {
     /// acks arrive.
     pub fn acknowledge(&mut self, acked_id: u64) {
         self.pending_deltas.retain(|d| d.mutation_id != acked_id);
+        self.unpersisted_deltas.remove(&acked_id);
     }
 
     /// Roll back a specific pending delta (after DeltaReject with CompensationHint).
@@ -79,6 +146,7 @@ impl CrdtEngine {
             .position(|d| d.mutation_id == mutation_id)
         {
             let delta = self.pending_deltas.remove(pos);
+            self.unpersisted_deltas.remove(&mutation_id);
             // Best-effort rollback: delete the affected document from its own
             // collection's document. The application should handle the
             // CompensationHint and re-create with corrected values.

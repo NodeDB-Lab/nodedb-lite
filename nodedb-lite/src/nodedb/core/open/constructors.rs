@@ -245,6 +245,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             timeseries_outbound: timeseries_outbound_init,
             identity: Mutex::new(lite_identity),
             identity_change: tokio::sync::Mutex::new(()),
+            flush_lock: tokio::sync::Mutex::new(()),
             sync_enabled,
             kv_cache: Mutex::new(lru::LruCache::new(kv_cache_capacity)),
             kv_write_buf: Mutex::new(KvWriteBuffer {

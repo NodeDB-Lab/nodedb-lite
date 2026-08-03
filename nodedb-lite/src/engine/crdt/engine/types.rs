@@ -22,8 +22,29 @@ pub(super) const DELTA_KEY_PREFIX: &[u8] = b"delta:";
 /// Each collection owns its own Loro document, so each gets its own entry:
 /// `loro_snapshot:<collection>`.
 pub(super) const SNAPSHOT_KEY: &[u8] = b"loro_snapshot:";
+/// Key prefix for the incremental updates written on top of a collection's
+/// snapshot in the `LoroState` namespace: `loro_delta:<collection>:<seq>`.
+///
+/// Distinct from [`DELTA_KEY_PREFIX`], which holds the unsent-to-Origin sync
+/// queue. These entries are durability, not sync: they are replayed on open
+/// and deleted when the base snapshot that contains them is rewritten,
+/// whereas a sync delta is deleted when Origin acknowledges it.
+pub(super) const STATE_DELTA_KEY: &[u8] = b"loro_delta:";
 /// Key for the vector clock in the `Meta` namespace.
 pub(super) const VCLOCK_KEY: &[u8] = b"vector_clock";
+
+/// Rewrite a collection's base snapshot once its accumulated updates reach
+/// this fraction of it — a ratio, so the bound holds at any collection size.
+///
+/// Restore replays every update written since the base, so this also bounds
+/// the replay: open costs the base plus at most this fraction again.
+pub(super) const DELTA_CHECKPOINT_RATIO: usize = 4;
+/// Never rewrite the base for less than this many accumulated update bytes.
+///
+/// A fraction of a small document is a few hundred bytes, which would restore
+/// the full-rewrite-per-flush behaviour for precisely the collections where
+/// incremental writes cost least.
+pub(super) const DELTA_CHECKPOINT_MIN_BYTES: usize = 64 * 1024;
 
 /// CRDT engine for edge devices.
 ///
@@ -64,6 +85,68 @@ pub struct CrdtEngine {
     /// Deferred writes awaiting `flush_deltas()`, in the order they were
     /// applied.
     pub(super) deferred: Vec<DeferredOp>,
+    /// Oplog frontier each collection had when its snapshot was last written to
+    /// storage.
+    ///
+    /// A snapshot export is O(document), not O(new operations), so exporting a
+    /// collection whose frontier has not moved rewrites the identical bytes.
+    /// Comparing against this map is what lets an idle store do no snapshot
+    /// work at all.
+    pub(in crate::engine::crdt) flushed_versions: HashMap<String, loro::VersionVector>,
+    /// Size of each collection's base snapshot as last written.
+    ///
+    /// The denominator of the checkpoint decision: updates are folded back
+    /// into the base once they reach a fraction of it.
+    pub(in crate::engine::crdt) checkpoint_bytes: HashMap<String, usize>,
+    /// Update bytes written on top of each collection's current base.
+    pub(in crate::engine::crdt) delta_bytes: HashMap<String, usize>,
+    /// Sequence the next update for each collection is stored under. Also the
+    /// count of updates a checkpoint must delete.
+    pub(in crate::engine::crdt) next_delta_seq: HashMap<String, u64>,
+    /// How many times each collection's document has been structurally
+    /// rewritten underneath its persisted form — that is, compacted.
+    ///
+    /// A flush plans and exports under the engine lock, then releases it while
+    /// its batch commits. Compaction runs on its own timer and takes the same
+    /// lock, so it can land in that window. It leaves the frontier where it was
+    /// but discards the history behind it, which invalidates both the base on
+    /// disk and any update exported from the old frontier — precisely what
+    /// [`CrdtEngine::compact_history`] drops the marks for. Acknowledging the
+    /// in-flight write by frontier alone would put those marks straight back,
+    /// leaving the collection recorded as persisted in a form that no longer
+    /// describes it. Each write carries the epoch it was planned at and is
+    /// applied only while that still matches.
+    pub(in crate::engine::crdt) state_epochs: HashMap<String, u64>,
+    /// Pending deltas whose stored form is not known to match the queue, each
+    /// with the revision of the entry that made it dirty.
+    ///
+    /// The queue is append-only and each entry is written under its own key,
+    /// so an entry already on disk does not need rewriting. Only the ones
+    /// added — or edited, when a send assigns a `seq` — since the last flush
+    /// do. Without this the whole outbox is rewritten every tick, which for a
+    /// replica with no Origin to acknowledge it means an unbounded queue
+    /// rewritten in full once per `auto_flush_ms`.
+    ///
+    /// The revision is what makes the acknowledgement safe across the flush's
+    /// own await: an entry queued — or re-dirtied by `set_pending_delta_seq` —
+    /// while the batch was committing was never in that batch, and clearing the
+    /// mark by membership alone would retire it unwritten. Nothing brings it
+    /// back, because an append-only queue is only ever revisited when it
+    /// changes, so the entry would stay in memory until the process ended and
+    /// the write it carries would never reach Origin.
+    pub(in crate::engine::crdt) unpersisted_deltas: HashMap<u64, u64>,
+    /// Revision stamped on the next queue entry to be added or edited.
+    pub(in crate::engine::crdt) delta_revision: u64,
+    /// Number of queue entries written and acknowledged durable.
+    ///
+    /// Exposed through [`CrdtEngine::pending_delta_write_count`] so callers can
+    /// assert on write volume directly: an idle store must not advance it.
+    pub(in crate::engine::crdt) delta_writes: u64,
+    /// Number of full snapshot exports performed for persistence.
+    ///
+    /// Exposed through [`CrdtEngine::snapshot_export_count`] so callers can
+    /// assert on export volume directly instead of inferring it from timings.
+    pub(in crate::engine::crdt) snapshot_exports: AtomicU64,
 }
 
 /// One deferred write awaiting `flush_deltas`, with the exact counter range

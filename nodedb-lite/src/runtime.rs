@@ -91,6 +91,24 @@ pub struct Interval {
 }
 
 impl Interval {
+    /// Measure the next period from when this tick is consumed rather than
+    /// from the schedule, so a slow consumer does not come back to a burst of
+    /// catch-up ticks.
+    ///
+    /// Tokio's default replays every missed tick immediately. For a periodic
+    /// task whose work can outlast its own period — a flush, say — that turns
+    /// one slow pass into back-to-back passes with no gap between them, and the
+    /// task never yields long enough for anything else to make progress. On
+    /// WASM each tick already sleeps a full period after the previous one, so
+    /// this is the behaviour there either way.
+    pub fn delay_missed_ticks(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.inner
+                .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        }
+    }
+
     /// Wait until the next tick.
     pub async fn tick(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]

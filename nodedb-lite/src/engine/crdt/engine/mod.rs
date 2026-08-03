@@ -13,6 +13,7 @@
 //! through this engine. It wraps each as a Loro operation, generating a
 //! delta that will eventually sync to Origin.
 
+mod checkpoint;
 mod lifecycle;
 mod list_ops;
 mod mutate;
@@ -23,6 +24,9 @@ mod rotate;
 pub mod types;
 
 #[cfg(test)]
+mod flush_ack_tests;
+#[cfg(test)]
 mod tests;
 
+pub use checkpoint::{CrdtPersisted, CrdtWrite, CrdtWriteKind};
 pub use types::{CrdtBatchOp, CrdtEngine, CrdtField, PendingDelta};

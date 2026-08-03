@@ -56,6 +56,12 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         crate::runtime::spawn(async move {
             let mut ticker = crate::runtime::interval(period);
+            // A flush that outlasts its own period must not be followed by the
+            // ticks it missed, back to back. Each pass takes the `crdt` lock,
+            // so a burst of them is a stretch of wall time in which no CRDT
+            // read can be scheduled — the shape a large store degenerated into
+            // once a single flush took longer than `interval_ms`.
+            ticker.delay_missed_ticks();
             // Consume the first tick so the initial period elapses before the
             // first flush (matches Tokio's immediate-first-tick semantics on
             // native; on WASM the first tick already waits one period).
