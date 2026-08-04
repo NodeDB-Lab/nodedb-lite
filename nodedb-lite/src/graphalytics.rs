@@ -2,7 +2,7 @@
 
 //! Feature-gated embedded runner support for LDBC Graphalytics.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -16,7 +16,7 @@ use nodedb_types::value::Value;
 use crate::NodeDbLite;
 use crate::error::LiteError;
 use crate::query::graph_ops::algorithms::run_algo;
-use crate::query::graph_ops::edges::{edge_store_key, edge_to_value};
+use crate::query::graph_ops::edges::edge_store_key;
 use crate::storage::engine::{StorageEngine, WriteOp};
 
 const COLLECTION: &str = "graphalytics";
@@ -29,6 +29,55 @@ pub struct ImportMetrics {
     pub edges: usize,
     pub load_seconds: f64,
     pub prepare_seconds: f64,
+}
+
+struct WeightProperties(f64);
+
+impl zerompk::ToMessagePack for WeightProperties {
+    fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
+        // Value::Object({"weight": Value::Float(weight)})
+        writer.write_array_len(2)?;
+        writer.write_u8(7)?;
+        writer.write_map_len(1)?;
+        writer.write_string("weight")?;
+        writer.write_array_len(2)?;
+        writer.write_u8(3)?;
+        writer.write_f64(self.0)
+    }
+}
+
+struct StoredGraphalyticsEdge<'a> {
+    source: &'a str,
+    destination: &'a str,
+    properties: &'a [u8],
+}
+
+impl zerompk::ToMessagePack for StoredGraphalyticsEdge<'_> {
+    fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
+        // Value::Object with the same fields produced by edge_to_value().
+        writer.write_array_len(2)?;
+        writer.write_u8(7)?;
+        writer.write_map_len(5)?;
+        write_string_value(writer, "collection", COLLECTION)?;
+        write_string_value(writer, "src", self.source)?;
+        write_string_value(writer, "label", EDGE_LABEL)?;
+        write_string_value(writer, "dst", self.destination)?;
+        writer.write_string("props")?;
+        writer.write_array_len(2)?;
+        writer.write_u8(5)?;
+        writer.write_binary(self.properties)
+    }
+}
+
+fn write_string_value<W: zerompk::Write>(
+    writer: &mut W,
+    key: &str,
+    value: &str,
+) -> zerompk::Result<()> {
+    writer.write_string(key)?;
+    writer.write_array_len(2)?;
+    writer.write_u8(4)?;
+    writer.write_string(value)
 }
 
 impl<S: StorageEngine> NodeDbLite<S> {
@@ -46,7 +95,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .lines()
             .map(|line| line.map_err(io_error))
             .collect::<Result<_, _>>()?;
-        let vertex_count = vertices.iter().filter(|vertex| !vertex.trim().is_empty()).count();
+        let vertex_count = vertices
+            .iter()
+            .filter(|vertex| !vertex.trim().is_empty())
+            .count();
         let vertex_prepare_start = Instant::now();
         {
             let mut map = self.csr.lock().map_err(|_| LiteError::LockPoisoned)?;
@@ -124,17 +176,24 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         let mut writes = Vec::with_capacity(edges.len());
         for (source, destination, weight) in edges {
-            let properties = zerompk::to_msgpack_vec(&Value::Object(HashMap::from([(
-                "weight".to_string(),
-                Value::Float(*weight),
-            )])))
+            let properties =
+                zerompk::to_msgpack_vec(&WeightProperties(*weight)).map_err(|error| {
+                    LiteError::Serialization {
+                        detail: error.to_string(),
+                    }
+                })?;
+            let value = zerompk::to_msgpack_vec(&StoredGraphalyticsEdge {
+                source,
+                destination,
+                properties: &properties,
+            })
             .map_err(|error| LiteError::Serialization {
                 detail: error.to_string(),
             })?;
             writes.push(WriteOp::Put {
                 ns: Namespace::Graph,
                 key: edge_store_key(COLLECTION, source, EDGE_LABEL, destination),
-                value: edge_to_value(COLLECTION, source, EDGE_LABEL, destination, &properties)?,
+                value,
             });
         }
         self.storage.batch_write(&writes).await?;
@@ -238,5 +297,48 @@ fn graph_error(error: impl std::fmt::Display) -> LiteError {
 fn malformed_edge(line: &str) -> LiteError {
     LiteError::Storage {
         detail: format!("malformed Graphalytics edge: {line}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn specialized_edge_encoding_matches_stored_value_shape() {
+        let properties = zerompk::to_msgpack_vec(&WeightProperties(2.5)).unwrap();
+        let value = zerompk::to_msgpack_vec(&StoredGraphalyticsEdge {
+            source: "a",
+            destination: "b",
+            properties: &properties,
+        })
+        .unwrap();
+        let legacy = crate::query::graph_ops::edges::edge_to_value(
+            COLLECTION,
+            "a",
+            EDGE_LABEL,
+            "b",
+            &properties,
+        )
+        .unwrap();
+        assert_eq!(
+            zerompk::from_msgpack::<Value>(&value).unwrap(),
+            zerompk::from_msgpack::<Value>(&legacy).unwrap()
+        );
+
+        let Value::Object(edge) = zerompk::from_msgpack::<Value>(&value).unwrap() else {
+            panic!("expected edge object");
+        };
+        assert_eq!(edge["collection"], Value::String(COLLECTION.to_string()));
+        assert_eq!(edge["src"], Value::String("a".to_string()));
+        assert_eq!(edge["label"], Value::String(EDGE_LABEL.to_string()));
+        assert_eq!(edge["dst"], Value::String("b".to_string()));
+        let Value::Bytes(properties) = &edge["props"] else {
+            panic!("expected property bytes");
+        };
+        let Value::Object(properties) = zerompk::from_msgpack::<Value>(properties).unwrap() else {
+            panic!("expected property object");
+        };
+        assert_eq!(properties["weight"], Value::Float(2.5));
     }
 }
