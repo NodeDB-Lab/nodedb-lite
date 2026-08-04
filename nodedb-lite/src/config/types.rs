@@ -9,6 +9,7 @@ use super::defaults::{
     default_auto_flush_ms, default_kv_cache_capacity, default_outbound_queue_cap,
     default_sync_enabled,
 };
+use crate::storage::corruption::CorruptionPolicy;
 
 /// Runtime configuration for a NodeDB-Lite instance.
 ///
@@ -120,6 +121,17 @@ pub struct LiteConfig {
     /// leave compaction fully manual via `compact()`.
     #[serde(default = "default_auto_compact_ms")]
     pub auto_compact_ms: u64,
+
+    /// What to do when the store being opened cannot be read.
+    /// Default: [`CorruptionPolicy::FailClosed`].
+    ///
+    /// The default refuses to open and leaves the damaged store untouched, so
+    /// an embedder that has no Origin to re-sync from does not silently start
+    /// against an empty database. Selecting
+    /// [`CorruptionPolicy::DiscardStoreAndRecreate`] is a statement that the
+    /// data can be rebuilt from somewhere else.
+    #[serde(default)]
+    pub corruption_policy: CorruptionPolicy,
 }
 
 impl Default for LiteConfig {
@@ -138,6 +150,7 @@ impl Default for LiteConfig {
             kv_cache_capacity: default_kv_cache_capacity(),
             auto_flush_ms: default_auto_flush_ms(),
             auto_compact_ms: default_auto_compact_ms(),
+            corruption_policy: CorruptionPolicy::FailClosed,
         }
     }
 }

@@ -58,12 +58,30 @@ impl CrdtEngine {
     ///
     /// Each entry is stored under `Namespace::Crdt` with key `delta:{mutation_id:016x}`.
     /// Falls back to legacy bulk restore if no individual entries found.
-    pub fn restore_pending_deltas_incremental(&mut self, entries: &[(Vec<u8>, Vec<u8>)]) {
+    ///
+    /// A queued delta is a local mutation no Origin has acknowledged yet, so an
+    /// entry that will not decode is unrecoverable data, not noise to step
+    /// over. `allow_discard` reflects the caller's corruption policy: when it
+    /// is false the undecodable entry is reported and every entry is left in
+    /// storage untouched.
+    pub fn restore_pending_deltas_incremental(
+        &mut self,
+        entries: &[(Vec<u8>, Vec<u8>)],
+        allow_discard: bool,
+    ) -> Result<(), crate::error::LiteError> {
         let mut deltas = Vec::with_capacity(entries.len());
         for (_key, value) in entries {
             match zerompk::from_msgpack::<PendingDelta>(value) {
                 Ok(delta) => deltas.push(delta),
                 Err(e) => {
+                    if !allow_discard {
+                        return Err(crate::error::LiteError::Corrupted {
+                            detail: format!(
+                                "queued CRDT mutation failed to decode: {e}. It carries a local \
+                                 write that has not reached Origin, and has been left in place."
+                            ),
+                        });
+                    }
                     tracing::warn!(error = %e, "skipping corrupted pending delta entry");
                 }
             }
@@ -78,6 +96,7 @@ impl CrdtEngine {
         // form matches by construction.
         self.unpersisted_deltas.clear();
         self.pending_deltas = deltas;
+        Ok(())
     }
 
     /// Key for storing one collection's Loro snapshot in `StorageEngine`:

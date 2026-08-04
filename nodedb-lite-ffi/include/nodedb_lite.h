@@ -385,6 +385,30 @@ struct NodeDbNodeDbHandle *nodedb_open_with_config(const char *path,
                                                    const char *passphrase);
 
 /**
+ * Open a NodeDB-Lite database, **discarding the store if it cannot be read**.
+ *
+ * Every other open entry point refuses to open a damaged store and leaves it
+ * untouched. This one renames it to `{path}.corrupt.{unix_secs}` and returns a
+ * handle to a fresh, empty database in its place.
+ *
+ * The returned database contains none of the previous data. Any writes it
+ * accepts diverge from the copy set aside, so this is only appropriate when
+ * the caller has another source of truth to refill from — an Origin to
+ * re-sync, or data that can be regenerated. If unsure, use `nodedb_open`: an
+ * open that fails is recoverable, and a store that has been replaced is not.
+ *
+ * # Safety
+ * - `path` must be a valid null-terminated UTF-8 string.
+ * - `passphrase` must be NULL or a valid null-terminated UTF-8 string.
+ *
+ * See `nodedb_open` for the passphrase/encryption convention.
+ * `memory_mb` of 0 uses the default memory budget.
+ */
+struct NodeDbNodeDbHandle *nodedb_open_discarding_corrupt_store(const char *path,
+                                                                uint64_t memory_mb,
+                                                                const char *passphrase);
+
+/**
  * Close a NodeDB-Lite database and free the handle.
  *
  * # Safety

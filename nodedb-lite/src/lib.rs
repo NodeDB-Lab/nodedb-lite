@@ -55,6 +55,7 @@ pub use memory::MemoryGovernor;
 pub use nodedb::{BatchItem, NodeDbLite, SyncGate};
 pub use nodedb_query;
 pub use nodedb_types::id_gen;
+pub use storage::corruption::CorruptionPolicy;
 pub use storage::encryption::Encryption;
 pub use storage::engine::{StorageEngine, WriteOp};
 #[cfg(not(target_arch = "wasm32"))]
