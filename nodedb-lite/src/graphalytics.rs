@@ -8,15 +8,16 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use nodedb_graph::params::{AlgoParams, GraphAlgorithm};
-use nodedb_types::Namespace;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
 use crate::NodeDbLite;
+use crate::engine::graph::index::CsrIndex;
 use crate::error::LiteError;
+use crate::graphalytics_external_sort::ExternalEdgeSorter;
 use crate::query::graph_ops::algorithms::run_algo;
 use crate::query::graph_ops::edges::edge_store_key;
-use crate::storage::engine::{StorageEngine, WriteOp};
+use crate::storage::engine::StorageEngine;
 
 const COLLECTION: &str = "graphalytics";
 const EDGE_LABEL: &str = "EDGE";
@@ -113,7 +114,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         let file = File::open(edge_file).map_err(io_error)?;
         let mut pending = Vec::with_capacity(BATCH_SIZE);
+        let mut sorter = ExternalEdgeSorter::new(BATCH_SIZE)?;
         let mut edge_count = 0usize;
+        let mut ordinal = 0u64;
         for line in BufReader::with_capacity(1 << 20, file).lines() {
             let line = line.map_err(io_error)?;
             let mut fields = line.split_whitespace();
@@ -130,12 +133,18 @@ impl<S: StorageEngine> NodeDbLite<S> {
             pending.push((source.to_string(), destination.to_string(), weight));
             edge_count += 1;
             if pending.len() == BATCH_SIZE {
-                prepare_duration += self.graphalytics_write_edges(&pending).await?;
+                prepare_duration +=
+                    self.graphalytics_stage_edges(&pending, &mut sorter, &mut ordinal)?;
                 pending.clear();
             }
         }
         if !pending.is_empty() {
-            prepare_duration += self.graphalytics_write_edges(&pending).await?;
+            prepare_duration +=
+                self.graphalytics_stage_edges(&pending, &mut sorter, &mut ordinal)?;
+        }
+        let mut merge = sorter.finish()?;
+        while let Some(writes) = merge.next_batch(BATCH_SIZE)? {
+            self.storage.batch_write(&writes).await?;
         }
         let total_import = load_start.elapsed();
         let load_seconds = total_import.saturating_sub(prepare_duration).as_secs_f64();
@@ -158,22 +167,22 @@ impl<S: StorageEngine> NodeDbLite<S> {
         })
     }
 
-    async fn graphalytics_write_edges(
+    fn graphalytics_stage_edges(
         &self,
         edges: &[(String, String, f64)],
+        sorter: &mut ExternalEdgeSorter,
+        ordinal: &mut u64,
     ) -> Result<Duration, LiteError> {
         let prepare_start = Instant::now();
         {
             let mut map = self.csr.lock().map_err(|_| LiteError::LockPoisoned)?;
             let csr = map.entry(COLLECTION.to_string()).or_default();
             for (source, destination, weight) in edges {
-                csr.add_edge_weighted(source, EDGE_LABEL, destination, *weight)
-                    .map_err(graph_error)?;
+                upsert_graphalytics_edge(csr, source, destination, *weight)?;
             }
         }
         let prepare_duration = prepare_start.elapsed();
 
-        let mut writes = Vec::with_capacity(edges.len());
         for (source, destination, weight) in edges {
             let properties =
                 zerompk::to_msgpack_vec(&WeightProperties(*weight)).map_err(|error| {
@@ -189,13 +198,15 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .map_err(|error| LiteError::Serialization {
                 detail: error.to_string(),
             })?;
-            writes.push(WriteOp::Put {
-                ns: Namespace::Graph,
-                key: edge_store_key(COLLECTION, source, EDGE_LABEL, destination),
+            sorter.push(
+                edge_store_key(COLLECTION, source, EDGE_LABEL, destination),
                 value,
-            });
+                *ordinal,
+            )?;
+            *ordinal = ordinal.checked_add(1).ok_or_else(|| LiteError::Storage {
+                detail: "Graphalytics edge ordinal overflow".to_string(),
+            })?;
         }
-        self.storage.batch_write(&writes).await?;
         Ok(prepare_duration)
     }
 
@@ -284,6 +295,20 @@ impl<S: StorageEngine> NodeDbLite<S> {
     }
 }
 
+fn upsert_graphalytics_edge(
+    csr: &mut CsrIndex,
+    source: &str,
+    destination: &str,
+    weight: f64,
+) -> Result<(), LiteError> {
+    if csr.edge_weight(source, EDGE_LABEL, destination).is_some() {
+        csr.remove_edge(source, EDGE_LABEL, destination);
+        csr.compact().map_err(graph_error)?;
+    }
+    csr.add_edge_weighted(source, EDGE_LABEL, destination, weight)
+        .map_err(graph_error)
+}
+
 fn io_error(error: std::io::Error) -> LiteError {
     LiteError::Storage {
         detail: error.to_string(),
@@ -305,6 +330,15 @@ fn malformed_edge(line: &str) -> LiteError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_edge_uses_last_weight_in_csr() {
+        let mut csr = CsrIndex::new();
+        upsert_graphalytics_edge(&mut csr, "a", "b", 1.0).unwrap();
+        upsert_graphalytics_edge(&mut csr, "a", "b", 2.5).unwrap();
+        assert_eq!(csr.edge_weight("a", EDGE_LABEL, "b"), Some(2.5));
+        assert_eq!(csr.edge_count(), 1);
+    }
 
     #[test]
     fn specialized_edge_encoding_matches_stored_value_shape() {

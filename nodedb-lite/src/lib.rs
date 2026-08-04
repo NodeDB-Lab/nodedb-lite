@@ -39,8 +39,10 @@ pub mod config;
 pub mod engine;
 pub mod error;
 pub mod event;
-#[cfg(feature = "graphalytics-runner")]
+#[cfg(all(feature = "graphalytics-runner", not(target_arch = "wasm32")))]
 pub mod graphalytics;
+#[cfg(all(feature = "graphalytics-runner", not(target_arch = "wasm32")))]
+mod graphalytics_external_sort;
 pub mod identity;
 pub mod memory;
 pub mod nodedb;

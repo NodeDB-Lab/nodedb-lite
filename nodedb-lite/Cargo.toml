@@ -11,7 +11,7 @@ homepage.workspace = true
 
 [features]
 default = []
-graphalytics-runner = []
+graphalytics-runner = ["dep:tempfile"]
 
 [[bin]]
 name = "nodedb-lite-graphalytics"
@@ -72,6 +72,7 @@ js-sys = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time", "net"] }
 tokio-tungstenite = { workspace = true }
 futures = { workspace = true }
+tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
