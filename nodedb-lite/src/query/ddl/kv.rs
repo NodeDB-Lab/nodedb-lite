@@ -9,9 +9,6 @@ use crate::storage::engine::StorageEngine;
 
 use super::parser::parse_strict_create_sql;
 
-// Re-export for use from DDL dispatch.
-pub(super) use nodedb_types::kv_parsing::is_kv_storage_mode;
-
 impl<S: StorageEngine> LiteQueryEngine<S> {
     /// Handle: `CREATE COLLECTION <name> (<col_defs>) WITH storage = 'kv' [, ttl = ...]`
     pub(in crate::query) async fn handle_create_kv(
