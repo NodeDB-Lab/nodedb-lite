@@ -10,6 +10,8 @@ use nodedb_lite::{Encryption, NodeDbLite};
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
+const OPERATION_TIMEOUT_SECONDS: f64 = 300.0;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -43,6 +45,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             &dataset.join(format!("{dataset_name}.e")),
         )
         .await?;
+    enforce_timeout("load", metrics.load_seconds)?;
+    enforce_timeout("prepare", metrics.prepare_seconds)?;
 
     let mut timings = Vec::new();
     for (name, algorithm) in [
@@ -59,6 +63,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             None => db.graphalytics_bfs("6")?,
         };
         let elapsed = start.elapsed().as_secs_f64();
+        enforce_timeout(name, elapsed)?;
         write_result(&output.join(format!("{dataset_name}-{name}")), &result)?;
         timings.push((name, elapsed));
         println!("[NodeDB Lite] {name:<4} {elapsed:.6}s");
@@ -80,6 +85,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     writeln!(summary, "  }}")?;
     writeln!(summary, "}}")?;
+    Ok(())
+}
+
+fn enforce_timeout(operation: &str, seconds: f64) -> Result<(), Box<dyn std::error::Error>> {
+    if seconds > OPERATION_TIMEOUT_SECONDS {
+        return Err(format!(
+            "{operation} exceeded the {OPERATION_TIMEOUT_SECONDS:.0}-second operation timeout"
+        )
+        .into());
+    }
     Ok(())
 }
 
