@@ -260,26 +260,27 @@ fn label_propagation(csr: &CsrIndex, params: &AlgoParams) -> Vec<Vec<Value>> {
 
 fn lcc(csr: &CsrIndex) -> Vec<Vec<Value>> {
     let n = csr.node_count();
-    let adjacency: Vec<HashSet<u32>> = (0..n as u32)
-        .map(|node| both_neighbors(csr, node).into_iter().collect())
+    let adjacency: Vec<Vec<u32>> = (0..n as u32)
+        .map(|node| both_neighbors(csr, node))
         .collect();
     (0..n)
         .map(|i| {
-            let node = i as u32;
-            let mut neighbors: Vec<u32> = adjacency[i]
-                .iter()
-                .copied()
-                .filter(|neighbor| *neighbor != node)
-                .collect();
-            neighbors.sort_unstable();
+            let neighbors = &adjacency[i];
             let degree = neighbors.len();
             let coefficient = if degree < 2 {
                 0.0
             } else {
+                // Count edges induced by N(node) using sorted, contiguous
+                // adjacency and binary search. Each neighbor edge is visited
+                // once (`left < right`), avoiding both quadratic pair probing
+                // and random-access hash lookups on the hot path.
                 let mut triangles = 0usize;
-                for left in 0..neighbors.len() {
-                    for right in left + 1..neighbors.len() {
-                        if adjacency[neighbors[left] as usize].contains(&neighbors[right]) {
+                for &left in neighbors {
+                    for &right in adjacency[left as usize]
+                        .iter()
+                        .skip_while(|right| **right <= left)
+                    {
+                        if neighbors.binary_search(&right).is_ok() {
                             triangles += 1;
                         }
                     }
@@ -287,7 +288,7 @@ fn lcc(csr: &CsrIndex) -> Vec<Vec<Value>> {
                 2.0 * triangles as f64 / (degree * (degree - 1)) as f64
             };
             vec![
-                Value::String(csr.node_name_raw(node).to_string()),
+                Value::String(csr.node_name_raw(i as u32).to_string()),
                 Value::Float(coefficient),
             ]
         })
@@ -891,6 +892,27 @@ mod tests {
         for row in result.rows {
             assert_eq!(row[1], Value::Float(1.0));
         }
+    }
+
+    #[test]
+    fn lcc_counts_partial_neighbor_connectivity() {
+        let mut csr = CsrIndex::new();
+        csr.add_edge("a", "E", "b").unwrap();
+        csr.add_edge("a", "E", "c").unwrap();
+        csr.add_edge("a", "E", "d").unwrap();
+        csr.add_edge("b", "E", "c").unwrap();
+        let result = run_algo(
+            &make_csr_map(csr),
+            GraphAlgorithm::Lcc,
+            &default_params("g"),
+        )
+        .unwrap();
+        let coefficient = result
+            .rows
+            .iter()
+            .find(|row| row[0] == Value::String("a".to_string()))
+            .map(|row| row[1].clone());
+        assert_eq!(coefficient, Some(Value::Float(1.0 / 3.0)));
     }
 
     #[test]

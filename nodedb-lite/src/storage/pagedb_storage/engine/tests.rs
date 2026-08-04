@@ -135,6 +135,61 @@ async fn batch_write_atomic() {
     );
 }
 
+#[tokio::test]
+async fn batch_write_unique_puts_accepts_unsorted_keys() {
+    let s = make_storage().await;
+    s.batch_write(&[
+        WriteOp::Put {
+            ns: Namespace::Graph,
+            key: b"z".to_vec(),
+            value: b"last-key".to_vec(),
+        },
+        WriteOp::Put {
+            ns: Namespace::Graph,
+            key: b"a".to_vec(),
+            value: b"first-key".to_vec(),
+        },
+    ])
+    .await
+    .unwrap();
+
+    assert_eq!(
+        s.get(Namespace::Graph, b"a").await.unwrap().as_deref(),
+        Some(b"first-key".as_slice())
+    );
+    assert_eq!(
+        s.get(Namespace::Graph, b"z").await.unwrap().as_deref(),
+        Some(b"last-key".as_slice())
+    );
+}
+
+#[tokio::test]
+async fn batch_write_duplicate_puts_preserves_last_write() {
+    let s = make_storage().await;
+    s.batch_write(&[
+        WriteOp::Put {
+            ns: Namespace::Graph,
+            key: b"same".to_vec(),
+            value: b"first".to_vec(),
+        },
+        WriteOp::Put {
+            ns: Namespace::Graph,
+            key: b"same".to_vec(),
+            value: b"second".to_vec(),
+        },
+    ])
+    .await
+    .unwrap();
+
+    assert_eq!(
+        s.get(Namespace::Graph, b"same")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(b"second".as_slice())
+    );
+}
+
 /// Same-key put-then-delete in a batch: the delete must win.
 #[tokio::test]
 async fn batch_write_same_key_put_then_delete() {

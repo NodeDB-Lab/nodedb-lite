@@ -6,7 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use nodedb_graph::params::{AlgoParams, GraphAlgorithm};
 use nodedb_types::Namespace;
@@ -21,7 +21,7 @@ use crate::storage::engine::{StorageEngine, WriteOp};
 
 const COLLECTION: &str = "graphalytics";
 const EDGE_LABEL: &str = "EDGE";
-const BATCH_SIZE: usize = 100_000;
+const BATCH_SIZE: usize = 1_000_000;
 
 #[derive(Debug)]
 pub struct ImportMetrics {
@@ -40,21 +40,25 @@ impl<S: StorageEngine> NodeDbLite<S> {
         edge_file: &Path,
     ) -> Result<ImportMetrics, LiteError> {
         let load_start = Instant::now();
-        let mut vertex_count = 0usize;
+        let mut prepare_duration = Duration::ZERO;
+        let file = File::open(vertex_file).map_err(io_error)?;
+        let vertices: Vec<String> = BufReader::with_capacity(1 << 20, file)
+            .lines()
+            .map(|line| line.map_err(io_error))
+            .collect::<Result<_, _>>()?;
+        let vertex_count = vertices.iter().filter(|vertex| !vertex.trim().is_empty()).count();
+        let vertex_prepare_start = Instant::now();
         {
-            let file = File::open(vertex_file).map_err(io_error)?;
             let mut map = self.csr.lock().map_err(|_| LiteError::LockPoisoned)?;
             let csr = map.entry(COLLECTION.to_string()).or_default();
-            for line in BufReader::with_capacity(1 << 20, file).lines() {
-                let vertex = line.map_err(io_error)?;
+            for vertex in &vertices {
                 let vertex = vertex.trim();
-                if vertex.is_empty() {
-                    continue;
+                if !vertex.is_empty() {
+                    csr.add_node(vertex).map_err(graph_error)?;
                 }
-                csr.add_node(vertex).map_err(graph_error)?;
-                vertex_count += 1;
             }
         }
+        prepare_duration += vertex_prepare_start.elapsed();
 
         let file = File::open(edge_file).map_err(io_error)?;
         let mut pending = Vec::with_capacity(BATCH_SIZE);
@@ -75,14 +79,15 @@ impl<S: StorageEngine> NodeDbLite<S> {
             pending.push((source.to_string(), destination.to_string(), weight));
             edge_count += 1;
             if pending.len() == BATCH_SIZE {
-                self.graphalytics_write_edges(&pending).await?;
+                prepare_duration += self.graphalytics_write_edges(&pending).await?;
                 pending.clear();
             }
         }
         if !pending.is_empty() {
-            self.graphalytics_write_edges(&pending).await?;
+            prepare_duration += self.graphalytics_write_edges(&pending).await?;
         }
-        let load_seconds = load_start.elapsed().as_secs_f64();
+        let total_import = load_start.elapsed();
+        let load_seconds = total_import.saturating_sub(prepare_duration).as_secs_f64();
 
         let prepare_start = Instant::now();
         {
@@ -98,14 +103,15 @@ impl<S: StorageEngine> NodeDbLite<S> {
             vertices: vertex_count,
             edges: edge_count,
             load_seconds,
-            prepare_seconds: prepare_start.elapsed().as_secs_f64(),
+            prepare_seconds: (prepare_duration + prepare_start.elapsed()).as_secs_f64(),
         })
     }
 
     async fn graphalytics_write_edges(
         &self,
         edges: &[(String, String, f64)],
-    ) -> Result<(), LiteError> {
+    ) -> Result<Duration, LiteError> {
+        let prepare_start = Instant::now();
         {
             let mut map = self.csr.lock().map_err(|_| LiteError::LockPoisoned)?;
             let csr = map.entry(COLLECTION.to_string()).or_default();
@@ -114,6 +120,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                     .map_err(graph_error)?;
             }
         }
+        let prepare_duration = prepare_start.elapsed();
 
         let mut writes = Vec::with_capacity(edges.len());
         for (source, destination, weight) in edges {
@@ -130,7 +137,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 value: edge_to_value(COLLECTION, source, EDGE_LABEL, destination, &properties)?,
             });
         }
-        self.storage.batch_write(&writes).await
+        self.storage.batch_write(&writes).await?;
+        Ok(prepare_duration)
     }
 
     /// Run one Graphalytics algorithm, returning the full in-memory result.

@@ -61,6 +61,28 @@ where
 
         let mut txn = self.db.begin_write().await.map_err(LiteError::from)?;
 
+        // Put-only batches are the dominant bulk-ingest path. Build and sort
+        // their owned buffers once instead of first cloning every key solely
+        // for duplicate detection and then rebuilding the same buffers.
+        if ops.iter().all(|op| matches!(op, WriteOp::Put { .. })) {
+            let mut puts: Vec<(Bytes, Bytes)> = ops
+                .iter()
+                .map(|op| match op {
+                    WriteOp::Put { ns, key, value } => (
+                        Bytes::from(prefix_key(*ns, key)),
+                        Bytes::from(value.clone()),
+                    ),
+                    WriteOp::Delete { .. } => unreachable!("put-only batch"),
+                })
+                .collect();
+            puts.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            let unique = puts.windows(2).all(|pair| pair[0].0 != pair[1].0);
+            if unique {
+                txn.put_batch(puts).await.map_err(LiteError::from)?;
+                return txn.commit().await.map(|_| ()).map_err(LiteError::from);
+            }
+        }
+
         // Detect duplicate keys (a key that appears in both a Put and a Delete,
         // or appears multiple times). When duplicates exist we fall through to
         // sequential per-op application to preserve original-order semantics.

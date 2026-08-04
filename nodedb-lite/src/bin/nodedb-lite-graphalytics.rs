@@ -91,7 +91,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn enforce_timeout(operation: &str, seconds: f64) -> Result<(), Box<dyn std::error::Error>> {
     if seconds > OPERATION_TIMEOUT_SECONDS {
         return Err(format!(
-            "{operation} exceeded the {OPERATION_TIMEOUT_SECONDS:.0}-second operation timeout"
+            "{operation} took {seconds:.3}s and exceeded the {OPERATION_TIMEOUT_SECONDS:.0}-second operation timeout"
         )
         .into());
     }
