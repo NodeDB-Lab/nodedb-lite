@@ -19,14 +19,87 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
     /// (CRDT) needs no special setup — the flag alone governs the routing.
     pub(in crate::query) async fn handle_create_bitemporal_document(
         &self,
-        sql: &str,
+        name: &str,
     ) -> Result<QueryResult, LiteError> {
-        let name = extract_collection_name(sql)?;
-
-        set_bitemporal(&*self.storage, &name, true)
+        set_bitemporal(&*self.storage, name, true)
             .await
             .map_err(|e| LiteError::Query(e.to_string()))?;
 
+        self.register_document_collection(name, true).await?;
+
+        Ok(QueryResult {
+            columns: vec!["result".into()],
+            rows: vec![vec![Value::String(format!(
+                "bitemporal document collection '{name}' created"
+            ))]],
+            rows_affected: 0,
+        })
+    }
+
+    /// Handle: `CREATE COLLECTION <name>` with no engine and no flags.
+    ///
+    /// The plainest form of the statement, and the one a caller writes when
+    /// they want the default schemaless document engine. It needs no storage
+    /// setup — registering the collection is the whole of it — but it does need
+    /// to be registered, or the collection is invisible to the SQL catalog and
+    /// to the sync announce until the first write happens to create it
+    /// implicitly.
+    pub(in crate::query) async fn handle_create_document(
+        &self,
+        name: &str,
+    ) -> Result<QueryResult, LiteError> {
+        self.register_document_collection(name, false).await?;
+
+        Ok(QueryResult {
+            columns: vec!["result".into()],
+            rows: vec![vec![Value::String(format!(
+                "document collection '{name}' created"
+            ))]],
+            rows_affected: 0,
+        })
+    }
+
+    /// Handle: `DROP COLLECTION <name>` for a schemaless document collection.
+    ///
+    /// Clears the collection's CRDT state, drops its text index and removes the
+    /// persisted metadata — the same three steps the programmatic
+    /// `drop_collection` performs, so the SQL and API paths leave the store in
+    /// the same state.
+    pub(in crate::query) async fn handle_drop_document(
+        &self,
+        name: &str,
+    ) -> Result<QueryResult, LiteError> {
+        self.crdt
+            .lock()
+            .map_err(|_| LiteError::LockPoisoned)?
+            .clear_collection(name)
+            .map_err(|e| LiteError::Query(e.to_string()))?;
+
+        self.fts_state
+            .manager
+            .lock()
+            .map_err(|_| LiteError::LockPoisoned)?
+            .drop_collection(name);
+
+        let key = format!("collection:{name}");
+        self.storage
+            .delete(nodedb_types::Namespace::Meta, key.as_bytes())
+            .await
+            .map_err(|e| LiteError::Query(format!("storage: {e}")))?;
+
+        Ok(QueryResult {
+            columns: vec!["result".into()],
+            rows: vec![vec![Value::String(format!("collection '{name}' dropped"))]],
+            rows_affected: 0,
+        })
+    }
+
+    /// Persist collection metadata and register the name with the CRDT engine.
+    async fn register_document_collection(
+        &self,
+        name: &str,
+        bitemporal: bool,
+    ) -> Result<(), LiteError> {
         // Persist `CollectionMeta` under `collection:{name}` in `Namespace::Meta`,
         // symmetric with `create_collection` and the KV DDL path. Without this the
         // collection is invisible to two consumers that both read that key:
@@ -38,13 +111,13 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         //     `CollectionSchema` frame is emitted before the first delta and the
         //     collection registers on Origin.
         let meta = crate::nodedb::collection::ddl::CollectionMeta {
-            name: name.clone(),
+            name: name.to_string(),
             collection_type: "document".to_string(),
             created_at_ms: crate::runtime::now_millis(),
             fields: Vec::new(),
             config_json: None,
             descriptor_json: None,
-            bitemporal: true,
+            bitemporal,
             crdt: false,
         };
         let key = format!("collection:{name}");
@@ -61,40 +134,8 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         self.crdt
             .lock()
             .map_err(|_| LiteError::LockPoisoned)?
-            .register_collection(&name);
+            .register_collection(name);
 
-        Ok(QueryResult {
-            columns: vec!["result".into()],
-            rows: vec![vec![Value::String(format!(
-                "bitemporal document collection '{name}' created"
-            ))]],
-            rows_affected: 0,
-        })
+        Ok(())
     }
-}
-
-/// Extract the collection name from `CREATE COLLECTION <name> ...`.
-fn extract_collection_name(sql: &str) -> Result<String, LiteError> {
-    let upper = sql.to_uppercase();
-    let after_keyword = sql
-        .get(
-            upper
-                .find("COLLECTION")
-                .ok_or(LiteError::Query("expected COLLECTION keyword".into()))?
-                + 10..,
-        )
-        .ok_or(LiteError::Query("unexpected end after COLLECTION".into()))?
-        .trim();
-
-    let name_end = after_keyword
-        .find(|c: char| c == '(' || c == ';' || c.is_whitespace())
-        .unwrap_or(after_keyword.len());
-
-    let name = after_keyword[..name_end].trim().to_lowercase();
-
-    if name.is_empty() {
-        return Err(LiteError::Query("missing collection name".into()));
-    }
-
-    Ok(name)
 }

@@ -34,6 +34,23 @@ async fn open_manual_flush(path: &std::path::Path) -> Arc<NodeDbLite<PagedbStora
         .expect("open db")
 }
 
+/// Open with the caller's consent to drop CRDT state that fails its checksum.
+///
+/// The default refuses to open such a store and leaves it untouched, so a test
+/// exercising the recovery has to ask for it.
+async fn open_discarding_corrupt_state(
+    path: &std::path::Path,
+) -> Arc<NodeDbLite<PagedbStorageDefault>> {
+    let config = LiteConfig {
+        auto_flush_ms: 0,
+        corruption_policy: nodedb_lite::CorruptionPolicy::DiscardStoreAndRecreate,
+        ..LiteConfig::default()
+    };
+    NodeDbLite::open_at_path_with_config(path, Encryption::Plaintext, config)
+        .await
+        .expect("open db")
+}
+
 async fn put_note(db: &NodeDbLite<PagedbStorageDefault>, id: &str, body: &str) {
     let mut doc = Document::new(id.to_string());
     doc.set("body", Value::String(body.to_string()));
@@ -287,14 +304,18 @@ async fn queued_deltas_survive_reopen() {
 // a_corrupt_base_does_not_strand_its_updates
 // ---------------------------------------------------------------------------
 
-/// A collection whose base snapshot fails its CRC is dropped on open so the
-/// rest of the store still comes up. Its updates must be dropped with it.
+/// When the caller has opted into discarding corrupt state, a collection whose
+/// base snapshot fails its CRC is dropped on open so the rest of the store
+/// still comes up. Its updates must be dropped with it.
 ///
 /// Each update carries only the operations since that base, so without the base
 /// its causal predecessors are missing, Loro buffers it as pending, and the
 /// import reports an error. Replaying one would therefore fail the open — and
 /// because nothing else removes these keys, it would fail every open after it
 /// too, turning an isolated re-sync into a store that never opens again.
+///
+/// Without the opt-in the same store refuses to open and keeps every byte,
+/// which is covered separately.
 #[tokio::test]
 async fn a_corrupt_base_does_not_strand_its_updates() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -343,7 +364,7 @@ async fn a_corrupt_base_does_not_strand_its_updates() {
     }
 
     // Opening must succeed rather than fail on updates it cannot apply.
-    drop(open_manual_flush(&path).await);
+    drop(open_discarding_corrupt_state(&path).await);
 
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
         .await

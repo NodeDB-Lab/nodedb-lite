@@ -3,6 +3,7 @@ pub mod array_segment_ext;
 pub mod checksum;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod columnar_segment_ext;
+pub mod corruption;
 pub mod encrypted;
 pub mod encryption;
 pub mod engine;

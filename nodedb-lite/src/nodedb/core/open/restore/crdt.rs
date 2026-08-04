@@ -24,6 +24,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// present.
     pub(in crate::nodedb::core::open) async fn restore_identity_and_crdt(
         storage: &Arc<S>,
+        policy: crate::storage::corruption::CorruptionPolicy,
     ) -> NodeDbResult<(CrdtEngine, crate::identity::LiteIdentity)> {
         // ── Load or create Lite identity (lite_id + epoch + peer id) ──
         //
@@ -75,10 +76,24 @@ impl<S: StorageEngine> NodeDbLite<S> {
                     })?;
                 }
                 None => {
+                    // The collection's entire history is in this blob. Dropping
+                    // it is the same decision as dropping the store, at a
+                    // smaller scale, so it needs the same consent — and the
+                    // bytes stay put either way until the caller has decided,
+                    // because a deleted snapshot cannot be handed to a forensic
+                    // tool or recovered from.
+                    if !policy.may_discard() {
+                        return Err(NodeDbError::segment_corrupted(format!(
+                            "CRDT snapshot for collection '{collection}' failed its CRC32C \
+                             check. The snapshot has been left in place; opening past it would \
+                             silently empty the collection."
+                        )));
+                    }
                     tracing::error!(
                         collection = %collection,
-                        "CRDT snapshot CRC32C mismatch — discarding corrupted snapshot for this \
-                         collection. A full re-sync from Origin is needed for it."
+                        "CRDT snapshot CRC32C mismatch — the caller opted into discarding \
+                         corrupted state, so this collection is being dropped. A full re-sync \
+                         from Origin is needed for it."
                     );
                     // Delete the corrupted snapshot so we don't re-read it. A
                     // failed delete leaves it to be re-read and re-reported on
@@ -130,6 +145,14 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 continue;
             };
             if !base_bytes.contains_key(collection) {
+                // These carry writes that exist nowhere else once deleted.
+                if !policy.may_discard() {
+                    return Err(NodeDbError::segment_corrupted(format!(
+                        "CRDT update '{collection}' #{seq} has no base snapshot to apply to, so \
+                         the writes it carries cannot be replayed. It has been left in place; \
+                         discarding it would lose them."
+                    )));
+                }
                 tracing::error!(
                     collection = %collection,
                     seq,
@@ -227,7 +250,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         if !incremental_entries.is_empty() {
             // Use incremental entries (append-only format).
-            crdt.restore_pending_deltas_incremental(&incremental_entries);
+            crdt.restore_pending_deltas_incremental(&incremental_entries, policy.may_discard())
+                .map_err(|e| NodeDbError::segment_corrupted(e.to_string()))?;
         } else if let Some(delta_bytes) = storage.get(Namespace::Crdt, META_CRDT_DELTAS).await? {
             // Fall back to legacy bulk blob.
             crdt.restore_pending_deltas(&delta_bytes);
@@ -248,6 +272,16 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 .unwrap_or(0);
 
             if max_pending > 0 && last_flushed > 0 && max_pending != last_flushed {
+                // Clearing the queue throws away mutations that may not be in
+                // the CRDT state behind it — the "CRDT state is authoritative"
+                // assumption is exactly what a partial flush puts in doubt.
+                if !policy.may_discard() {
+                    return Err(NodeDbError::segment_corrupted(format!(
+                        "partial flush detected: the last flushed mutation is {last_flushed} but \
+                         the queue reaches {max_pending}, so the queued mutations and the CRDT \
+                         state behind them disagree. The queue has been left intact."
+                    )));
+                }
                 tracing::warn!(
                     last_flushed,
                     max_pending,

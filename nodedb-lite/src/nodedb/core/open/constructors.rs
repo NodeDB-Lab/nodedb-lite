@@ -91,7 +91,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         // ── Restore Lite identity + CRDT state (snapshots, bitemporal
         // backfill, pending deltas, partial-flush safety, legacy CSR cleanup) ──
-        let (crdt, lite_identity) = Self::restore_identity_and_crdt(&storage).await?;
+        let (crdt, lite_identity) =
+            Self::restore_identity_and_crdt(&storage, config.corruption_policy).await?;
 
         // ── Restore FTS indices ──
         let fts_manager = Self::restore_fts_indices(&storage).await?;

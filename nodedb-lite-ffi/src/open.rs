@@ -4,12 +4,84 @@
 
 use std::os::raw::c_char;
 
-use nodedb_lite::{LiteConfig, NodeDbLite};
+use nodedb_lite::{CorruptionPolicy, LiteConfig, NodeDbLite};
 
 use crate::handle::{NodeDbHandle, OwnedTempDir};
 use crate::handle_registry;
 use crate::status::{NODEDB_ERR_FAILED, NODEDB_ERR_NULL, NODEDB_OK};
 use crate::util::{ffi_guard, handle_ref, ptr_to_str, resolve_encryption};
+
+/// Shared body of every open entry point.
+///
+/// Each exported function differs only in the [`LiteConfig`] it builds, so the
+/// runtime setup, `:memory:` handling and handle registration live here once.
+/// Returns NULL on any failure, matching the C convention of the callers.
+fn open_handle(
+    path: *const c_char,
+    passphrase: *const c_char,
+    build_config: impl FnOnce() -> LiteConfig,
+) -> *mut NodeDbHandle {
+    let path = match ptr_to_str(path) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+
+    let is_memory = path == ":memory:";
+    let enc = match resolve_encryption(passphrase, is_memory) {
+        Some(e) => e,
+        None => return std::ptr::null_mut(),
+    };
+
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    let config = build_config();
+
+    let (db, tmpdir) = if is_memory {
+        let tmp = match OwnedTempDir::new() {
+            Some(t) => t,
+            None => return std::ptr::null_mut(),
+        };
+        let db = match rt.block_on(NodeDbLite::open_at_path_with_config(&tmp.0, enc, config)) {
+            Ok(db) => db,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        (db, Some(tmp))
+    } else {
+        let db = match rt.block_on(NodeDbLite::open_at_path_with_config(path, enc, config)) {
+            Ok(db) => db,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        (db, None)
+    };
+
+    // The background maintenance tasks come from `config` itself, spawned by
+    // the constructor inside the `block_on` runtime context.
+
+    handle_registry::insert(NodeDbHandle {
+        db,
+        rt,
+        _tmpdir: tmpdir,
+    }) as *mut NodeDbHandle
+}
+
+/// Build a config with an optional memory override, `0` meaning "the default".
+fn config_with_memory(memory_mb: u64) -> LiteConfig {
+    if memory_mb == 0 {
+        LiteConfig::default()
+    } else {
+        LiteConfig {
+            memory_budget: (memory_mb as usize).saturating_mul(1024 * 1024),
+            ..LiteConfig::default()
+        }
+    }
+}
 
 /// Open or create a NodeDB-Lite database at the given path.
 ///
@@ -36,52 +108,7 @@ pub unsafe extern "C" fn nodedb_open(
     passphrase: *const c_char,
 ) -> *mut NodeDbHandle {
     ffi_guard(std::ptr::null_mut(), || {
-        let path = match ptr_to_str(path) {
-            Some(s) => s,
-            None => return std::ptr::null_mut(),
-        };
-
-        let is_memory = path == ":memory:";
-        let enc = match resolve_encryption(passphrase, is_memory) {
-            Some(e) => e,
-            None => return std::ptr::null_mut(),
-        };
-
-        let rt = match tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(_) => return std::ptr::null_mut(),
-        };
-
-        let (db, tmpdir) = if is_memory {
-            let tmp = match OwnedTempDir::new() {
-                Some(t) => t,
-                None => return std::ptr::null_mut(),
-            };
-            let db = match rt.block_on(NodeDbLite::open_at_path(&tmp.0, enc)) {
-                Ok(db) => db,
-                Err(_) => return std::ptr::null_mut(),
-            };
-            (db, Some(tmp))
-        } else {
-            let db = match rt.block_on(NodeDbLite::open_at_path(path, enc)) {
-                Ok(db) => db,
-                Err(_) => return std::ptr::null_mut(),
-            };
-            (db, None)
-        };
-
-        // Auto-flush and auto-compact are started by `open_at_path` from the
-        // configuration it resolves, inside the `block_on` runtime context.
-
-        handle_registry::insert(NodeDbHandle {
-            db,
-            rt,
-            _tmpdir: tmpdir,
-        }) as *mut NodeDbHandle
+        open_handle(path, passphrase, LiteConfig::default)
     })
 }
 
@@ -100,61 +127,39 @@ pub unsafe extern "C" fn nodedb_open_with_config(
     passphrase: *const c_char,
 ) -> *mut NodeDbHandle {
     ffi_guard(std::ptr::null_mut(), || {
-        let path = match ptr_to_str(path) {
-            Some(s) => s,
-            None => return std::ptr::null_mut(),
-        };
+        open_handle(path, passphrase, || config_with_memory(memory_mb))
+    })
+}
 
-        let is_memory = path == ":memory:";
-        let enc = match resolve_encryption(passphrase, is_memory) {
-            Some(e) => e,
-            None => return std::ptr::null_mut(),
-        };
-
-        let rt = match tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(_) => return std::ptr::null_mut(),
-        };
-
-        let config = if memory_mb == 0 {
-            LiteConfig::default()
-        } else {
-            LiteConfig {
-                memory_budget: (memory_mb as usize).saturating_mul(1024 * 1024),
-                ..LiteConfig::default()
-            }
-        };
-
-        let (db, tmpdir) = if is_memory {
-            let tmp = match OwnedTempDir::new() {
-                Some(t) => t,
-                None => return std::ptr::null_mut(),
-            };
-            let db = match rt.block_on(NodeDbLite::open_at_path_with_config(&tmp.0, enc, config)) {
-                Ok(db) => db,
-                Err(_) => return std::ptr::null_mut(),
-            };
-            (db, Some(tmp))
-        } else {
-            let db = match rt.block_on(NodeDbLite::open_at_path_with_config(path, enc, config)) {
-                Ok(db) => db,
-                Err(_) => return std::ptr::null_mut(),
-            };
-            (db, None)
-        };
-
-        // The background maintenance tasks come from `config` itself, spawned
-        // by the constructor inside the `block_on` runtime context.
-
-        handle_registry::insert(NodeDbHandle {
-            db,
-            rt,
-            _tmpdir: tmpdir,
-        }) as *mut NodeDbHandle
+/// Open a NodeDB-Lite database, **discarding the store if it cannot be read**.
+///
+/// Every other open entry point refuses to open a damaged store and leaves it
+/// untouched. This one renames it to `{path}.corrupt.{unix_secs}` and returns a
+/// handle to a fresh, empty database in its place.
+///
+/// The returned database contains none of the previous data. Any writes it
+/// accepts diverge from the copy set aside, so this is only appropriate when
+/// the caller has another source of truth to refill from — an Origin to
+/// re-sync, or data that can be regenerated. If unsure, use `nodedb_open`: an
+/// open that fails is recoverable, and a store that has been replaced is not.
+///
+/// # Safety
+/// - `path` must be a valid null-terminated UTF-8 string.
+/// - `passphrase` must be NULL or a valid null-terminated UTF-8 string.
+///
+/// See `nodedb_open` for the passphrase/encryption convention.
+/// `memory_mb` of 0 uses the default memory budget.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nodedb_open_discarding_corrupt_store(
+    path: *const c_char,
+    memory_mb: u64,
+    passphrase: *const c_char,
+) -> *mut NodeDbHandle {
+    ffi_guard(std::ptr::null_mut(), || {
+        open_handle(path, passphrase, || LiteConfig {
+            corruption_policy: CorruptionPolicy::DiscardStoreAndRecreate,
+            ..config_with_memory(memory_mb)
+        })
     })
 }
 

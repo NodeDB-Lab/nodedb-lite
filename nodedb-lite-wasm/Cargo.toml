@@ -40,12 +40,17 @@ web-sys = { version = "0.3", features = [
 nodedb-array = { workspace = true }
 zerompk = { workspace = true }
 
-# `getrandom` 0.3 on wasm32-unknown-unknown requires explicit opt-in to
-# the `wasm_js` JS-backed RNG. Pulling it in as a direct dep here with
-# the right feature unifies the transitive copy used by other crates to
-# a working build on this target.
+# `getrandom` on wasm32-unknown-unknown requires explicit opt-in to the
+# `wasm_js` JS-backed RNG; without it the crate refuses to compile for this
+# target. Pulling it in as a direct dep here with the right feature unifies the
+# transitive copy used by other crates to a working build.
+#
+# The version tracks the workspace's rather than being pinned here: an entry
+# naming a version the rest of the tree has moved off leaves the copy actually
+# resolved without the feature, which fails the build for the target this crate
+# exists to serve.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom = { workspace = true, features = ["wasm_js"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

@@ -1,73 +1,71 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Post-open store-recovery driver.
+//! Opening a Lite database from a filesystem path.
 //!
-//! [`PagedbStorage::open`](crate::storage::pagedb_storage::PagedbStorage) only
-//! self-heals corruption raised while opening the backing `Db`. Corruption
-//! surfaced *after* open — during identity load or CRDT/index restore — is
-//! typed as [`ErrorDetails::SegmentCorrupted`] and reaches here, where the
-//! whole open sequence is re-driven once against a freshly recreated store.
+//! Corruption can surface at two points: while opening the backing `Db`, and
+//! later during identity load or CRDT/index restore, where it arrives typed as
+//! [`ErrorDetails::SegmentCorrupted`]. Both are the same fault to the caller,
+//! so both obey the same
+//! [`CorruptionPolicy`](crate::storage::corruption::CorruptionPolicy) — either
+//! the open fails and the store is left alone, or the caller has opted into
+//! discarding it and the whole open sequence is re-driven once against a fresh
+//! store.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use nodedb_types::error::{ErrorDetails, NodeDbResult};
 
+use crate::config::LiteConfig;
 use crate::storage::encryption::Encryption;
 use crate::storage::pagedb_storage::PagedbStorageDefault;
 
 use crate::nodedb::core::types::NodeDbLite;
 
 impl NodeDbLite<PagedbStorageDefault> {
-    /// Open (or create) a Lite database at `path`, self-healing a corrupt store.
+    /// Open (or create) a Lite database at `path`.
     ///
-    /// Opens the pagedb-backed storage and runs the full cold-start restore. If
-    /// the restore surfaces a corruption-class error
-    /// ([`ErrorDetails::SegmentCorrupted`]), the corrupt store is renamed aside
-    /// and recreated fresh, then the open is retried exactly once. The retry is
-    /// unguarded: a second corruption surfaces to the caller rather than
-    /// looping.
+    /// A store that cannot be read is reported and left untouched — the
+    /// [`FailClosed`](crate::storage::corruption::CorruptionPolicy::FailClosed) default. Use
+    /// [`open_at_path_with_config`](Self::open_at_path_with_config) with
+    /// `corruption_policy` set to choose otherwise.
     pub async fn open_at_path(
         path: impl AsRef<Path>,
         encryption: Encryption,
     ) -> NodeDbResult<Arc<Self>> {
-        let path = path.as_ref();
-        let storage = PagedbStorageDefault::open(path, encryption.clone()).await?;
-        match Self::open(storage).await {
-            Ok(db) => Ok(db),
-            Err(e) if matches!(e.details(), ErrorDetails::SegmentCorrupted { .. }) => {
-                tracing::error!(
-                    path = %path.display(),
-                    error = %e,
-                    "post-open corruption detected after storage opened cleanly — \
-                     renaming corrupt store aside and recovering (one retry)"
-                );
-                let storage = PagedbStorageDefault::recover_corrupt(path, &encryption).await?;
-                Self::open(storage).await
-            }
-            Err(e) => Err(e),
-        }
+        Self::open_at_path_with_config(path, encryption, LiteConfig::default()).await
     }
 
     /// Like [`open_at_path`](Self::open_at_path), but with an explicit
-    /// [`LiteConfig`](crate::config::LiteConfig).
+    /// [`LiteConfig`].
+    ///
+    /// `config.corruption_policy` governs both corruption points. Under
+    /// [`DiscardStoreAndRecreate`](crate::storage::corruption::CorruptionPolicy::DiscardStoreAndRecreate) a post-open corruption
+    /// renames the store aside and retries the open exactly once; the retry is
+    /// unguarded, so a second corruption surfaces to the caller rather than
+    /// looping.
     pub async fn open_at_path_with_config(
         path: impl AsRef<Path>,
         encryption: Encryption,
-        config: crate::config::LiteConfig,
+        config: LiteConfig,
     ) -> NodeDbResult<Arc<Self>> {
         let path = path.as_ref();
-        let storage = PagedbStorageDefault::open(path, encryption.clone()).await?;
+        let policy = config.corruption_policy;
+        let storage =
+            PagedbStorageDefault::open_with_policy(path, encryption.clone(), policy).await?;
         match Self::open_with_config(storage, config.clone()).await {
             Ok(db) => Ok(db),
-            Err(e) if matches!(e.details(), ErrorDetails::SegmentCorrupted { .. }) => {
+            Err(e)
+                if policy.may_discard()
+                    && matches!(e.details(), ErrorDetails::SegmentCorrupted { .. }) =>
+            {
                 tracing::error!(
                     path = %path.display(),
                     error = %e,
-                    "post-open corruption detected after storage opened cleanly — \
-                     renaming corrupt store aside and recovering (one retry)"
+                    "post-open corruption detected after storage opened cleanly — the caller \
+                     opted into discarding the store, renaming it aside and retrying once"
                 );
-                let storage = PagedbStorageDefault::recover_corrupt(path, &encryption).await?;
+                let storage = PagedbStorageDefault::discard_and_recreate(path, &encryption).await?;
                 Self::open_with_config(storage, config).await
             }
             Err(e) => Err(e),

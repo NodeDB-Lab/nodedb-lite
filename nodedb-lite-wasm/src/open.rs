@@ -8,6 +8,8 @@
 
 use wasm_bindgen::prelude::*;
 
+#[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+use nodedb_lite::CorruptionPolicy;
 use nodedb_lite::storage::pagedb_storage::PagedbStorageMem;
 use nodedb_lite::{LiteConfig, NodeDbLite};
 
@@ -166,6 +168,49 @@ impl NodeDbLiteWasm {
             Encryption::passphrase(passphrase)
         };
         let config = config_from_memory_mb(memory_mb);
+        let storage = PagedbStorageOpfs::open_opfs(filename, worker_url, enc)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let db = NodeDbLite::open_with_config(storage, config)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(Self {
+            inner: NodeDbLiteWasmInner::Persistent(db),
+        })
+    }
+
+    /// Open a persistent OPFS database, **discarding CRDT state that fails its
+    /// checksum** instead of refusing to open.
+    ///
+    /// The other constructors report a damaged collection snapshot or queued
+    /// mutation and leave every byte in place, so nothing is lost before the
+    /// caller has decided what to do. This one drops the damaged state and
+    /// continues: the affected collections come back empty and their unsynced
+    /// local writes are gone. Use it only with an Origin to re-sync from.
+    ///
+    /// The database itself is never replaced wholesale here — OPFS has no
+    /// rename, so a store too damaged to open still fails, with the bytes
+    /// intact.
+    ///
+    /// `filename`, `worker_url`, `passphrase` and `memory_mb` behave exactly as
+    /// in `openPersistentWithConfig`.
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+    #[wasm_bindgen(js_name = "openPersistentDiscardingCorruptState")]
+    pub async fn open_persistent_discarding_corrupt_state(
+        filename: &str,
+        worker_url: &str,
+        passphrase: String,
+        memory_mb: Option<u32>,
+    ) -> Result<NodeDbLiteWasm, JsError> {
+        let enc = if passphrase.is_empty() {
+            Encryption::Plaintext
+        } else {
+            Encryption::passphrase(passphrase)
+        };
+        let config = LiteConfig {
+            corruption_policy: CorruptionPolicy::DiscardStoreAndRecreate,
+            ..config_from_memory_mb(memory_mb)
+        };
         let storage = PagedbStorageOpfs::open_opfs(filename, worker_url, enc)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
