@@ -5,6 +5,8 @@
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 use nodedb_graph::params::{AlgoParams, GraphAlgorithm};
@@ -37,7 +39,7 @@ pub fn run_algo(
         GraphAlgorithm::Wcc => wcc(csr),
         GraphAlgorithm::LabelPropagation => label_propagation(csr, params),
         GraphAlgorithm::Lcc => lcc(csr),
-        GraphAlgorithm::Sssp => sssp(csr, params),
+        GraphAlgorithm::Sssp => sssp(csr, params)?,
         GraphAlgorithm::Betweenness => betweenness(csr, params),
         GraphAlgorithm::Closeness => closeness(csr, params),
         GraphAlgorithm::Harmonic => harmonic(csr),
@@ -104,50 +106,71 @@ fn pagerank(csr: &CsrIndex, params: &AlgoParams) -> Vec<Vec<Value>> {
     // Initial rank distribution equals the teleport distribution.
     let mut rank = teleport.clone();
     let both = params.direction.as_deref() == Some("both");
-    let adjacency = both.then(|| {
+    let dense_out = csr.compacted_out_adjacency_raw();
+    let dense_in = csr.compacted_in_adjacency_raw();
+    let dense_pull = both && dense_out.is_some() && dense_in.is_some();
+    let adjacency = (both && !dense_pull).then(|| {
         (0..n as u32)
             .map(|node| both_neighbors(csr, node))
             .collect::<Vec<Vec<u32>>>()
     });
+    let degrees: Vec<usize> = if dense_pull {
+        let (out_offsets, _) = dense_out.expect("dense pull checked");
+        let (in_offsets, _) = dense_in.expect("dense pull checked");
+        (0..n)
+            .map(|node| {
+                out_offsets[node + 1] as usize - out_offsets[node] as usize
+                    + in_offsets[node + 1] as usize
+                    - in_offsets[node] as usize
+            })
+            .collect()
+    } else if let Some(adjacency) = &adjacency {
+        adjacency.iter().map(Vec::len).collect()
+    } else {
+        (0..n as u32).map(|node| csr.out_degree_raw(node)).collect()
+    };
 
     let mut new_rank = vec![0.0f64; n];
     let mut contributions = both.then(|| vec![0.0f64; n]);
     for _ in 0..max_iter {
-        let dangling_mass: f64 = if let Some(adjacency) = &adjacency {
-            rank.iter()
-                .zip(adjacency)
-                .filter_map(|(node_rank, neighbors)| neighbors.is_empty().then_some(*node_rank))
-                .sum()
-        } else {
-            rank.iter()
-                .enumerate()
-                .filter_map(|(node, node_rank)| {
-                    (csr.out_degree_raw(node as u32) == 0).then_some(*node_rank)
-                })
-                .sum()
-        };
+        let dangling_mass: f64 = rank
+            .iter()
+            .zip(&degrees)
+            .filter_map(|(node_rank, degree)| (*degree == 0).then_some(*node_rank))
+            .sum();
         let base_scale = 1.0 - d + d * dangling_mass;
-        if let (Some(adjacency), Some(contributions)) = (&adjacency, contributions.as_mut()) {
-            for (node, neighbors) in adjacency.iter().enumerate() {
-                contributions[node] = if neighbors.is_empty() {
+        if let Some(contributions) = contributions.as_mut() {
+            for (node, degree) in degrees.iter().copied().enumerate() {
+                contributions[node] = if degree == 0 {
                     0.0
                 } else {
-                    d * rank[node] / neighbors.len() as f64
+                    d * rank[node] / degree as f64
                 };
             }
-            pull_pagerank_iteration(
-                adjacency,
-                contributions,
-                &teleport,
-                &mut new_rank,
-                base_scale,
-            );
+            if dense_pull {
+                pull_pagerank_dense_iteration(
+                    dense_in.expect("dense pull checked"),
+                    dense_out.expect("dense pull checked"),
+                    contributions,
+                    &teleport,
+                    &mut new_rank,
+                    base_scale,
+                );
+            } else {
+                pull_pagerank_iteration(
+                    adjacency.as_ref().expect("BOTH fallback adjacency"),
+                    contributions,
+                    &teleport,
+                    &mut new_rank,
+                    base_scale,
+                );
+            }
         } else {
             for (slot, seed) in new_rank.iter_mut().zip(&teleport) {
                 *slot = base_scale * seed;
             }
             for src in 0..n as u32 {
-                let degree = csr.out_degree_raw(src);
+                let degree = degrees[src as usize];
                 if degree == 0 {
                     continue;
                 }
@@ -207,6 +230,89 @@ fn reserve_pagerank_workers(requested: usize) -> PageRankWorkerPermits {
             Ok(_) => return PageRankWorkerPermits(granted),
             Err(observed) => active = observed,
         }
+    }
+}
+
+fn pull_pagerank_dense_iteration(
+    inbound: (&[u32], &[u32]),
+    outbound: (&[u32], &[u32]),
+    contributions: &[f64],
+    teleport: &[f64],
+    output: &mut [f64],
+    base_scale: f64,
+) {
+    #[cfg(target_arch = "wasm32")]
+    pull_pagerank_dense_range(
+        inbound,
+        outbound,
+        contributions,
+        teleport,
+        output,
+        0,
+        base_scale,
+    );
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let desired_workers = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(32)
+            .min(output.len().max(1));
+        let permits = reserve_pagerank_workers(desired_workers.saturating_sub(1));
+        let workers = permits.0;
+        if workers <= 1 {
+            pull_pagerank_dense_range(
+                inbound,
+                outbound,
+                contributions,
+                teleport,
+                output,
+                0,
+                base_scale,
+            );
+            return;
+        }
+        let chunk_size = output.len().div_ceil(workers);
+        std::thread::scope(|scope| {
+            for (chunk_index, chunk) in output.chunks_mut(chunk_size).enumerate() {
+                let start = chunk_index * chunk_size;
+                scope.spawn(move || {
+                    pull_pagerank_dense_range(
+                        inbound,
+                        outbound,
+                        contributions,
+                        teleport,
+                        chunk,
+                        start,
+                        base_scale,
+                    );
+                });
+            }
+        });
+    }
+}
+
+fn pull_pagerank_dense_range(
+    inbound: (&[u32], &[u32]),
+    outbound: (&[u32], &[u32]),
+    contributions: &[f64],
+    teleport: &[f64],
+    output: &mut [f64],
+    start: usize,
+    base_scale: f64,
+) {
+    let (in_offsets, in_targets) = inbound;
+    let (out_offsets, out_targets) = outbound;
+    for (offset, slot) in output.iter_mut().enumerate() {
+        let node = start + offset;
+        let mut rank = base_scale * teleport[node];
+        for &neighbor in &in_targets[in_offsets[node] as usize..in_offsets[node + 1] as usize] {
+            rank += contributions[neighbor as usize];
+        }
+        for &neighbor in &out_targets[out_offsets[node] as usize..out_offsets[node + 1] as usize] {
+            rank += contributions[neighbor as usize];
+        }
+        *slot = rank;
     }
 }
 
@@ -277,34 +383,52 @@ fn wcc(csr: &CsrIndex) -> Vec<Vec<Value>> {
         return Vec::new();
     }
     let mut parent: Vec<u32> = (0..n as u32).collect();
+    let mut rank = vec![0u8; n];
 
-    fn find(parent: &mut Vec<u32>, x: u32) -> u32 {
-        if parent[x as usize] != x {
-            parent[x as usize] = find(parent, parent[x as usize]);
+    fn find(parent: &mut [u32], mut node: u32) -> u32 {
+        while parent[node as usize] != node {
+            parent[node as usize] = parent[parent[node as usize] as usize];
+            node = parent[node as usize];
         }
-        parent[x as usize]
+        node
     }
 
-    fn union(parent: &mut Vec<u32>, a: u32, b: u32) {
-        let ra = find(parent, a);
-        let rb = find(parent, b);
-        if ra != rb {
-            parent[ra as usize] = rb;
+    fn union(parent: &mut [u32], rank: &mut [u8], left: u32, right: u32) {
+        let left = find(parent, left);
+        let right = find(parent, right);
+        if left == right {
+            return;
+        }
+        match rank[left as usize].cmp(&rank[right as usize]) {
+            std::cmp::Ordering::Less => parent[left as usize] = right,
+            std::cmp::Ordering::Greater => parent[right as usize] = left,
+            std::cmp::Ordering::Equal => {
+                parent[right as usize] = left;
+                rank[left as usize] += 1;
+            }
         }
     }
 
-    for src in 0..n as u32 {
-        for (_, dst) in csr.iter_out_edges_raw(src) {
-            union(&mut parent, src, dst);
+    if let Some((offsets, targets)) = csr.compacted_out_adjacency_raw() {
+        for source in 0..n {
+            for &destination in &targets[offsets[source] as usize..offsets[source + 1] as usize] {
+                union(&mut parent, &mut rank, source as u32, destination);
+            }
+        }
+    } else {
+        for source in 0..n as u32 {
+            for (_, destination) in csr.iter_out_edges_raw(source) {
+                union(&mut parent, &mut rank, source, destination);
+            }
         }
     }
 
     (0..n)
-        .map(|i| {
-            let comp = find(&mut parent, i as u32) as i64;
+        .map(|node| {
+            let component = find(&mut parent, node as u32) as i64;
             vec![
-                Value::String(csr.node_name_raw(i as u32).to_string()),
-                Value::Integer(comp),
+                Value::String(csr.node_name_raw(node as u32).to_string()),
+                Value::Integer(component),
             ]
         })
         .collect()
@@ -399,19 +523,46 @@ fn most_frequent_label(labels: &mut [u32], priority: &[u32]) -> Option<u32> {
 
 fn lcc(csr: &CsrIndex) -> Vec<Vec<Value>> {
     let n = csr.node_count();
-    let mut adjacency = vec![Vec::<u32>::new(); n];
-    for source in 0..n as u32 {
-        for (_, destination) in csr.iter_out_edges_raw(source) {
-            if source != destination {
-                adjacency[source as usize].push(destination);
-                adjacency[destination as usize].push(source);
+    let adjacency: Vec<Vec<u32>> =
+        if let (Some((out_offsets, out_targets)), Some((in_offsets, in_targets))) = (
+            csr.compacted_out_adjacency_raw(),
+            csr.compacted_in_adjacency_raw(),
+        ) {
+            (0..n)
+                .map(|node| {
+                    let mut neighbors = Vec::with_capacity(
+                        out_offsets[node + 1] as usize - out_offsets[node] as usize
+                            + in_offsets[node + 1] as usize
+                            - in_offsets[node] as usize,
+                    );
+                    neighbors.extend_from_slice(
+                        &out_targets[out_offsets[node] as usize..out_offsets[node + 1] as usize],
+                    );
+                    neighbors.extend_from_slice(
+                        &in_targets[in_offsets[node] as usize..in_offsets[node + 1] as usize],
+                    );
+                    neighbors.retain(|neighbor| *neighbor != node as u32);
+                    neighbors.sort_unstable();
+                    neighbors.dedup();
+                    neighbors
+                })
+                .collect()
+        } else {
+            let mut adjacency = vec![Vec::<u32>::new(); n];
+            for source in 0..n as u32 {
+                for (_, destination) in csr.iter_out_edges_raw(source) {
+                    if source != destination {
+                        adjacency[source as usize].push(destination);
+                        adjacency[destination as usize].push(source);
+                    }
+                }
             }
-        }
-    }
-    for neighbors in &mut adjacency {
-        neighbors.sort_unstable();
-        neighbors.dedup();
-    }
+            for neighbors in &mut adjacency {
+                neighbors.sort_unstable();
+                neighbors.dedup();
+            }
+            adjacency
+        };
     let degrees: Vec<usize> = adjacency.iter().map(Vec::len).collect();
 
     // Direct every edge from the lower (degree, id) endpoint to the higher
@@ -450,6 +601,43 @@ fn lcc(csr: &CsrIndex) -> Vec<Vec<Value>> {
         .collect()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+static ACTIVE_LCC_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(not(target_arch = "wasm32"))]
+struct LccWorkerPermits(usize);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl LccWorkerPermits {
+    fn reserve(requested: usize) -> Self {
+        const MAX_PROCESS_WORKERS: usize = 32;
+        let mut active = ACTIVE_LCC_WORKERS.load(AtomicOrdering::Acquire);
+        loop {
+            let granted = requested.min(MAX_PROCESS_WORKERS.saturating_sub(active));
+            match ACTIVE_LCC_WORKERS.compare_exchange_weak(
+                active,
+                active + granted,
+                AtomicOrdering::AcqRel,
+                AtomicOrdering::Acquire,
+            ) {
+                Ok(_) => return Self(granted),
+                Err(updated) => active = updated,
+            }
+        }
+    }
+
+    fn workers(&self) -> usize {
+        self.0
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for LccWorkerPermits {
+    fn drop(&mut self) {
+        ACTIVE_LCC_WORKERS.fetch_sub(self.0, AtomicOrdering::Release);
+    }
+}
+
 fn count_oriented_triangles(oriented: &[Vec<u32>]) -> Vec<usize> {
     #[cfg(target_arch = "wasm32")]
     {
@@ -458,8 +646,6 @@ fn count_oriented_triangles(oriented: &[Vec<u32>]) -> Vec<usize> {
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-
         const MAX_WORKERS: usize = 32;
         const COUNTER_BUDGET_BYTES: usize = 128 * 1024 * 1024;
         let bytes_per_counter = oriented
@@ -468,52 +654,54 @@ fn count_oriented_triangles(oriented: &[Vec<u32>]) -> Vec<usize> {
             .unwrap_or(usize::MAX)
             .max(1);
         let memory_bounded_workers = (COUNTER_BUDGET_BYTES / bytes_per_counter).max(1);
-        let workers = std::thread::available_parallelism()
+        let desired_workers = std::thread::available_parallelism()
             .map_or(1, usize::from)
             .min(MAX_WORKERS)
             .min(memory_bounded_workers)
             .min(oriented.len().max(1));
-        if workers == 1 {
-            return count_oriented_triangle_range(oriented, 0, oriented.len());
-        }
-
-        const CHUNK_SIZE: usize = 64;
-        let next = AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..workers)
-                .map(|_| {
-                    let next = &next;
-                    scope.spawn(move || {
-                        let mut local = vec![0usize; oriented.len()];
-                        loop {
-                            let start = next.fetch_add(CHUNK_SIZE, AtomicOrdering::Relaxed);
-                            if start >= oriented.len() {
-                                break;
-                            }
-                            let end = (start + CHUNK_SIZE).min(oriented.len());
-                            count_oriented_triangle_range_into(oriented, start, end, &mut local);
-                        }
-                        local
-                    })
-                })
-                .collect();
-            let mut totals = vec![0usize; oriented.len()];
-            for handle in handles {
-                let local = handle.join().expect("LCC worker panicked");
-                for (total, count) in totals.iter_mut().zip(local) {
-                    *total += count;
-                }
-            }
-            totals
-        })
+        let permits = LccWorkerPermits::reserve(desired_workers);
+        count_oriented_triangles_native(oriented, permits.workers())
     }
 }
 
-fn count_oriented_triangle_range(
-    oriented: &[Vec<u32>],
-    start: usize,
-    end: usize,
-) -> Vec<usize> {
+#[cfg(not(target_arch = "wasm32"))]
+fn count_oriented_triangles_native(oriented: &[Vec<u32>], workers: usize) -> Vec<usize> {
+    if workers <= 1 {
+        return count_oriented_triangle_range(oriented, 0, oriented.len());
+    }
+
+    const CHUNK_SIZE: usize = 64;
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let next = &next;
+                scope.spawn(move || {
+                    let mut local = vec![0usize; oriented.len()];
+                    loop {
+                        let start = next.fetch_add(CHUNK_SIZE, AtomicOrdering::Relaxed);
+                        if start >= oriented.len() {
+                            break;
+                        }
+                        let end = (start + CHUNK_SIZE).min(oriented.len());
+                        count_oriented_triangle_range_into(oriented, start, end, &mut local);
+                    }
+                    local
+                })
+            })
+            .collect();
+        let mut totals = vec![0usize; oriented.len()];
+        for handle in handles {
+            let local = handle.join().expect("LCC worker panicked");
+            for (total, count) in totals.iter_mut().zip(local) {
+                *total += count;
+            }
+        }
+        totals
+    })
+}
+
+fn count_oriented_triangle_range(oriented: &[Vec<u32>], start: usize, end: usize) -> Vec<usize> {
     let mut triangles = vec![0usize; oriented.len()];
     count_oriented_triangle_range_into(oriented, start, end, &mut triangles);
     triangles
@@ -570,24 +758,30 @@ impl PartialOrd for QueueEntry {
     }
 }
 
-fn sssp(csr: &CsrIndex, params: &AlgoParams) -> Vec<Vec<Value>> {
+fn sssp(csr: &CsrIndex, params: &AlgoParams) -> Result<Vec<Vec<Value>>, LiteError> {
     let n = csr.node_count();
     if n == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
+    let compacted_out = csr.compacted_out_weighted_adjacency_raw();
+    validate_sssp_weights(csr, compacted_out)?;
     let src_name = params.source_node.as_deref().unwrap_or("");
     let Some(src_id) = csr.node_id_raw(src_name) else {
-        return (0..n)
+        return Ok((0..n)
             .map(|i| {
                 vec![
                     Value::String(csr.node_name_raw(i as u32).to_string()),
                     Value::Float(f64::INFINITY),
                 ]
             })
-            .collect();
+            .collect());
     };
 
     let both = params.direction.as_deref() == Some("both");
+    let compacted_in = both
+        .then(|| csr.compacted_in_weighted_adjacency_raw())
+        .flatten();
+    let use_compacted = compacted_out.is_some() && (!both || compacted_in.is_some());
     let mut distances = vec![f64::INFINITY; n];
     distances[src_id as usize] = 0.0;
     let mut queue = BinaryHeap::new();
@@ -600,44 +794,127 @@ fn sssp(csr: &CsrIndex, params: &AlgoParams) -> Vec<Vec<Value>> {
         if distance > distances[node as usize] {
             continue;
         }
-        let mut edges: HashMap<u32, f64> = HashMap::new();
-        for (_, destination, weight) in csr.iter_out_edges_weighted_raw(node) {
-            edges
-                .entry(destination)
-                .and_modify(|current| *current = current.min(weight))
-                .or_insert(weight);
-        }
-        if both {
-            for (_, source, weight) in csr.iter_in_edges_weighted_raw(node) {
-                edges
-                    .entry(source)
-                    .and_modify(|current| *current = current.min(weight))
-                    .or_insert(weight);
+        if use_compacted {
+            let (offsets, targets, weights) = compacted_out.expect("checked above");
+            relax_compacted_lite(
+                node,
+                distance,
+                offsets,
+                targets,
+                weights,
+                &mut distances,
+                &mut queue,
+            );
+            if both {
+                let (offsets, targets, weights) = compacted_in.expect("checked above");
+                relax_compacted_lite(
+                    node,
+                    distance,
+                    offsets,
+                    targets,
+                    weights,
+                    &mut distances,
+                    &mut queue,
+                );
             }
-        }
-        for (destination, weight) in edges {
-            if !weight.is_finite() || weight < 0.0 {
-                continue;
+        } else {
+            for (_, destination, weight) in csr.iter_out_edges_weighted_raw(node) {
+                relax_lite(destination, weight, distance, &mut distances, &mut queue);
             }
-            let candidate = distance + weight;
-            if candidate < distances[destination as usize] {
-                distances[destination as usize] = candidate;
-                queue.push(QueueEntry {
-                    distance: candidate,
-                    node: destination,
-                });
+            if both {
+                for (_, source, weight) in csr.iter_in_edges_weighted_raw(node) {
+                    relax_lite(source, weight, distance, &mut distances, &mut queue);
+                }
             }
         }
     }
 
-    (0..n)
+    Ok((0..n)
         .map(|i| {
             vec![
                 Value::String(csr.node_name_raw(i as u32).to_string()),
                 Value::Float(distances[i]),
             ]
         })
-        .collect()
+        .collect())
+}
+
+fn validate_sssp_weights(
+    csr: &CsrIndex,
+    compacted: Option<(&[u32], &[u32], Option<&[f64]>)>,
+) -> Result<(), LiteError> {
+    if !csr.has_weights() {
+        return Ok(());
+    }
+    if let Some((offsets, _targets, Some(weights))) = compacted {
+        for node in 0..csr.node_count() {
+            for &weight in &weights[offsets[node] as usize..offsets[node + 1] as usize] {
+                if !weight.is_finite() || weight < 0.0 {
+                    return Err(invalid_sssp_weight(csr, node, weight));
+                }
+            }
+        }
+    } else {
+        for node in 0..csr.node_count() {
+            for (_label, _destination, weight) in csr.iter_out_edges_weighted_raw(node as u32) {
+                if !weight.is_finite() || weight < 0.0 {
+                    return Err(invalid_sssp_weight(csr, node, weight));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn invalid_sssp_weight(csr: &CsrIndex, node: usize, weight: f64) -> LiteError {
+    LiteError::Storage {
+        detail: format!(
+            "SSSP requires finite non-negative edge weights, found {weight} on edge from '{}'",
+            csr.node_name_raw(node as u32)
+        ),
+    }
+}
+
+fn relax_compacted_lite(
+    node: u32,
+    distance: f64,
+    offsets: &[u32],
+    targets: &[u32],
+    weights: Option<&[f64]>,
+    distances: &mut [f64],
+    queue: &mut BinaryHeap<QueueEntry>,
+) {
+    let start = offsets[node as usize] as usize;
+    let end = offsets[node as usize + 1] as usize;
+    for edge in start..end {
+        relax_lite(
+            targets[edge],
+            weights.map_or(1.0, |weights| weights[edge]),
+            distance,
+            distances,
+            queue,
+        );
+    }
+}
+
+fn relax_lite(
+    destination: u32,
+    weight: f64,
+    distance: f64,
+    distances: &mut [f64],
+    queue: &mut BinaryHeap<QueueEntry>,
+) {
+    if !weight.is_finite() || weight < 0.0 {
+        return;
+    }
+    let candidate = distance + weight;
+    if candidate < distances[destination as usize] {
+        distances[destination as usize] = candidate;
+        queue.push(QueueEntry {
+            distance: candidate,
+            node: destination,
+        });
+    }
 }
 
 // ── Betweenness Centrality (Brandes) ─────────────────────────────────────────
@@ -1119,6 +1396,28 @@ mod tests {
     }
 
     #[test]
+    fn sssp_rejects_invalid_weights_in_buffered_and_compacted_graphs() {
+        for (weight, compact, source) in [
+            (f64::NAN, false, "a"),
+            (-1.0, true, "a"),
+            (f64::INFINITY, true, "missing"),
+        ] {
+            let mut csr = CsrIndex::new();
+            csr.add_edge_weighted("a", "E", "b", weight).unwrap();
+            if compact {
+                csr.compact().unwrap();
+            }
+            let params = AlgoParams {
+                collection: "g".to_string(),
+                source_node: Some(source.to_string()),
+                ..Default::default()
+            };
+            let error = run_algo(&make_csr_map(csr), GraphAlgorithm::Sssp, &params).unwrap_err();
+            assert!(error.to_string().contains("finite non-negative"));
+        }
+    }
+
+    #[test]
     fn label_propagation_is_synchronous_and_breaks_ties_by_smallest_label() {
         let mut csr = CsrIndex::new();
         csr.add_edge("a", "E", "b").unwrap();
@@ -1159,6 +1458,13 @@ mod tests {
         ];
         let best = most_frequent_label(&mut labels, &priority).unwrap();
         assert_eq!(csr.node_name_raw(best), "06");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn zero_lcc_workers_fall_back_to_exact_counting() {
+        let oriented = vec![vec![1, 2], vec![2], vec![]];
+        assert_eq!(count_oriented_triangles_native(&oriented, 0), vec![1, 1, 1]);
     }
 
     #[test]

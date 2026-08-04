@@ -2,7 +2,6 @@
 
 //! Feature-gated embedded runner support for LDBC Graphalytics.
 
-use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -148,7 +147,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 .ok_or_else(|| LiteError::Storage {
                     detail: "graphalytics CSR missing after import".to_string(),
                 })?
-                .compact()
+                .compact_initial_build()
                 .map_err(graph_error)?;
         }
         Ok(ImportMetrics {
@@ -240,8 +239,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
         Ok(result)
     }
 
-    /// Run unweighted BFS over the undirected projection.
-    pub fn graphalytics_bfs(&self, source: &str) -> Result<QueryResult, LiteError> {
+    /// Compute unweighted BFS distances over the undirected projection.
+    pub fn graphalytics_bfs_distances(&self, source: &str) -> Result<Vec<i64>, LiteError> {
         let map = self.csr.lock().map_err(|_| LiteError::LockPoisoned)?;
         let csr = map.get(COLLECTION).ok_or_else(|| LiteError::Storage {
             detail: "graphalytics CSR is not loaded".to_string(),
@@ -249,21 +248,19 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let source_id = csr.node_id_raw(source).ok_or_else(|| LiteError::Storage {
             detail: format!("source vertex '{source}' is absent"),
         })?;
-        let mut distance = vec![-1i64; csr.node_count()];
-        distance[source_id as usize] = 0;
-        let mut queue = VecDeque::from([source_id]);
-        while let Some(node) = queue.pop_front() {
-            let next_distance = distance[node as usize] + 1;
-            let neighbors = csr
-                .iter_out_edges_raw(node)
-                .map(|(_, destination)| destination)
-                .chain(csr.iter_in_edges_raw(node).map(|(_, source)| source));
-            for neighbor in neighbors {
-                if distance[neighbor as usize] < 0 {
-                    distance[neighbor as usize] = next_distance;
-                    queue.push_back(neighbor);
-                }
-            }
+        Ok(csr.bfs_both_distances_raw(source_id))
+    }
+
+    /// Materialize previously computed BFS distances as a query result.
+    pub fn graphalytics_bfs_result(&self, distance: Vec<i64>) -> Result<QueryResult, LiteError> {
+        let map = self.csr.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let csr = map.get(COLLECTION).ok_or_else(|| LiteError::Storage {
+            detail: "graphalytics CSR is not loaded".to_string(),
+        })?;
+        if distance.len() != csr.node_count() {
+            return Err(LiteError::Storage {
+                detail: "Graphalytics BFS distance count does not match the CSR".to_string(),
+            });
         }
         Ok(QueryResult {
             columns: vec!["node_id".to_string(), "distance".to_string()],
@@ -279,6 +276,11 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 .collect(),
             rows_affected: 0,
         })
+    }
+
+    /// Run and materialize BFS for callers that do not need separate timing.
+    pub fn graphalytics_bfs(&self, source: &str) -> Result<QueryResult, LiteError> {
+        self.graphalytics_bfs_result(self.graphalytics_bfs_distances(source)?)
     }
 }
 
