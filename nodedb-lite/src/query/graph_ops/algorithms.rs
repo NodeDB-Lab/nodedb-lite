@@ -260,32 +260,48 @@ fn label_propagation(csr: &CsrIndex, params: &AlgoParams) -> Vec<Vec<Value>> {
 
 fn lcc(csr: &CsrIndex) -> Vec<Vec<Value>> {
     let n = csr.node_count();
-    let adjacency: Vec<Vec<u32>> = (0..n as u32)
-        .map(|node| both_neighbors(csr, node))
+    let mut adjacency = vec![Vec::<u32>::new(); n];
+    for source in 0..n as u32 {
+        for (_, destination) in csr.iter_out_edges_raw(source) {
+            if source != destination {
+                adjacency[source as usize].push(destination);
+                adjacency[destination as usize].push(source);
+            }
+        }
+    }
+    for neighbors in &mut adjacency {
+        neighbors.sort_unstable();
+        neighbors.dedup();
+    }
+    let degrees: Vec<usize> = adjacency.iter().map(Vec::len).collect();
+
+    // Direct every edge from the lower (degree, id) endpoint to the higher
+    // endpoint. Enumerating wedges in this acyclic orientation discovers each
+    // triangle exactly once and avoids repeating an induced-edge scan for all
+    // three of its vertices.
+    let oriented: Vec<Vec<u32>> = adjacency
+        .iter()
+        .enumerate()
+        .map(|(node, neighbors)| {
+            neighbors
+                .iter()
+                .copied()
+                .filter(|neighbor| {
+                    let neighbor = *neighbor as usize;
+                    (degrees[node], node) < (degrees[neighbor], neighbor)
+                })
+                .collect()
+        })
         .collect();
+    let triangles = count_oriented_triangles(&oriented);
+
     (0..n)
         .map(|i| {
-            let neighbors = &adjacency[i];
-            let degree = neighbors.len();
+            let degree = degrees[i];
             let coefficient = if degree < 2 {
                 0.0
             } else {
-                // Count edges induced by N(node) using sorted, contiguous
-                // adjacency and binary search. Each neighbor edge is visited
-                // once (`left < right`), avoiding both quadratic pair probing
-                // and random-access hash lookups on the hot path.
-                let mut triangles = 0usize;
-                for &left in neighbors {
-                    for &right in adjacency[left as usize]
-                        .iter()
-                        .skip_while(|right| **right <= left)
-                    {
-                        if neighbors.binary_search(&right).is_ok() {
-                            triangles += 1;
-                        }
-                    }
-                }
-                2.0 * triangles as f64 / (degree * (degree - 1)) as f64
+                2.0 * triangles[i] as f64 / (degree * (degree - 1)) as f64
             };
             vec![
                 Value::String(csr.node_name_raw(i as u32).to_string()),
@@ -293,6 +309,95 @@ fn lcc(csr: &CsrIndex) -> Vec<Vec<Value>> {
             ]
         })
         .collect()
+}
+
+fn count_oriented_triangles(oriented: &[Vec<u32>]) -> Vec<usize> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        return count_oriented_triangle_range(oriented, 0, oriented.len());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        const MAX_WORKERS: usize = 32;
+        const COUNTER_BUDGET_BYTES: usize = 128 * 1024 * 1024;
+        let bytes_per_counter = oriented
+            .len()
+            .checked_mul(std::mem::size_of::<usize>())
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let memory_bounded_workers = (COUNTER_BUDGET_BYTES / bytes_per_counter).max(1);
+        let workers = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(MAX_WORKERS)
+            .min(memory_bounded_workers)
+            .min(oriented.len().max(1));
+        if workers == 1 {
+            return count_oriented_triangle_range(oriented, 0, oriented.len());
+        }
+
+        const CHUNK_SIZE: usize = 64;
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    let next = &next;
+                    scope.spawn(move || {
+                        let mut local = vec![0usize; oriented.len()];
+                        loop {
+                            let start = next.fetch_add(CHUNK_SIZE, AtomicOrdering::Relaxed);
+                            if start >= oriented.len() {
+                                break;
+                            }
+                            let end = (start + CHUNK_SIZE).min(oriented.len());
+                            count_oriented_triangle_range_into(oriented, start, end, &mut local);
+                        }
+                        local
+                    })
+                })
+                .collect();
+            let mut totals = vec![0usize; oriented.len()];
+            for handle in handles {
+                let local = handle.join().expect("LCC worker panicked");
+                for (total, count) in totals.iter_mut().zip(local) {
+                    *total += count;
+                }
+            }
+            totals
+        })
+    }
+}
+
+fn count_oriented_triangle_range(
+    oriented: &[Vec<u32>],
+    start: usize,
+    end: usize,
+) -> Vec<usize> {
+    let mut triangles = vec![0usize; oriented.len()];
+    count_oriented_triangle_range_into(oriented, start, end, &mut triangles);
+    triangles
+}
+
+fn count_oriented_triangle_range_into(
+    oriented: &[Vec<u32>],
+    start: usize,
+    end: usize,
+    triangles: &mut [usize],
+) {
+    for left in start..end {
+        let middle_neighbors = &oriented[left];
+        for &middle in middle_neighbors {
+            for &right in &oriented[middle as usize] {
+                if middle_neighbors.binary_search(&right).is_ok() {
+                    triangles[left] += 1;
+                    triangles[middle as usize] += 1;
+                    triangles[right as usize] += 1;
+                }
+            }
+        }
+    }
 }
 
 // ── SSSP (Dijkstra) ──────────────────────────────────────────────────────────
@@ -913,6 +1018,47 @@ mod tests {
             .find(|row| row[0] == Value::String("a".to_string()))
             .map(|row| row[1].clone());
         assert_eq!(coefficient, Some(Value::Float(1.0 / 3.0)));
+    }
+
+    #[test]
+    fn lcc_deduplicates_parallel_reciprocal_and_self_loop_edges() {
+        let mut csr = make_triangle_csr();
+        csr.add_edge("a", "duplicate", "b").unwrap();
+        csr.add_edge("b", "reverse", "a").unwrap();
+        csr.add_edge("a", "self", "a").unwrap();
+        let result = run_algo(
+            &make_csr_map(csr),
+            GraphAlgorithm::Lcc,
+            &default_params("g"),
+        )
+        .unwrap();
+        for row in result.rows {
+            assert_eq!(row[1], Value::Float(1.0));
+        }
+    }
+
+    #[test]
+    fn lcc_counts_overlapping_triangles_once() {
+        let mut csr = CsrIndex::new();
+        csr.add_edge("a", "E", "b").unwrap();
+        csr.add_edge("a", "E", "c").unwrap();
+        csr.add_edge("b", "E", "c").unwrap();
+        csr.add_edge("a", "E", "d").unwrap();
+        csr.add_edge("b", "E", "d").unwrap();
+        let result = run_algo(
+            &make_csr_map(csr),
+            GraphAlgorithm::Lcc,
+            &default_params("g"),
+        )
+        .unwrap();
+        for row in result.rows {
+            let expected = match &row[0] {
+                Value::String(node) if node == "a" || node == "b" => 2.0 / 3.0,
+                Value::String(_) => 1.0,
+                _ => panic!("expected node name"),
+            };
+            assert_eq!(row[1], Value::Float(expected));
+        }
     }
 
     #[test]
