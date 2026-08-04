@@ -56,15 +56,10 @@ pub fn run_algo(
 }
 
 fn both_neighbors(csr: &CsrIndex, node: u32) -> Vec<u32> {
-    let mut neighbors: HashSet<u32> = csr
-        .iter_out_edges_raw(node)
+    csr.iter_out_edges_raw(node)
         .map(|(_, destination)| destination)
         .chain(csr.iter_in_edges_raw(node).map(|(_, source)| source))
-        .collect();
-    neighbors.remove(&node);
-    let mut neighbors: Vec<u32> = neighbors.into_iter().collect();
-    neighbors.sort_unstable();
-    neighbors
+        .collect()
 }
 
 // ── PageRank ─────────────────────────────────────────────────────────────────
@@ -109,32 +104,57 @@ fn pagerank(csr: &CsrIndex, params: &AlgoParams) -> Vec<Vec<Value>> {
     // Initial rank distribution equals the teleport distribution.
     let mut rank = teleport.clone();
     let both = params.direction.as_deref() == Some("both");
-    let adjacency: Vec<Vec<u32>> = (0..n as u32)
-        .map(|node| {
-            if both {
-                both_neighbors(csr, node)
-            } else {
-                csr.iter_out_edges_raw(node).map(|(_, dst)| dst).collect()
-            }
-        })
-        .collect();
+    let adjacency = both.then(|| {
+        (0..n as u32)
+            .map(|node| both_neighbors(csr, node))
+            .collect::<Vec<Vec<u32>>>()
+    });
 
+    let mut new_rank = vec![0.0f64; n];
+    let mut contributions = both.then(|| vec![0.0f64; n]);
     for _ in 0..max_iter {
-        let dangling_mass: f64 = rank
-            .iter()
-            .zip(&adjacency)
-            .filter_map(|(node_rank, neighbors)| neighbors.is_empty().then_some(*node_rank))
-            .sum();
-        let mut new_rank: Vec<f64> = (0..n)
-            .map(|i| (1.0 - d + d * dangling_mass) * teleport[i])
-            .collect();
-        for (src, neighbors) in adjacency.iter().enumerate() {
-            if neighbors.is_empty() {
-                continue;
+        let dangling_mass: f64 = if let Some(adjacency) = &adjacency {
+            rank.iter()
+                .zip(adjacency)
+                .filter_map(|(node_rank, neighbors)| neighbors.is_empty().then_some(*node_rank))
+                .sum()
+        } else {
+            rank.iter()
+                .enumerate()
+                .filter_map(|(node, node_rank)| {
+                    (csr.out_degree_raw(node as u32) == 0).then_some(*node_rank)
+                })
+                .sum()
+        };
+        let base_scale = 1.0 - d + d * dangling_mass;
+        if let (Some(adjacency), Some(contributions)) = (&adjacency, contributions.as_mut()) {
+            for (node, neighbors) in adjacency.iter().enumerate() {
+                contributions[node] = if neighbors.is_empty() {
+                    0.0
+                } else {
+                    d * rank[node] / neighbors.len() as f64
+                };
             }
-            let contribution = d * rank[src] / neighbors.len() as f64;
-            for &destination in neighbors {
-                new_rank[destination as usize] += contribution;
+            pull_pagerank_iteration(
+                adjacency,
+                contributions,
+                &teleport,
+                &mut new_rank,
+                base_scale,
+            );
+        } else {
+            for (slot, seed) in new_rank.iter_mut().zip(&teleport) {
+                *slot = base_scale * seed;
+            }
+            for src in 0..n as u32 {
+                let degree = csr.out_degree_raw(src);
+                if degree == 0 {
+                    continue;
+                }
+                let contribution = d * rank[src as usize] / degree as f64;
+                for (_, destination) in csr.iter_out_edges_raw(src) {
+                    new_rank[destination as usize] += contribution;
+                }
             }
         }
         let delta: f64 = rank
@@ -142,7 +162,7 @@ fn pagerank(csr: &CsrIndex, params: &AlgoParams) -> Vec<Vec<Value>> {
             .zip(new_rank.iter())
             .map(|(a, b)| (a - b).abs())
             .sum();
-        rank = new_rank;
+        std::mem::swap(&mut rank, &mut new_rank);
         if delta < tol {
             break;
         }
@@ -156,6 +176,97 @@ fn pagerank(csr: &CsrIndex, params: &AlgoParams) -> Vec<Vec<Value>> {
             ]
         })
         .collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+static ACTIVE_PAGERANK_WORKERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(not(target_arch = "wasm32"))]
+struct PageRankWorkerPermits(usize);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for PageRankWorkerPermits {
+    fn drop(&mut self) {
+        ACTIVE_PAGERANK_WORKERS.fetch_sub(self.0, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn reserve_pagerank_workers(requested: usize) -> PageRankWorkerPermits {
+    const MAX_PROCESS_WORKERS: usize = 31;
+    let mut active = ACTIVE_PAGERANK_WORKERS.load(std::sync::atomic::Ordering::Acquire);
+    loop {
+        let granted = requested.min(MAX_PROCESS_WORKERS.saturating_sub(active));
+        match ACTIVE_PAGERANK_WORKERS.compare_exchange_weak(
+            active,
+            active + granted,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        ) {
+            Ok(_) => return PageRankWorkerPermits(granted),
+            Err(observed) => active = observed,
+        }
+    }
+}
+
+fn pull_pagerank_iteration(
+    adjacency: &[Vec<u32>],
+    contributions: &[f64],
+    teleport: &[f64],
+    output: &mut [f64],
+    base_scale: f64,
+) {
+    #[cfg(target_arch = "wasm32")]
+    pull_pagerank_range(adjacency, contributions, teleport, output, 0, base_scale);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let desired_workers = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(32)
+            .min(output.len().max(1));
+        let permits = reserve_pagerank_workers(desired_workers.saturating_sub(1));
+        let workers = permits.0;
+        if workers <= 1 {
+            pull_pagerank_range(adjacency, contributions, teleport, output, 0, base_scale);
+            return;
+        }
+        let chunk_size = output.len().div_ceil(workers);
+        std::thread::scope(|scope| {
+            for (chunk_index, chunk) in output.chunks_mut(chunk_size).enumerate() {
+                let start = chunk_index * chunk_size;
+                scope.spawn(move || {
+                    pull_pagerank_range(
+                        adjacency,
+                        contributions,
+                        teleport,
+                        chunk,
+                        start,
+                        base_scale,
+                    );
+                });
+            }
+        });
+    }
+}
+
+fn pull_pagerank_range(
+    adjacency: &[Vec<u32>],
+    contributions: &[f64],
+    teleport: &[f64],
+    output: &mut [f64],
+    start: usize,
+    base_scale: f64,
+) {
+    for (offset, slot) in output.iter_mut().enumerate() {
+        let node = start + offset;
+        *slot = base_scale * teleport[node]
+            + adjacency[node]
+                .iter()
+                .map(|neighbor| contributions[*neighbor as usize])
+                .sum::<f64>();
+    }
 }
 
 // ── WCC (union-find) ─────────────────────────────────────────────────────────
@@ -211,36 +322,22 @@ fn label_propagation(csr: &CsrIndex, params: &AlgoParams) -> Vec<Vec<Value>> {
     let adjacency: Vec<Vec<u32>> = (0..n as u32)
         .map(|node| both_neighbors(csr, node))
         .collect();
+    let label_priority = label_priorities(csr, n);
+    let mut next_labels = labels.clone();
+    let mut neighbor_labels = Vec::new();
 
     for _ in 0..max_iter {
-        let mut next_labels = labels.clone();
+        next_labels.copy_from_slice(&labels);
         let mut changed = false;
         for (node, neighbors) in adjacency.iter().enumerate() {
-            let mut frequencies: HashMap<u32, usize> = HashMap::new();
-            for &neighbor in neighbors {
-                *frequencies.entry(labels[neighbor as usize]).or_insert(0) += 1;
-            }
-            if let Some(best) = frequencies
-                .into_iter()
-                .max_by(|(left_label, left_count), (right_label, right_count)| {
-                    left_count.cmp(right_count).then_with(|| {
-                        let left_name = csr.node_name_raw(*left_label);
-                        let right_name = csr.node_name_raw(*right_label);
-                        let left_numeric = left_name.parse::<i128>();
-                        let right_numeric = right_name.parse::<i128>();
-                        match (left_numeric, right_numeric) {
-                            (Ok(left), Ok(right)) => right.cmp(&left),
-                            _ => right_name.cmp(left_name),
-                        }
-                    })
-                })
-                .map(|(label, _)| label)
-            {
+            neighbor_labels.clear();
+            neighbor_labels.extend(neighbors.iter().map(|neighbor| labels[*neighbor as usize]));
+            if let Some(best) = most_frequent_label(&mut neighbor_labels, &label_priority) {
                 next_labels[node] = best;
                 changed |= best != labels[node];
             }
         }
-        labels = next_labels;
+        std::mem::swap(&mut labels, &mut next_labels);
         if !changed {
             break;
         }
@@ -254,6 +351,48 @@ fn label_propagation(csr: &CsrIndex, params: &AlgoParams) -> Vec<Vec<Value>> {
             ]
         })
         .collect()
+}
+
+fn label_priorities(csr: &CsrIndex, n: usize) -> Vec<u32> {
+    let mut ordered: Vec<u32> = (0..n as u32).collect();
+    ordered.sort_unstable_by(|left, right| {
+        let left_name = csr.node_name_raw(*left);
+        let right_name = csr.node_name_raw(*right);
+        match (left_name.parse::<i128>(), right_name.parse::<i128>()) {
+            (Ok(left), Ok(right)) => left.cmp(&right).then_with(|| left_name.cmp(right_name)),
+            _ => left_name.cmp(right_name),
+        }
+    });
+    let mut priority = vec![0u32; n];
+    for (rank, label) in ordered.into_iter().enumerate() {
+        priority[label as usize] = rank as u32;
+    }
+    priority
+}
+
+fn most_frequent_label(labels: &mut [u32], priority: &[u32]) -> Option<u32> {
+    labels.sort_unstable_by_key(|label| priority[*label as usize]);
+    let (&first, rest) = labels.split_first()?;
+    let mut best_label = first;
+    let mut best_count = 1usize;
+    let mut current_label = first;
+    let mut current_count = 1usize;
+    for &label in rest {
+        if label == current_label {
+            current_count += 1;
+        } else {
+            if current_count > best_count {
+                best_label = current_label;
+                best_count = current_count;
+            }
+            current_label = label;
+            current_count = 1;
+        }
+    }
+    if current_count > best_count {
+        best_label = current_label;
+    }
+    Some(best_label)
 }
 
 // ── LCC (local clustering coefficient) ───────────────────────────────────────
@@ -921,6 +1060,26 @@ mod tests {
     }
 
     #[test]
+    fn pagerank_both_treats_one_stored_edge_as_undirected() {
+        let mut csr = CsrIndex::new();
+        csr.add_edge("a", "E", "b").unwrap();
+        let params = AlgoParams {
+            collection: "g".to_string(),
+            direction: Some("both".to_string()),
+            max_iterations: Some(10),
+            tolerance: Some(f64::MIN_POSITIVE),
+            ..Default::default()
+        };
+        let result = run_algo(&make_csr_map(csr), GraphAlgorithm::PageRank, &params).unwrap();
+        for row in result.rows {
+            let Value::Float(rank) = row[1] else {
+                panic!("expected rank");
+            };
+            assert!((rank - 0.5).abs() < 1e-12);
+        }
+    }
+
+    #[test]
     fn sssp_uses_edge_weights() {
         let mut csr = CsrIndex::new();
         csr.add_edge_weighted("a", "E", "c", 10.0).unwrap();
@@ -984,6 +1143,22 @@ mod tests {
             })
             .collect();
         assert_eq!(labels, vec![1, 0, 1]);
+    }
+
+    #[test]
+    fn label_propagation_priority_uses_numeric_then_lexical_order() {
+        let mut csr = CsrIndex::new();
+        csr.add_node("6").unwrap();
+        csr.add_node("06").unwrap();
+        csr.add_node("41").unwrap();
+        let priority = label_priorities(&csr, 3);
+        let mut labels = [
+            csr.node_id_raw("41").unwrap(),
+            csr.node_id_raw("6").unwrap(),
+            csr.node_id_raw("06").unwrap(),
+        ];
+        let best = most_frequent_label(&mut labels, &priority).unwrap();
+        assert_eq!(csr.node_name_raw(best), "06");
     }
 
     #[test]
