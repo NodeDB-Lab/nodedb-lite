@@ -35,7 +35,7 @@ inputs:
   pagedb-ref:
     description: Git ref of the pagedb repository to build against.
     required: false
-    default: main
+    default: 216a84d5f271db140f7f8887d0b636e822dfab82
 
 runs:
   using: composite

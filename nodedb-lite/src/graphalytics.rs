@@ -2,37 +2,29 @@
 
 //! Feature-gated embedded runner support for LDBC Graphalytics.
 
-use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::collections::HashMap;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
 
 use nodedb_graph::params::{AlgoParams, GraphAlgorithm};
+use nodedb_types::error::NodeDbResult;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
 use crate::NodeDbLite;
+use crate::config::LiteConfig;
 use crate::engine::graph::index::CsrIndex;
 use crate::error::LiteError;
 use crate::graphalytics_diagnostics::GraphalyticsLoadDiagnostics;
-use crate::graphalytics_external_sort::ExternalEdgeSorter;
-use crate::graphalytics_storage::sorted_edge_write;
+use crate::graphalytics_import::{self, COLLECTION};
 use crate::query::graph_ops::algorithms::{
     materialize_graphalytics_raw, run_algo, run_graphalytics_raw,
     run_graphalytics_raw_prevalidated_sssp, validate_graphalytics_sssp_weights,
 };
-use crate::query::graph_ops::edges::edge_store_key;
 use crate::query::graph_ops::graphalytics_results::GraphalyticsRawValues;
+use crate::storage::encryption::Encryption;
 use crate::storage::engine::StorageEngine;
-
-const COLLECTION: &str = "graphalytics";
-const EDGE_LABEL: &str = "EDGE";
-const BATCH_SIZE: usize = 1_000_000;
-const VERTEX_BATCH_SIZE: usize = 100_000;
-const MAX_VERTEX_ID_BYTES: usize = 512 * 1024 - 64;
-const MAX_EDGE_LINE_BYTES: usize = MAX_VERTEX_ID_BYTES * 2 + 128;
-const MAX_PENDING_ID_BYTES: usize = 256 * 1024 * 1024;
-const MAX_MERGE_KEY_BYTES: usize = 128 * 1024 * 1024;
+use crate::storage::pagedb_storage::PagedbStorageDefault;
 
 /// Opaque dense primitive output passed from timed computation to untimed materialization.
 #[doc(hidden)]
@@ -51,15 +43,22 @@ pub struct ImportMetrics {
 }
 
 impl<S: StorageEngine> NodeDbLite<S> {
-    /// Import a weighted Graphalytics edge-list into the normal durable graph
-    /// table while building the embedded CSR once in process.
+    /// Import a weighted Graphalytics edge-list into an already-open normal
+    /// durable graph table, using bounded ordinary storage batches.
     pub async fn graphalytics_import(
         &self,
         vertex_file: &Path,
         edge_file: &Path,
     ) -> Result<ImportMetrics, LiteError> {
-        self.graphalytics_import_internal(vertex_file, edge_file, None)
-            .await
+        graphalytics_import::import(
+            &*self.storage,
+            &self.csr,
+            vertex_file,
+            edge_file,
+            false,
+            None,
+        )
+        .await
     }
 
     #[doc(hidden)]
@@ -70,219 +69,16 @@ impl<S: StorageEngine> NodeDbLite<S> {
         enabled: bool,
     ) -> Result<(ImportMetrics, Option<GraphalyticsLoadDiagnostics>), LiteError> {
         let mut diagnostics = enabled.then(GraphalyticsLoadDiagnostics::new);
-        let metrics = self
-            .graphalytics_import_internal(vertex_file, edge_file, diagnostics.as_mut())
-            .await?;
+        let metrics = graphalytics_import::import(
+            &*self.storage,
+            &self.csr,
+            vertex_file,
+            edge_file,
+            false,
+            diagnostics.as_mut(),
+        )
+        .await?;
         Ok((metrics, diagnostics))
-    }
-
-    async fn graphalytics_import_internal(
-        &self,
-        vertex_file: &Path,
-        edge_file: &Path,
-        mut diagnostics: Option<&mut GraphalyticsLoadDiagnostics>,
-    ) -> Result<ImportMetrics, LiteError> {
-        let load_start = Instant::now();
-        let mut prepare_duration = Duration::ZERO;
-        let file = File::open(vertex_file).map_err(io_error)?;
-        let mut reader = BufReader::with_capacity(1 << 20, file);
-        let mut line = String::new();
-        let mut pending_vertices = Vec::with_capacity(VERTEX_BATCH_SIZE);
-        let mut pending_vertex_bytes = 0usize;
-        let mut vertex_count = 0usize;
-        let mut vertex_parse_start = diagnostics.is_some().then(Instant::now);
-        while read_bounded_line(&mut reader, &mut line, MAX_VERTEX_ID_BYTES + 2)? != 0 {
-            let vertex = line.trim();
-            if vertex.is_empty() {
-                continue;
-            }
-            validate_vertex_id(vertex, &line)?;
-            if pending_vertices.len() == VERTEX_BATCH_SIZE
-                || (!pending_vertices.is_empty()
-                    && pending_vertex_bytes + vertex.len() > MAX_PENDING_ID_BYTES)
-            {
-                if let (Some(diagnostics), Some(start)) =
-                    (diagnostics.as_deref_mut(), vertex_parse_start)
-                {
-                    diagnostics.add_vertex_parse(start.elapsed());
-                }
-                let staging = self.graphalytics_stage_vertices(&pending_vertices)?;
-                if let Some(diagnostics) = diagnostics.as_deref_mut() {
-                    diagnostics.add_csr_staging(staging);
-                }
-                prepare_duration += staging;
-                pending_vertices.clear();
-                vertex_parse_start = diagnostics.is_some().then(Instant::now);
-                pending_vertex_bytes = 0;
-            }
-            pending_vertex_bytes += vertex.len();
-            pending_vertices.push(vertex.to_string());
-            vertex_count += 1;
-        }
-        if !pending_vertices.is_empty() {
-            if let (Some(diagnostics), Some(start)) =
-                (diagnostics.as_deref_mut(), vertex_parse_start)
-            {
-                diagnostics.add_vertex_parse(start.elapsed());
-            }
-            let staging = self.graphalytics_stage_vertices(&pending_vertices)?;
-            if let Some(diagnostics) = diagnostics.as_deref_mut() {
-                diagnostics.add_csr_staging(staging);
-            }
-            prepare_duration += staging;
-        } else if let (Some(diagnostics), Some(start)) =
-            (diagnostics.as_deref_mut(), vertex_parse_start)
-        {
-            diagnostics.add_vertex_parse(start.elapsed());
-        }
-
-        let file = File::open(edge_file).map_err(io_error)?;
-        let mut reader = BufReader::with_capacity(1 << 20, file);
-        let mut pending = Vec::with_capacity(BATCH_SIZE);
-        let mut pending_id_bytes = 0usize;
-        let mut sorter = ExternalEdgeSorter::new(BATCH_SIZE, diagnostics.is_some())?;
-        let mut edge_count = 0usize;
-        let mut ordinal = 0u64;
-        let mut edge_parse_start = diagnostics.is_some().then(Instant::now);
-        while read_bounded_line(&mut reader, &mut line, MAX_EDGE_LINE_BYTES)? != 0 {
-            let mut fields = line.split_whitespace();
-            let source = fields.next().ok_or_else(|| malformed_edge(&line))?;
-            let destination = fields.next().ok_or_else(|| malformed_edge(&line))?;
-            validate_vertex_id(source, &line)?;
-            validate_vertex_id(destination, &line)?;
-            let weight = fields
-                .next()
-                .ok_or_else(|| malformed_edge(&line))?
-                .parse::<f64>()
-                .map_err(|_| malformed_edge(&line))?;
-            if !weight.is_finite() || weight < 0.0 {
-                return Err(malformed_edge(&line));
-            }
-            let id_bytes = source.len() + destination.len();
-            if pending.len() == BATCH_SIZE
-                || (!pending.is_empty() && pending_id_bytes + id_bytes > MAX_PENDING_ID_BYTES)
-            {
-                if let (Some(diagnostics), Some(start)) =
-                    (diagnostics.as_deref_mut(), edge_parse_start)
-                {
-                    diagnostics.add_edge_parse(start.elapsed());
-                }
-                let staging = self.graphalytics_stage_edges(&pending, &mut sorter, &mut ordinal)?;
-                if let Some(diagnostics) = diagnostics.as_deref_mut() {
-                    diagnostics.add_csr_staging(staging);
-                }
-                prepare_duration += staging;
-                pending.clear();
-                edge_parse_start = diagnostics.is_some().then(Instant::now);
-                pending_id_bytes = 0;
-            }
-            pending_id_bytes += id_bytes;
-            pending.push((source.to_string(), destination.to_string(), weight));
-            edge_count += 1;
-        }
-        if !pending.is_empty() {
-            if let (Some(diagnostics), Some(start)) = (diagnostics.as_deref_mut(), edge_parse_start)
-            {
-                diagnostics.add_edge_parse(start.elapsed());
-            }
-            let staging = self.graphalytics_stage_edges(&pending, &mut sorter, &mut ordinal)?;
-            if let Some(diagnostics) = diagnostics.as_deref_mut() {
-                diagnostics.add_csr_staging(staging);
-            }
-            prepare_duration += staging;
-        } else if let (Some(diagnostics), Some(start)) =
-            (diagnostics.as_deref_mut(), edge_parse_start)
-        {
-            diagnostics.add_edge_parse(start.elapsed());
-        }
-        let mut merge = sorter.finish()?;
-        while let Some(edges) = merge.next_batch(BATCH_SIZE, MAX_MERGE_KEY_BYTES)? {
-            let regeneration_start = diagnostics.is_some().then(Instant::now);
-            let writes = edges
-                .into_iter()
-                .map(sorted_edge_write)
-                .collect::<Result<Vec<_>, _>>()?;
-            if let (Some(diagnostics), Some(regeneration_start)) =
-                (diagnostics.as_deref_mut(), regeneration_start)
-            {
-                diagnostics.add_value_regeneration(regeneration_start.elapsed());
-            }
-            if let Some(diagnostics) = diagnostics.as_deref_mut() {
-                diagnostics
-                    .add_storage_batch_write(self.storage.batch_write_profiled(&writes).await?);
-            } else {
-                self.storage.batch_write(&writes).await?;
-            }
-        }
-        if let (Some(diagnostics), Some(sort)) =
-            (diagnostics.as_deref_mut(), merge.take_diagnostics())
-        {
-            diagnostics.add_sort(sort);
-        }
-        let total_import = load_start.elapsed();
-        let load_duration = total_import.saturating_sub(prepare_duration);
-        let load_seconds = load_duration.as_secs_f64();
-
-        let prepare_start = Instant::now();
-        {
-            let mut map = self.csr.lock().map_err(|_| LiteError::LockPoisoned)?;
-            map.get_mut(COLLECTION)
-                .ok_or_else(|| LiteError::Storage {
-                    detail: "graphalytics CSR missing after import".to_string(),
-                })?
-                .compact_initial_build()
-                .map_err(graph_error)?;
-        }
-        let prepare_duration = prepare_duration + prepare_start.elapsed();
-        if let Some(diagnostics) = diagnostics.as_deref_mut() {
-            diagnostics.finish(total_import, load_duration, prepare_duration);
-            diagnostics.set_counts(vertex_count, edge_count);
-        }
-        Ok(ImportMetrics {
-            vertices: vertex_count,
-            edges: edge_count,
-            load_seconds,
-            prepare_seconds: prepare_duration.as_secs_f64(),
-        })
-    }
-
-    fn graphalytics_stage_vertices(&self, vertices: &[String]) -> Result<Duration, LiteError> {
-        let prepare_start = Instant::now();
-        let mut map = self.csr.lock().map_err(|_| LiteError::LockPoisoned)?;
-        let csr = map.entry(COLLECTION.to_string()).or_default();
-        for vertex in vertices {
-            csr.add_node(vertex).map_err(graph_error)?;
-        }
-        Ok(prepare_start.elapsed())
-    }
-
-    fn graphalytics_stage_edges(
-        &self,
-        edges: &[(String, String, f64)],
-        sorter: &mut ExternalEdgeSorter,
-        ordinal: &mut u64,
-    ) -> Result<Duration, LiteError> {
-        let prepare_start = Instant::now();
-        {
-            let mut map = self.csr.lock().map_err(|_| LiteError::LockPoisoned)?;
-            let csr = map.entry(COLLECTION.to_string()).or_default();
-            for (source, destination, weight) in edges {
-                upsert_graphalytics_edge(csr, source, destination, *weight)?;
-            }
-        }
-        let prepare_duration = prepare_start.elapsed();
-
-        for (source, destination, weight) in edges {
-            sorter.push(
-                edge_store_key(COLLECTION, source, EDGE_LABEL, destination),
-                *weight,
-                *ordinal,
-            )?;
-            *ordinal = ordinal.checked_add(1).ok_or_else(|| LiteError::Storage {
-                detail: "Graphalytics edge ordinal overflow".to_string(),
-            })?;
-        }
-        Ok(prepare_duration)
     }
 
     /// Run one Graphalytics algorithm, returning the full in-memory result.
@@ -310,7 +106,6 @@ impl<S: StorageEngine> NodeDbLite<S> {
         run_algo(&self.csr, algorithm, &graphalytics_params(source))
     }
 
-    /// Validate SSSP weights before a separately timed primitive execution.
     #[doc(hidden)]
     pub fn graphalytics_validate_sssp_weights(
         &self,
@@ -319,7 +114,6 @@ impl<S: StorageEngine> NodeDbLite<S> {
         Ok(GraphalyticsValidatedSssp(()))
     }
 
-    /// Produce a dense primitive result, performing all required admission checks.
     #[doc(hidden)]
     pub fn graphalytics_raw_run(
         &self,
@@ -331,26 +125,28 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 detail: "diameter is not part of the Graphalytics runner".to_string(),
             });
         }
-        let raw = run_graphalytics_raw(&self.csr, algorithm, &graphalytics_params(source))?;
-        Ok(GraphalyticsRawResult(raw))
+        Ok(GraphalyticsRawResult(run_graphalytics_raw(
+            &self.csr,
+            algorithm,
+            &graphalytics_params(source),
+        )?))
     }
 
-    /// Run timed SSSP using an unforgeable proof from the pre-timer validation step.
     #[doc(hidden)]
     pub fn graphalytics_sssp_raw_prevalidated(
         &self,
         source: &str,
         _validated: GraphalyticsValidatedSssp,
     ) -> Result<GraphalyticsRawResult, LiteError> {
-        let raw = run_graphalytics_raw_prevalidated_sssp(
-            &self.csr,
-            GraphAlgorithm::Sssp,
-            &graphalytics_params(source),
-        )?;
-        Ok(GraphalyticsRawResult(raw))
+        Ok(GraphalyticsRawResult(
+            run_graphalytics_raw_prevalidated_sssp(
+                &self.csr,
+                GraphAlgorithm::Sssp,
+                &graphalytics_params(source),
+            )?,
+        ))
     }
 
-    /// Convert a previously computed dense primitive result into Graphalytics output.
     #[doc(hidden)]
     pub fn graphalytics_raw_result(
         &self,
@@ -376,7 +172,6 @@ impl<S: StorageEngine> NodeDbLite<S> {
         Ok(result)
     }
 
-    /// Compute unweighted BFS distances over the undirected projection.
     pub fn graphalytics_bfs_distances(&self, source: &str) -> Result<Vec<i64>, LiteError> {
         let map = self.csr.lock().map_err(|_| LiteError::LockPoisoned)?;
         let csr = map.get(COLLECTION).ok_or_else(|| LiteError::Storage {
@@ -388,7 +183,6 @@ impl<S: StorageEngine> NodeDbLite<S> {
         Ok(csr.bfs_both_distances_raw(source_id))
     }
 
-    /// Materialize previously computed BFS distances as a query result.
     pub fn graphalytics_bfs_result(&self, distance: Vec<i64>) -> Result<QueryResult, LiteError> {
         let map = self.csr.lock().map_err(|_| LiteError::LockPoisoned)?;
         let csr = map.get(COLLECTION).ok_or_else(|| LiteError::Storage {
@@ -415,9 +209,59 @@ impl<S: StorageEngine> NodeDbLite<S> {
         })
     }
 
-    /// Run and materialize BFS for callers that do not need separate timing.
     pub fn graphalytics_bfs(&self, source: &str) -> Result<QueryResult, LiteError> {
         self.graphalytics_bfs_result(self.graphalytics_bfs_distances(source)?)
+    }
+}
+
+impl NodeDbLite<PagedbStorageDefault> {
+    /// Create an empty native PageDB, bulk-import the Graphalytics edge table,
+    /// then initialize the normal Lite runtime around that durable store.
+    ///
+    /// Configuration is validated before publication. If later runtime
+    /// initialization fails, the committed graph remains a valid PageDB and
+    /// can be recovered through the normal path-based opener, which rebuilds
+    /// CSR state from the durable Graph namespace.
+    pub async fn graphalytics_open_and_import_at_path(
+        path: &Path,
+        encryption: Encryption,
+        config: LiteConfig,
+        page_size: usize,
+        vertex_file: &Path,
+        edge_file: &Path,
+        diagnostics_enabled: bool,
+    ) -> NodeDbResult<(
+        Arc<Self>,
+        ImportMetrics,
+        Option<GraphalyticsLoadDiagnostics>,
+    )> {
+        // Validate before durable construction: an invalid configuration must
+        // not leave a published graph that cannot be initialized by Lite.
+        config.validate()?;
+        let storage = PagedbStorageDefault::open_with_policy_and_page_size(
+            path,
+            encryption,
+            config.corruption_policy,
+            page_size,
+        )
+        .await?;
+        let local_csr = Arc::new(Mutex::new(HashMap::<String, CsrIndex>::new()));
+        let mut diagnostics = diagnostics_enabled.then(GraphalyticsLoadDiagnostics::new);
+        let metrics = graphalytics_import::import(
+            &storage,
+            &local_csr,
+            vertex_file,
+            edge_file,
+            true,
+            diagnostics.as_mut(),
+        )
+        .await?;
+        let prepared_csr = {
+            let mut local = local_csr.lock().map_err(|_| LiteError::LockPoisoned)?;
+            std::mem::take(&mut *local)
+        };
+        let db = Self::open_with_config_and_csr(storage, config, prepared_csr).await?;
+        Ok((db, metrics, diagnostics))
     }
 }
 
@@ -426,8 +270,6 @@ fn graphalytics_params(source: &str) -> AlgoParams {
         collection: COLLECTION.to_string(),
         damping: Some(0.85),
         max_iterations: Some(10),
-        // Positive minimum bypasses the generic non-positive fallback and
-        // effectively disables early stopping for the required fixed count.
         tolerance: Some(f64::MIN_POSITIVE),
         source_node: Some(source.to_string()),
         direction: Some("both".to_string()),
@@ -435,87 +277,199 @@ fn graphalytics_params(source: &str) -> AlgoParams {
     }
 }
 
-fn upsert_graphalytics_edge(
-    csr: &mut CsrIndex,
-    source: &str,
-    destination: &str,
-    weight: f64,
-) -> Result<(), LiteError> {
-    if csr.edge_weight(source, EDGE_LABEL, destination).is_some() {
-        csr.remove_edge(source, EDGE_LABEL, destination);
-        csr.compact().map_err(graph_error)?;
-    }
-    csr.add_edge_weighted(source, EDGE_LABEL, destination, weight)
-        .map_err(graph_error)
-}
-
-fn read_bounded_line(
-    reader: &mut impl BufRead,
-    line: &mut String,
-    max_bytes: usize,
-) -> Result<usize, LiteError> {
-    line.clear();
-    let read = reader
-        .take((max_bytes + 1) as u64)
-        .read_line(line)
-        .map_err(io_error)?;
-    if read > max_bytes {
-        return Err(LiteError::Storage {
-            detail: format!("Graphalytics input line exceeds the {max_bytes}-byte bound"),
-        });
-    }
-    Ok(read)
-}
-
-fn validate_vertex_id(vertex: &str, line: &str) -> Result<(), LiteError> {
-    if vertex.as_bytes().contains(&0) || vertex.len() > MAX_VERTEX_ID_BYTES {
-        return Err(malformed_edge(line));
-    }
-    Ok(())
-}
-
-fn io_error(error: std::io::Error) -> LiteError {
-    LiteError::Storage {
-        detail: error.to_string(),
-    }
-}
-
-fn graph_error(error: impl std::fmt::Display) -> LiteError {
-    LiteError::Storage {
-        detail: error.to_string(),
-    }
-}
-
-fn malformed_edge(line: &str) -> LiteError {
-    LiteError::Storage {
-        detail: format!("malformed Graphalytics edge: {line}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use nodedb_types::Namespace;
+
     use super::*;
+    use crate::graphalytics_storage::WeightProperties;
+    use crate::query::graph_ops::edges::{durable_vertex_store_key, edge_store_key, edge_to_value};
+    use crate::storage::pagedb_storage::{PagedbStorageDefault, PagedbStorageMem};
 
-    #[test]
-    fn bounded_line_reader_rejects_oversized_records_before_allocation_growth() {
-        let mut reader = std::io::Cursor::new(b"abcdef\n");
-        let mut line = String::new();
-        let error = read_bounded_line(&mut reader, &mut line, 4).unwrap_err();
-        assert!(error.to_string().contains("exceeds the 4-byte bound"));
+    fn graph_files(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let vertices = dir.join("tiny.v");
+        let edges = dir.join("tiny.e");
+        fs::write(&vertices, "a\nb\nc\n").unwrap();
+        fs::write(&edges, "a b 1\na b 2\n").unwrap();
+        (vertices, edges)
     }
 
-    #[test]
-    fn vertex_ids_reject_ambiguous_nul_delimiters() {
-        let error = validate_vertex_id("a\0b", "a\0b c 1").unwrap_err();
+    fn expected_edge_value() -> Value {
+        let properties = zerompk::to_msgpack_vec(&WeightProperties(2.0)).unwrap();
+        let encoded = edge_to_value(COLLECTION, "a", "EDGE", "b", &properties).unwrap();
+        zerompk::from_msgpack(&encoded).unwrap()
+    }
+
+    fn decode_stored(value: Option<Vec<u8>>) -> Option<Value> {
+        value.map(|encoded| zerompk::from_msgpack(&encoded).unwrap())
+    }
+
+    fn test_config() -> LiteConfig {
+        LiteConfig {
+            auto_flush_ms: 0,
+            ..LiteConfig::default()
+        }
+    }
+
+    fn assert_prepared_csr(db: &NodeDbLite<impl StorageEngine>) {
+        let map = db.csr.lock().unwrap();
+        let csr = map.get(COLLECTION).unwrap();
+        assert!(csr.node_id_raw("c").is_some(), "isolated vertex was lost");
+        assert_eq!(csr.edge_weight("a", "EDGE", "b"), Some(2.0));
+    }
+
+    #[tokio::test]
+    async fn opened_store_import_uses_bounded_normal_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vertices, edges) = graph_files(dir.path());
+        let storage = PagedbStorageMem::open_in_memory().await.unwrap();
+        let db = NodeDbLite::open(storage).await.unwrap();
+        let metrics = db.graphalytics_import(&vertices, &edges).await.unwrap();
+        assert_eq!((metrics.vertices, metrics.edges), (3, 2));
+        assert_eq!(db.storage.count(Namespace::Graph).await.unwrap(), 2);
+        assert_prepared_csr(&db);
+        assert_eq!(
+            decode_stored(
+                db.storage
+                    .get(
+                        Namespace::Graph,
+                        &edge_store_key(COLLECTION, "a", "EDGE", "b"),
+                    )
+                    .await
+                    .unwrap(),
+            ),
+            Some(expected_edge_value()),
+        );
+    }
+
+    #[tokio::test]
+    async fn preopen_bulk_import_persists_and_reports_one_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vertices, edges) = graph_files(dir.path());
+        let path = dir.path().join("graph.pagedb");
+        let (db, _, diagnostics) = NodeDbLite::graphalytics_open_and_import_at_path(
+            &path,
+            Encryption::Plaintext,
+            test_config(),
+            16 * 1024,
+            &vertices,
+            &edges,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.storage.count(Namespace::Graph).await.unwrap(), 2);
+        assert_prepared_csr(&db);
+        assert!(
+            db.storage
+                .get(Namespace::Meta, b"meta:lite_id")
+                .await
+                .unwrap()
+                .is_some(),
+        );
+        assert_eq!(
+            decode_stored(
+                db.storage
+                    .get(
+                        Namespace::Graph,
+                        &edge_store_key(COLLECTION, "a", "EDGE", "b"),
+                    )
+                    .await
+                    .unwrap(),
+            ),
+            Some(expected_edge_value()),
+        );
+        assert_eq!(
+            db.storage
+                .get(Namespace::Graph, &durable_vertex_store_key(COLLECTION, "c"),)
+                .await
+                .unwrap(),
+            Some(Vec::new()),
+        );
+        let diagnostics = String::from_utf8(diagnostics.unwrap().to_json("tiny").unwrap()).unwrap();
+        assert!(diagnostics.contains("\"storage_batch_commits\":1"));
+        assert!(diagnostics.contains("\"storage_batch_operations\":2"));
+        // Do not flush a CSR checkpoint: normal reopen must recover the
+        // explicit isolated vertex from the atomically built Graph tree.
+        drop(db);
+        let reopened = NodeDbLite::open_at_path_with_config_and_page_size(
+            &path,
+            Encryption::Plaintext,
+            test_config(),
+            16 * 1024,
+        )
+        .await
+        .unwrap();
+        let edge_key = edge_store_key(COLLECTION, "a", "EDGE", "b");
+        assert_eq!(
+            reopened
+                .storage
+                .scan_prefix(Namespace::Graph, &edge_key)
+                .await
+                .unwrap()
+                .len(),
+            1,
+        );
+        assert_prepared_csr(&reopened);
+        assert!(
+            reopened
+                .storage
+                .get(Namespace::Meta, b"meta:lite_id")
+                .await
+                .unwrap()
+                .is_some(),
+        );
+        assert_eq!(
+            decode_stored(
+                reopened
+                    .storage
+                    .get(
+                        Namespace::Graph,
+                        &edge_store_key(COLLECTION, "a", "EDGE", "b"),
+                    )
+                    .await
+                    .unwrap(),
+            ),
+            Some(expected_edge_value()),
+        );
+    }
+
+    #[tokio::test]
+    async fn preopen_parse_error_publishes_neither_graph_nor_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let vertices = dir.path().join("bad.v");
+        let edges = dir.path().join("bad.e");
+        let path = dir.path().join("bad.pagedb");
+        fs::write(&vertices, "a\nb\n").unwrap();
+        fs::write(&edges, "a b 1\na b not-a-weight\n").unwrap();
+
+        let error = match NodeDbLite::graphalytics_open_and_import_at_path(
+            &path,
+            Encryption::Plaintext,
+            LiteConfig::default(),
+            16 * 1024,
+            &vertices,
+            &edges,
+            false,
+        )
+        .await
+        {
+            Ok(_) => panic!("malformed input unexpectedly imported"),
+            Err(error) => error,
+        };
         assert!(error.to_string().contains("malformed Graphalytics edge"));
-    }
 
-    #[test]
-    fn duplicate_edge_uses_last_weight_in_csr() {
-        let mut csr = CsrIndex::new();
-        upsert_graphalytics_edge(&mut csr, "a", "b", 1.0).unwrap();
-        upsert_graphalytics_edge(&mut csr, "a", "b", 2.5).unwrap();
-        assert_eq!(csr.edge_weight("a", EDGE_LABEL, "b"), Some(2.5));
-        assert_eq!(csr.edge_count(), 1);
+        let storage = PagedbStorageDefault::open_with_policy_and_page_size(
+            &path,
+            Encryption::Plaintext,
+            LiteConfig::default().corruption_policy,
+            16 * 1024,
+        )
+        .await
+        .unwrap();
+        assert_eq!(storage.count(Namespace::Graph).await.unwrap(), 0);
+        assert_eq!(storage.count(Namespace::Meta).await.unwrap(), 0);
     }
 }

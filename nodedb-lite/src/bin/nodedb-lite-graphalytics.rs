@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -32,6 +32,31 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or("invalid dataset directory")?;
+    if std::env::var_os("NODEDB_GRAPHALYTICS_REOPEN_VALIDATE").is_some() {
+        let db = NodeDbLite::open_at_path_with_config_and_page_size(
+            &database,
+            Encryption::Plaintext,
+            LiteConfig::default(),
+            DURABLE_PAGE_SIZE,
+        )
+        .await?;
+        let raw = db.graphalytics_raw_run(GraphAlgorithm::Wcc, "")?;
+        let result = db.graphalytics_raw_result(GraphAlgorithm::Wcc, raw)?;
+        let vertices = BufReader::new(File::open(dataset.join(format!("{dataset_name}.v")))?)
+            .lines()
+            .try_fold(0usize, |count, line| {
+                Ok::<_, std::io::Error>(count + usize::from(!line?.trim().is_empty()))
+            })?;
+        if result.rows.len() != vertices {
+            return Err(format!(
+                "reopened WCC returned {} vertices; expected {vertices}",
+                result.rows.len()
+            )
+            .into());
+        }
+        println!("[NodeDB Lite] reopen validation passed for {vertices} vertices");
+        return Ok(());
+    }
     fs::create_dir_all(&output)?;
     if database.is_dir() {
         fs::remove_dir_all(&database)?;
@@ -41,20 +66,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let diagnostics_path = std::env::var_os("NODEDB_GRAPHALYTICS_DIAGNOSTICS").map(PathBuf::from);
 
-    let db = NodeDbLite::open_at_path_with_config_and_page_size(
+    let (db, metrics, mut diagnostics) = NodeDbLite::graphalytics_open_and_import_at_path(
         &database,
         Encryption::Plaintext,
         LiteConfig::default(),
         DURABLE_PAGE_SIZE,
+        &dataset.join(format!("{dataset_name}.v")),
+        &dataset.join(format!("{dataset_name}.e")),
+        diagnostics_path.is_some(),
     )
     .await?;
-    let (metrics, mut diagnostics) = db
-        .graphalytics_import_with_diagnostics(
-            &dataset.join(format!("{dataset_name}.v")),
-            &dataset.join(format!("{dataset_name}.e")),
-            diagnostics_path.is_some(),
-        )
-        .await?;
     enforce_timeout("load", metrics.load_seconds)?;
     enforce_timeout("prepare", metrics.prepare_seconds)?;
 

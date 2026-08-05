@@ -312,7 +312,10 @@ fn read_record(reader: &mut impl Read) -> Result<Option<SortableEdge>, LiteError
     }
     let ordinal = u64::from_le_bytes(header[4..12].try_into().expect("fixed header"));
     let weight_bits = u64::from_le_bytes(header[12..20].try_into().expect("fixed header"));
-    let mut key = vec![0u8; key_len];
+    // Reserve the PageDB namespace byte up front. The bulk adapter can then
+    // prepend it in place instead of allocating and copying every merged key.
+    let mut key = Vec::with_capacity(key_len + 1);
+    key.resize(key_len, 0);
     reader.read_exact(&mut key).map_err(io_error)?;
     Ok(Some(SortableEdge {
         key,

@@ -41,11 +41,15 @@ pub mod error;
 pub mod event;
 #[cfg(all(feature = "graphalytics-runner", not(target_arch = "wasm32")))]
 pub mod graphalytics;
+#[cfg(all(feature = "graphalytics-runner", not(target_arch = "wasm32")))]
+mod graphalytics_bulk;
 #[doc(hidden)]
 #[cfg(all(feature = "graphalytics-runner", not(target_arch = "wasm32")))]
 pub mod graphalytics_diagnostics;
 #[cfg(all(feature = "graphalytics-runner", not(target_arch = "wasm32")))]
 mod graphalytics_external_sort;
+#[cfg(all(feature = "graphalytics-runner", not(target_arch = "wasm32")))]
+mod graphalytics_import;
 #[cfg(all(feature = "graphalytics-runner", not(target_arch = "wasm32")))]
 mod graphalytics_storage;
 pub mod identity;

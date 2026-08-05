@@ -22,6 +22,7 @@ use nodedb_types::value::Value;
 use crate::engine::graph::history::SYSTEM_TO_CURRENT;
 use crate::engine::graph::index::CsrIndex;
 use crate::nodedb::lock_ext::LockExt;
+use crate::query::graph_ops::edges::parse_durable_vertex_store_key;
 use crate::storage::engine::StorageEngine;
 
 use crate::nodedb::core::types::NodeDbLite;
@@ -141,7 +142,13 @@ impl<S: StorageEngine> NodeDbLite<S> {
         {
             let mut csr_map = self.csr.lock_or_recover();
             for (key, value) in &graph_entries {
-                // Only process keys that split into exactly 4 NUL-separated segments.
+                if let Some((collection, node)) = parse_durable_vertex_store_key(key) {
+                    let csr = csr_map
+                        .entry(collection.to_string())
+                        .or_insert_with(CsrIndex::new);
+                    let _ = csr.add_node(node);
+                    continue;
+                }
                 let parts: Vec<&[u8]> = key.splitn(4, |&b| b == 0).collect();
                 if parts.len() != 4 {
                     continue;

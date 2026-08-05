@@ -25,6 +25,7 @@ use nodedb_types::error::{NodeDbError, NodeDbResult};
 use crate::config::LiteConfig;
 use crate::engine::columnar::ColumnarEngine;
 use crate::engine::fts::FtsState;
+use crate::engine::graph::index::CsrIndex;
 use crate::engine::htap::HtapBridge;
 use crate::engine::sparse_vector::SparseVectorState;
 use crate::engine::strict::StrictEngine;
@@ -59,7 +60,20 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// validated before any storage work happens, so an incoherent budget is
     /// rejected rather than silently over-allocating.
     pub async fn open_with_config(storage: S, config: LiteConfig) -> NodeDbResult<Arc<Self>> {
-        Self::open_inner(storage, config).await
+        Self::open_inner(storage, config, None).await
+    }
+
+    /// Open around an already prepared in-memory CSR map.
+    ///
+    /// This crate-private path is used by the native Graphalytics importer to
+    /// avoid rebuilding the same index after it bulk-constructs an empty store.
+    #[cfg(feature = "graphalytics-runner")]
+    pub(crate) async fn open_with_config_and_csr(
+        storage: S,
+        config: LiteConfig,
+        csr: HashMap<String, CsrIndex>,
+    ) -> NodeDbResult<Arc<Self>> {
+        Self::open_inner(storage, config, Some(csr)).await
     }
 
     /// Open with a custom memory budget, taking every other setting from
@@ -75,7 +89,11 @@ impl<S: StorageEngine> NodeDbLite<S> {
     }
 
     #[allow(clippy::await_holding_lock)]
-    async fn open_inner(storage: S, config: LiteConfig) -> NodeDbResult<Arc<Self>> {
+    async fn open_inner(
+        storage: S,
+        config: LiteConfig,
+        prepared_csr: Option<HashMap<String, CsrIndex>>,
+    ) -> NodeDbResult<Arc<Self>> {
         config.validate()?;
 
         let governor = crate::memory::MemoryGovernor::from_config(&config);
@@ -101,8 +119,12 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let (sparse_manager, sparse_checkpoint_present) =
             Self::restore_sparse_indices(&storage).await;
 
-        // ── Restore per-collection CSR indices ──
-        let csr = Self::restore_csr_indices(&storage).await?;
+        // ── Restore per-collection CSR indices, unless a caller already
+        // prepared the exact index while constructing this fresh store. ──
+        let csr = match prepared_csr {
+            Some(csr) => csr,
+            None => Self::restore_csr_indices(&storage).await?,
+        };
 
         // ── Restore HNSW indices and id_map ──
         let (hnsw_map, hnsw_id_map) = Self::restore_hnsw_indices(&storage).await?;

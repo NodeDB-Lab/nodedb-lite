@@ -16,6 +16,38 @@ use crate::error::LiteError;
 use crate::runtime::now_millis_i64;
 use crate::storage::engine::{StorageEngine, WriteOp};
 
+pub(crate) const DURABLE_VERTEX_MARKER: &[u8] = b"__nodedb_vertex__";
+
+/// Key for an explicit vertex that has no durable edge from which cold-start
+/// graph reconstruction could otherwise recover it.
+#[cfg(feature = "graphalytics-runner")]
+pub(crate) fn durable_vertex_store_key(collection: &str, node: &str) -> Vec<u8> {
+    let mut key = collection.as_bytes().to_vec();
+    key.push(0);
+    key.extend_from_slice(DURABLE_VERTEX_MARKER);
+    key.push(0);
+    key.extend_from_slice(node.as_bytes());
+    key
+}
+
+/// Parse exactly `{collection}\0__nodedb_vertex__\0{node}`.
+/// Four-segment edge keys whose source equals the marker are not vertices.
+pub(crate) fn parse_durable_vertex_store_key(key: &[u8]) -> Option<(&str, &str)> {
+    let mut parts = key.split(|byte| *byte == 0);
+    let collection = parts.next()?;
+    if parts.next()? != DURABLE_VERTEX_MARKER {
+        return None;
+    }
+    let node = parts.next()?;
+    if node.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some((
+        std::str::from_utf8(collection).ok()?,
+        std::str::from_utf8(node).ok()?,
+    ))
+}
+
 /// Upsert edge properties into the Namespace::Graph storage table.
 ///
 /// Key layout: `{collection}\x00{src}\x00{label}\x00{dst}`
@@ -277,6 +309,18 @@ mod tests {
 
     fn make_csr_map() -> Arc<Mutex<HashMap<String, CsrIndex>>> {
         Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    #[test]
+    fn durable_vertex_parser_rejects_marker_named_edge_source() {
+        let marker = std::str::from_utf8(DURABLE_VERTEX_MARKER).unwrap();
+        assert!(
+            parse_durable_vertex_store_key(&edge_store_key("g", marker, "EDGE", "b")).is_none()
+        );
+        assert_eq!(
+            parse_durable_vertex_store_key(&durable_vertex_store_key("g", "isolated")),
+            Some(("g", "isolated")),
+        );
     }
 
     #[test]
