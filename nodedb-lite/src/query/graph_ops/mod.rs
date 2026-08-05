@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 pub mod algorithms;
+pub(crate) mod analytics_results;
 pub mod edges;
 pub mod fusion;
-pub(crate) mod graphalytics_results;
 pub mod labels;
 pub mod match_engine;
 pub mod stats;

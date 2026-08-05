@@ -132,8 +132,7 @@ fn count_oriented_triangles(oriented: &[Vec<u32>]) -> Vec<usize> {
         const COUNTER_BUDGET_BYTES: usize = 128 * 1024 * 1024;
         let bytes_per_counter = oriented
             .len()
-            .checked_mul(std::mem::size_of::<usize>())
-            .unwrap_or(usize::MAX)
+            .saturating_mul(std::mem::size_of::<usize>())
             .max(1);
         let memory_bounded_workers = (COUNTER_BUDGET_BYTES / bytes_per_counter).max(1);
         let desired_workers = std::thread::available_parallelism()

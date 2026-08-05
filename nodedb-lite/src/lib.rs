@@ -35,23 +35,22 @@
 //!
 //! For at-rest encryption see [`Encryption`]. [`NodeDb`]: nodedb_client::NodeDb
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod analytics;
 pub mod config;
 pub mod engine;
 pub mod error;
 pub mod event;
-#[cfg(all(feature = "graphalytics-runner", not(target_arch = "wasm32")))]
-pub mod graphalytics;
-#[cfg(all(feature = "graphalytics-runner", not(target_arch = "wasm32")))]
-mod graphalytics_bulk;
-#[doc(hidden)]
-#[cfg(all(feature = "graphalytics-runner", not(target_arch = "wasm32")))]
-pub mod graphalytics_diagnostics;
-#[cfg(all(feature = "graphalytics-runner", not(target_arch = "wasm32")))]
-mod graphalytics_external_sort;
-#[cfg(all(feature = "graphalytics-runner", not(target_arch = "wasm32")))]
-mod graphalytics_import;
-#[cfg(all(feature = "graphalytics-runner", not(target_arch = "wasm32")))]
-mod graphalytics_storage;
+#[cfg(not(target_arch = "wasm32"))]
+mod graph_bulk;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod graph_diagnostics;
+#[cfg(not(target_arch = "wasm32"))]
+mod graph_external_sort;
+#[cfg(not(target_arch = "wasm32"))]
+mod graph_import;
+#[cfg(not(target_arch = "wasm32"))]
+mod graph_storage;
 pub mod identity;
 pub mod memory;
 pub mod nodedb;

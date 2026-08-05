@@ -1,4 +1,4 @@
-//! Shared bounded Graphalytics import pipeline.
+//! Shared bounded weighted edge-list import pipeline.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -7,18 +7,32 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::analytics::GraphImportMetrics;
 use crate::engine::graph::index::CsrIndex;
 use crate::error::LiteError;
-use crate::graphalytics::ImportMetrics;
-use crate::graphalytics_bulk::GraphalyticsBulkEntries;
-use crate::graphalytics_diagnostics::GraphalyticsLoadDiagnostics;
-use crate::graphalytics_external_sort::ExternalEdgeSorter;
-use crate::graphalytics_storage::sorted_edge_write;
+use crate::graph_bulk::SortedBulkEntries;
+use crate::graph_diagnostics::GraphImportMeasurements;
+use crate::graph_external_sort::ExternalEdgeSorter;
+use crate::graph_storage::sorted_edge_write;
 use crate::query::graph_ops::edges::{durable_vertex_store_key, edge_store_key};
 use crate::storage::engine::StorageEngine;
 
-pub(crate) const COLLECTION: &str = "graphalytics";
-const EDGE_LABEL: &str = "EDGE";
+/// Domain-neutral weighted edge-list import specification.
+#[derive(Debug, Clone)]
+pub struct WeightedEdgeListSpec {
+    pub collection: String,
+    pub edge_label: String,
+}
+
+impl WeightedEdgeListSpec {
+    #[must_use]
+    pub fn new(collection: impl Into<String>, edge_label: impl Into<String>) -> Self {
+        Self {
+            collection: collection.into(),
+            edge_label: edge_label.into(),
+        }
+    }
+}
 const BATCH_SIZE: usize = 1_000_000;
 const VERTEX_BATCH_SIZE: usize = 100_000;
 const MAX_VERTEX_ID_BYTES: usize = 512 * 1024 - 64;
@@ -34,9 +48,11 @@ pub(crate) async fn import<S: StorageEngine>(
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
     vertex_file: &Path,
     edge_file: &Path,
+    spec: &WeightedEdgeListSpec,
     bulk_load: bool,
-    mut diagnostics: Option<&mut GraphalyticsLoadDiagnostics>,
-) -> Result<ImportMetrics, LiteError> {
+    mut diagnostics: Option<&mut GraphImportMeasurements>,
+) -> Result<GraphImportMetrics, LiteError> {
+    validate_spec(spec)?;
     let load_start = Instant::now();
     let mut prepare_duration = Duration::ZERO;
     let file = File::open(vertex_file).map_err(io_error)?;
@@ -57,7 +73,7 @@ pub(crate) async fn import<S: StorageEngine>(
                 && pending_vertex_bytes + vertex.len() > MAX_PENDING_ID_BYTES)
         {
             record_vertex_parse(&mut diagnostics, vertex_parse_start);
-            let staging = stage_vertices(csr_map, &pending_vertices)?;
+            let staging = stage_vertices(csr_map, &pending_vertices, spec)?;
             record_staging(&mut diagnostics, staging);
             prepare_duration += staging;
             pending_vertices.clear();
@@ -70,7 +86,7 @@ pub(crate) async fn import<S: StorageEngine>(
     }
     record_vertex_parse(&mut diagnostics, vertex_parse_start);
     if !pending_vertices.is_empty() {
-        let staging = stage_vertices(csr_map, &pending_vertices)?;
+        let staging = stage_vertices(csr_map, &pending_vertices, spec)?;
         record_staging(&mut diagnostics, staging);
         prepare_duration += staging;
     }
@@ -94,7 +110,7 @@ pub(crate) async fn import<S: StorageEngine>(
             .ok_or_else(|| malformed_edge(&line))?
             .parse::<f64>()
             .map_err(|_| malformed_edge(&line))?;
-        if !weight.is_finite() || weight < 0.0 {
+        if !weight.is_finite() || weight < 0.0 || fields.next().is_some() {
             return Err(malformed_edge(&line));
         }
         let id_bytes = source.len() + destination.len();
@@ -102,7 +118,7 @@ pub(crate) async fn import<S: StorageEngine>(
             || (!pending.is_empty() && pending_id_bytes + id_bytes > MAX_PENDING_ID_BYTES)
         {
             record_edge_parse(&mut diagnostics, edge_parse_start);
-            let staging = stage_edges(csr_map, &pending, &mut sorter, &mut ordinal)?;
+            let staging = stage_edges(csr_map, &pending, &mut sorter, &mut ordinal, spec)?;
             record_staging(&mut diagnostics, staging);
             prepare_duration += staging;
             pending.clear();
@@ -115,19 +131,20 @@ pub(crate) async fn import<S: StorageEngine>(
     }
     record_edge_parse(&mut diagnostics, edge_parse_start);
     if !pending.is_empty() {
-        let staging = stage_edges(csr_map, &pending, &mut sorter, &mut ordinal)?;
+        let staging = stage_edges(csr_map, &pending, &mut sorter, &mut ordinal, spec)?;
         record_staging(&mut diagnostics, staging);
         prepare_duration += staging;
     }
 
     // Edge records recover every endpoint on a cold reopen. Persist only
     // explicit isolates, which have no edge key from which they can be rebuilt.
-    stage_isolated_vertices(csr_map, &mut sorter, &mut ordinal)?;
+    stage_isolated_vertices(csr_map, &mut sorter, &mut ordinal, &spec.collection)?;
 
     let merge = sorter.finish()?;
     let profile_enabled = diagnostics.is_some();
     if bulk_load {
-        let mut entries = GraphalyticsBulkEntries::new(merge, profile_enabled);
+        let mut entries =
+            SortedBulkEntries::new(merge, &spec.collection, &spec.edge_label, profile_enabled);
         let mut profile = storage
             .bulk_load_sorted_unique(&mut entries, profile_enabled)
             .await?;
@@ -146,7 +163,7 @@ pub(crate) async fn import<S: StorageEngine>(
             let regeneration_start = profile_enabled.then(Instant::now);
             let writes = edges
                 .into_iter()
-                .map(sorted_edge_write)
+                .map(|edge| sorted_edge_write(edge, &spec.collection, &spec.edge_label))
                 .collect::<Result<Vec<_>, _>>()?;
             if let (Some(diagnostics), Some(start)) =
                 (diagnostics.as_deref_mut(), regeneration_start)
@@ -171,19 +188,19 @@ pub(crate) async fn import<S: StorageEngine>(
     let prepare_start = Instant::now();
     {
         let mut map = csr_map.lock().map_err(|_| LiteError::LockPoisoned)?;
-        map.get_mut(COLLECTION)
+        map.get_mut(&spec.collection)
             .ok_or_else(|| LiteError::Storage {
-                detail: "graphalytics CSR missing after import".to_string(),
+                detail: "collection CSR missing after import".to_string(),
             })?
             .compact_initial_build()
             .map_err(graph_error)?;
     }
     prepare_duration += prepare_start.elapsed();
-    if let Some(diagnostics) = diagnostics.as_deref_mut() {
+    if let Some(diagnostics) = diagnostics {
         diagnostics.finish(total_import, load_duration, prepare_duration);
         diagnostics.set_counts(vertex_count, edge_count);
     }
-    Ok(ImportMetrics {
+    Ok(GraphImportMetrics {
         vertices: vertex_count,
         edges: edge_count,
         load_seconds: load_duration.as_secs_f64(),
@@ -194,10 +211,11 @@ pub(crate) async fn import<S: StorageEngine>(
 fn stage_vertices(
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
     vertices: &[String],
+    spec: &WeightedEdgeListSpec,
 ) -> Result<Duration, LiteError> {
     let started = Instant::now();
     let mut map = csr_map.lock().map_err(|_| LiteError::LockPoisoned)?;
-    let csr = map.entry(COLLECTION.to_string()).or_default();
+    let csr = map.entry(spec.collection.clone()).or_default();
     for vertex in vertices {
         csr.add_node(vertex).map_err(graph_error)?;
     }
@@ -209,24 +227,25 @@ fn stage_edges(
     edges: &[(String, String, f64)],
     sorter: &mut ExternalEdgeSorter,
     ordinal: &mut u64,
+    spec: &WeightedEdgeListSpec,
 ) -> Result<Duration, LiteError> {
     let started = Instant::now();
     {
         let mut map = csr_map.lock().map_err(|_| LiteError::LockPoisoned)?;
-        let csr = map.entry(COLLECTION.to_string()).or_default();
+        let csr = map.entry(spec.collection.clone()).or_default();
         for (source, destination, weight) in edges {
-            upsert_graphalytics_edge(csr, source, destination, *weight)?;
+            upsert_weighted_edge(csr, source, destination, &spec.edge_label, *weight)?;
         }
     }
     let elapsed = started.elapsed();
     for (source, destination, weight) in edges {
         sorter.push(
-            edge_store_key(COLLECTION, source, EDGE_LABEL, destination),
+            edge_store_key(&spec.collection, source, &spec.edge_label, destination),
             *weight,
             *ordinal,
         )?;
         *ordinal = ordinal.checked_add(1).ok_or_else(|| LiteError::Storage {
-            detail: "Graphalytics edge ordinal overflow".to_string(),
+            detail: "weighted edge ordinal overflow".to_string(),
         })?;
     }
     Ok(elapsed)
@@ -236,42 +255,44 @@ fn stage_isolated_vertices(
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
     sorter: &mut ExternalEdgeSorter,
     ordinal: &mut u64,
+    collection: &str,
 ) -> Result<(), LiteError> {
     let map = csr_map.lock().map_err(|_| LiteError::LockPoisoned)?;
-    let csr = map.get(COLLECTION).ok_or_else(|| LiteError::Storage {
-        detail: "graphalytics CSR missing while persisting isolated vertices".to_string(),
+    let csr = map.get(collection).ok_or_else(|| LiteError::Storage {
+        detail: "collection CSR missing while persisting isolated vertices".to_string(),
     })?;
     for node in 0..csr.node_count() as u32 {
         if csr.out_degree_raw(node) == 0 && csr.in_degree_raw(node) == 0 {
             sorter.push(
-                durable_vertex_store_key(COLLECTION, csr.node_name_raw(node)),
+                durable_vertex_store_key(collection, csr.node_name_raw(node)),
                 0.0,
                 *ordinal,
             )?;
             *ordinal = ordinal.checked_add(1).ok_or_else(|| LiteError::Storage {
-                detail: "Graphalytics record ordinal overflow".to_string(),
+                detail: "sorted record ordinal overflow".to_string(),
             })?;
         }
     }
     Ok(())
 }
 
-fn upsert_graphalytics_edge(
+fn upsert_weighted_edge(
     csr: &mut CsrIndex,
     source: &str,
     destination: &str,
+    edge_label: &str,
     weight: f64,
 ) -> Result<(), LiteError> {
-    if csr.edge_weight(source, EDGE_LABEL, destination).is_some() {
-        csr.remove_edge(source, EDGE_LABEL, destination);
+    if csr.edge_weight(source, edge_label, destination).is_some() {
+        csr.remove_edge(source, edge_label, destination);
         csr.compact().map_err(graph_error)?;
     }
-    csr.add_edge_weighted(source, EDGE_LABEL, destination, weight)
+    csr.add_edge_weighted(source, edge_label, destination, weight)
         .map_err(graph_error)
 }
 
 fn record_vertex_parse(
-    diagnostics: &mut Option<&mut GraphalyticsLoadDiagnostics>,
+    diagnostics: &mut Option<&mut GraphImportMeasurements>,
     start: Option<Instant>,
 ) {
     if let (Some(diagnostics), Some(start)) = (diagnostics.as_deref_mut(), start) {
@@ -279,14 +300,14 @@ fn record_vertex_parse(
     }
 }
 fn record_edge_parse(
-    diagnostics: &mut Option<&mut GraphalyticsLoadDiagnostics>,
+    diagnostics: &mut Option<&mut GraphImportMeasurements>,
     start: Option<Instant>,
 ) {
     if let (Some(diagnostics), Some(start)) = (diagnostics.as_deref_mut(), start) {
         diagnostics.add_edge_parse(start.elapsed());
     }
 }
-fn record_staging(diagnostics: &mut Option<&mut GraphalyticsLoadDiagnostics>, elapsed: Duration) {
+fn record_staging(diagnostics: &mut Option<&mut GraphImportMeasurements>, elapsed: Duration) {
     if let Some(diagnostics) = diagnostics.as_deref_mut() {
         diagnostics.add_csr_staging(elapsed);
     }
@@ -304,11 +325,24 @@ fn read_bounded_line(
         .map_err(io_error)?;
     if read > max_bytes {
         return Err(LiteError::Storage {
-            detail: format!("Graphalytics input line exceeds the {max_bytes}-byte bound"),
+            detail: format!("weighted edge-list line exceeds the {max_bytes}-byte bound"),
         });
     }
     Ok(read)
 }
+fn validate_spec(spec: &WeightedEdgeListSpec) -> Result<(), LiteError> {
+    if spec.collection.is_empty()
+        || spec.edge_label.is_empty()
+        || spec.collection.as_bytes().contains(&0)
+        || spec.edge_label.as_bytes().contains(&0)
+    {
+        return Err(LiteError::BadRequest {
+            detail: "collection and edge label must be nonempty UTF-8 strings without NUL".into(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_vertex_id(vertex: &str, line: &str) -> Result<(), LiteError> {
     if vertex.as_bytes().contains(&0) || vertex.len() > MAX_VERTEX_ID_BYTES {
         return Err(malformed_edge(line));
@@ -327,7 +361,7 @@ fn graph_error(error: impl std::fmt::Display) -> LiteError {
 }
 fn malformed_edge(line: &str) -> LiteError {
     LiteError::Storage {
-        detail: format!("malformed Graphalytics edge: {line}"),
+        detail: format!("malformed weighted edge-list record: {line}"),
     }
 }
 

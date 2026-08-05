@@ -47,27 +47,6 @@ fn stored_edge_weight(value: &[u8]) -> f64 {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stored_edge_weight_reads_nested_properties() {
-        let properties = zerompk::to_msgpack_vec(&Value::Object(HashMap::from([(
-            "weight".to_string(),
-            Value::Float(2.5),
-        )])))
-        .unwrap();
-        let stored = zerompk::to_msgpack_vec(&Value::Object(HashMap::from([(
-            "props".to_string(),
-            Value::Bytes(properties),
-        )])))
-        .unwrap();
-
-        assert_eq!(stored_edge_weight(&stored), 2.5);
-    }
-}
-
 /// Trailer size of each `Namespace::GraphHistory` value:
 /// 8-byte big-endian `system_to_ms`.
 const GRAPH_HISTORY_TRAILER_LEN: usize = 8;
@@ -304,5 +283,26 @@ impl<S: StorageEngine> NodeDbLite<S> {
                     .map(str::to_owned)
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_edge_weight_reads_nested_properties() {
+        let properties = zerompk::to_msgpack_vec(&Value::Object(HashMap::from([(
+            "weight".to_string(),
+            Value::Float(2.5),
+        )])))
+        .unwrap();
+        let stored = zerompk::to_msgpack_vec(&Value::Object(HashMap::from([(
+            "props".to_string(),
+            Value::Bytes(properties),
+        )])))
+        .unwrap();
+
+        assert_eq!(stored_edge_weight(&stored), 2.5);
     }
 }

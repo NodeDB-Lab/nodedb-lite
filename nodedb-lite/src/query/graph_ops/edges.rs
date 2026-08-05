@@ -20,7 +20,6 @@ pub(crate) const DURABLE_VERTEX_MARKER: &[u8] = b"__nodedb_vertex__";
 
 /// Key for an explicit vertex that has no durable edge from which cold-start
 /// graph reconstruction could otherwise recover it.
-#[cfg(feature = "graphalytics-runner")]
 pub(crate) fn durable_vertex_store_key(collection: &str, node: &str) -> Vec<u8> {
     let mut key = collection.as_bytes().to_vec();
     key.push(0);

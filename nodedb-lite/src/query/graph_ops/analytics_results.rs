@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Dense Graphalytics result values and their untimed query-result adapter.
+//! Dense analytics result values and their untimed query-result adapter.
 
 use nodedb_graph::params::GraphAlgorithm;
 use nodedb_types::result::QueryResult;
@@ -11,7 +11,7 @@ use crate::error::LiteError;
 
 /// Dense primitive algorithm output, intentionally separated from presentation.
 #[derive(Debug, PartialEq)]
-pub(crate) enum GraphalyticsRawValues {
+pub enum AnalyticsRawValues {
     PageRank(Vec<f64>),
     Wcc(Vec<u32>),
     Lcc(Vec<f64>),
@@ -19,7 +19,7 @@ pub(crate) enum GraphalyticsRawValues {
     LabelPropagation(Vec<u32>),
 }
 
-impl GraphalyticsRawValues {
+impl AnalyticsRawValues {
     fn algorithm(&self) -> GraphAlgorithm {
         match self {
             Self::PageRank(_) => GraphAlgorithm::PageRank,
@@ -38,16 +38,16 @@ impl GraphalyticsRawValues {
     }
 }
 
-/// Materialize a dense Graphalytics primitive result as the public query shape.
-pub(super) fn raw_to_query(
+/// Materialize a dense primitive result as the public query shape.
+pub(crate) fn raw_to_query(
     csr: &CsrIndex,
     algorithm: GraphAlgorithm,
-    raw: GraphalyticsRawValues,
+    raw: AnalyticsRawValues,
 ) -> Result<QueryResult, LiteError> {
     if raw.algorithm() != algorithm {
         return Err(LiteError::Storage {
             detail: format!(
-                "Graphalytics primitive result kind {:?} does not match {algorithm:?}",
+                "dense primitive result kind {:?} does not match {algorithm:?}",
                 raw.algorithm()
             ),
         });
@@ -55,7 +55,7 @@ pub(super) fn raw_to_query(
     if raw.len() != csr.node_count() {
         return Err(LiteError::Storage {
             detail: format!(
-                "Graphalytics primitive result has {} values for {} CSR nodes",
+                "dense primitive result has {} values for {} CSR nodes",
                 raw.len(),
                 csr.node_count()
             ),
@@ -67,11 +67,11 @@ pub(super) fn raw_to_query(
         .map(|(name, _)| (*name).to_string())
         .collect();
     let rows = match raw {
-        GraphalyticsRawValues::PageRank(values)
-        | GraphalyticsRawValues::Lcc(values)
-        | GraphalyticsRawValues::Sssp(values) => named_floats(csr, values),
-        GraphalyticsRawValues::Wcc(values) => named_u32s(csr, values),
-        GraphalyticsRawValues::LabelPropagation(values) => values
+        AnalyticsRawValues::PageRank(values)
+        | AnalyticsRawValues::Lcc(values)
+        | AnalyticsRawValues::Sssp(values) => named_floats(csr, values),
+        AnalyticsRawValues::Wcc(values) => named_u32s(csr, values),
+        AnalyticsRawValues::LabelPropagation(values) => values
             .into_iter()
             .enumerate()
             .map(|(node, label)| {
@@ -132,17 +132,12 @@ mod tests {
             raw_to_query(
                 &csr,
                 GraphAlgorithm::Wcc,
-                GraphalyticsRawValues::PageRank(vec![0.5, 0.5]),
+                AnalyticsRawValues::PageRank(vec![0.5, 0.5]),
             )
             .is_err()
         );
         assert!(
-            raw_to_query(
-                &csr,
-                GraphAlgorithm::Wcc,
-                GraphalyticsRawValues::Wcc(vec![0]),
-            )
-            .is_err()
+            raw_to_query(&csr, GraphAlgorithm::Wcc, AnalyticsRawValues::Wcc(vec![0]),).is_err()
         );
     }
 }

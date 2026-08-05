@@ -65,9 +65,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
     /// Open around an already prepared in-memory CSR map.
     ///
-    /// This crate-private path is used by the native Graphalytics importer to
-    /// avoid rebuilding the same index after it bulk-constructs an empty store.
-    #[cfg(feature = "graphalytics-runner")]
+    /// Initialize an already durable store around a caller-prepared CSR map,
+    /// avoiding a redundant storage scan after an atomic bulk import.
     pub(crate) async fn open_with_config_and_csr(
         storage: S,
         config: LiteConfig,

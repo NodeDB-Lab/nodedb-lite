@@ -132,7 +132,6 @@ pub trait StorageEngine: Send + Sync + 'static {
     /// The default is deliberately unsupported: a backend must opt in only
     /// when it can retain the stream's bounded-memory and all-or-nothing
     /// semantics rather than silently collecting it into a normal batch.
-    #[cfg(feature = "graphalytics-runner")]
     async fn bulk_load_sorted_unique(
         &self,
         _ops: &mut (dyn Iterator<Item = Result<WriteOp, LiteError>> + Send),

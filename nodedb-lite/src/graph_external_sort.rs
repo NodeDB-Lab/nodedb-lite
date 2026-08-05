@@ -7,7 +7,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::graphalytics_diagnostics::SortDiagnostics;
+use crate::graph_diagnostics::SortDiagnostics;
 
 use crate::error::LiteError;
 
@@ -43,7 +43,7 @@ impl ExternalEdgeSorter {
         }
         Ok(Self {
             temp_dir: tempfile::Builder::new()
-                .prefix("nodedb-lite-graphalytics-")
+                .prefix("nodedb-lite-graph-import-")
                 .tempdir()
                 .map_err(io_error)?,
             run_capacity,
@@ -88,7 +88,7 @@ impl ExternalEdgeSorter {
         }
         if self.runs.len() == MAX_OPEN_RUNS {
             return Err(storage_error(format!(
-                "Graphalytics external sort exceeds the {MAX_OPEN_RUNS}-run bound"
+                "graph import external sort exceeds the {MAX_OPEN_RUNS}-run bound"
             )));
         }
         let records = self.pending.len() as u64;

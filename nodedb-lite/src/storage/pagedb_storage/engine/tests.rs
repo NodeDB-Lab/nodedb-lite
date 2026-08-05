@@ -182,10 +182,7 @@ async fn batch_write_duplicate_puts_preserves_last_write() {
     .unwrap();
 
     assert_eq!(
-        s.get(Namespace::Graph, b"same")
-            .await
-            .unwrap()
-            .as_deref(),
+        s.get(Namespace::Graph, b"same").await.unwrap().as_deref(),
         Some(b"second".as_slice())
     );
 }

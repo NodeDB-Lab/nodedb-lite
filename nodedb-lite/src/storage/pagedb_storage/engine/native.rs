@@ -4,7 +4,6 @@
 
 use std::time::Instant;
 
-#[cfg(feature = "graphalytics-runner")]
 use std::io;
 
 use async_trait::async_trait;
@@ -73,7 +72,6 @@ where
             .await
     }
 
-    #[cfg(feature = "graphalytics-runner")]
     async fn bulk_load_sorted_unique(
         &self,
         ops: &mut (dyn Iterator<Item = Result<WriteOp, LiteError>> + Send),
@@ -231,13 +229,11 @@ where
     }
 }
 
-#[cfg(feature = "graphalytics-runner")]
 struct SortedBulkOps<'a> {
     ops: &'a mut (dyn Iterator<Item = Result<WriteOp, LiteError>> + Send),
     source_error: &'a mut Option<LiteError>,
 }
 
-#[cfg(feature = "graphalytics-runner")]
 impl Iterator for SortedBulkOps<'_> {
     type Item = Result<(Vec<u8>, Bytes), pagedb::PagedbError>;
 
@@ -266,13 +262,11 @@ impl Iterator for SortedBulkOps<'_> {
     }
 }
 
-#[cfg(feature = "graphalytics-runner")]
 struct CountedBulkOps<'a, 'b> {
     inner: &'a mut SortedBulkOps<'b>,
     operations: &'a mut u64,
 }
 
-#[cfg(feature = "graphalytics-runner")]
 impl Iterator for CountedBulkOps<'_, '_> {
     type Item = Result<(Vec<u8>, Bytes), pagedb::PagedbError>;
 
@@ -436,7 +430,6 @@ mod tests {
     use super::*;
     use crate::storage::pagedb_storage::PagedbStorage;
 
-    #[cfg(feature = "graphalytics-runner")]
     #[tokio::test]
     async fn sorted_bulk_load_persists_exact_values_in_key_order() {
         let storage = PagedbStorage::open_in_memory().await.unwrap();
@@ -477,7 +470,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "graphalytics-runner")]
     #[tokio::test]
     async fn sorted_bulk_load_rejects_delete_without_committing() {
         let storage = PagedbStorage::open_in_memory().await.unwrap();
@@ -497,7 +489,6 @@ mod tests {
         assert!(storage.get(Namespace::Graph, b"a").await.unwrap().is_none());
     }
 
-    #[cfg(feature = "graphalytics-runner")]
     #[tokio::test]
     async fn sorted_bulk_load_preserves_iterator_error_without_committing() {
         let storage = PagedbStorage::open_in_memory().await.unwrap();

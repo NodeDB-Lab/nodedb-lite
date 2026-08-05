@@ -8,6 +8,8 @@ use nodedb_graph::params::AlgoParams;
 use crate::engine::graph::index::CsrIndex;
 use crate::error::LiteError;
 
+type CompactedAdjacency<'a> = (&'a [u32], &'a [u32], Option<&'a [f64]>);
+
 // ── SSSP (Dijkstra) ──────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug)]
@@ -114,7 +116,7 @@ pub(super) fn sssp_raw(
 
 pub(super) fn validate_sssp_weights(
     csr: &CsrIndex,
-    compacted: Option<(&[u32], &[u32], Option<&[f64]>)>,
+    compacted: Option<CompactedAdjacency<'_>>,
 ) -> Result<(), LiteError> {
     if !csr.has_weights() {
         return Ok(());

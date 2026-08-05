@@ -1,22 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exact durable edge-value encoding for the Graphalytics importer.
+//! Exact durable edge-value encoding for weighted edge-list import.
 
 use nodedb_types::Namespace;
 #[cfg(test)]
 use nodedb_types::value::Value;
 
 use crate::error::LiteError;
-use crate::graphalytics_external_sort::SortedEdge;
+use crate::graph_external_sort::SortedEdge;
 use crate::query::graph_ops::edges::parse_durable_vertex_store_key;
 #[cfg(test)]
 use crate::query::graph_ops::edges::{
     DURABLE_VERTEX_MARKER, durable_vertex_store_key, edge_store_key,
 };
 use crate::storage::engine::WriteOp;
-
-const COLLECTION: &str = "graphalytics";
-const EDGE_LABEL: &str = "EDGE";
 
 #[cfg(test)]
 pub(crate) struct WeightProperties(pub(crate) f64);
@@ -34,14 +31,20 @@ impl zerompk::ToMessagePack for WeightProperties {
     }
 }
 
-fn encode_stored_edge(source: &str, destination: &str, properties: &[u8]) -> Vec<u8> {
+fn encode_stored_edge(
+    collection: &str,
+    edge_label: &str,
+    source: &str,
+    destination: &str,
+    properties: &[u8],
+) -> Vec<u8> {
     // The tagged five-field object has under 96 bytes of fixed framing;
     // reserve 128 so valid identifiers never force a second allocation.
     let mut encoded = Vec::with_capacity(source.len() + destination.len() + properties.len() + 128);
     encoded.extend_from_slice(&[0x92, 0x07, 0x85]);
-    push_string_value(&mut encoded, "collection", COLLECTION);
+    push_string_value(&mut encoded, "collection", collection);
     push_string_value(&mut encoded, "src", source);
-    push_string_value(&mut encoded, "label", EDGE_LABEL);
+    push_string_value(&mut encoded, "label", edge_label);
     push_string_value(&mut encoded, "dst", destination);
     push_string(&mut encoded, "props");
     encoded.extend_from_slice(&[0x92, 0x05]);
@@ -86,9 +89,13 @@ fn push_binary(encoded: &mut Vec<u8>, value: &[u8]) {
     encoded.extend_from_slice(value);
 }
 
-pub(crate) fn sorted_edge_write(edge: SortedEdge) -> Result<WriteOp, LiteError> {
-    if let Some((collection, _node)) = parse_durable_vertex_store_key(&edge.key) {
-        if collection != COLLECTION {
+pub(crate) fn sorted_edge_write(
+    edge: SortedEdge,
+    collection: &str,
+    edge_label: &str,
+) -> Result<WriteOp, LiteError> {
+    if let Some((marker_collection, _node)) = parse_durable_vertex_store_key(&edge.key) {
+        if marker_collection != collection {
             return Err(malformed_stored_edge());
         }
         return Ok(WriteOp::Put {
@@ -98,9 +105,9 @@ pub(crate) fn sorted_edge_write(edge: SortedEdge) -> Result<WriteOp, LiteError> 
         });
     }
 
-    let prefix_len = COLLECTION.len() + 1;
-    if edge.key.get(..COLLECTION.len()) != Some(COLLECTION.as_bytes())
-        || edge.key.get(COLLECTION.len()) != Some(&0)
+    let prefix_len = collection.len() + 1;
+    if edge.key.get(..collection.len()) != Some(collection.as_bytes())
+        || edge.key.get(collection.len()) != Some(&0)
     {
         return Err(malformed_stored_edge());
     }
@@ -114,9 +121,9 @@ pub(crate) fn sorted_edge_write(edge: SortedEdge) -> Result<WriteOp, LiteError> 
         .map(|offset| prefix_len + offset)
         .ok_or_else(malformed_stored_edge)?;
     let label_start = source_end + 1;
-    let label_end = label_start + EDGE_LABEL.len();
+    let label_end = label_start + edge_label.len();
     let destination_start = label_end + 1;
-    if edge.key.get(label_start..label_end) != Some(EDGE_LABEL.as_bytes())
+    if edge.key.get(label_start..label_end) != Some(edge_label.as_bytes())
         || edge.key.get(label_end) != Some(&0)
         || destination_start > edge.key.len()
     {
@@ -127,7 +134,7 @@ pub(crate) fn sorted_edge_write(edge: SortedEdge) -> Result<WriteOp, LiteError> 
     let destination =
         std::str::from_utf8(&edge.key[destination_start..]).map_err(|_| malformed_stored_edge())?;
     let properties = encoded_weight_properties(edge.weight);
-    let value = encode_stored_edge(source, destination, &properties);
+    let value = encode_stored_edge(collection, edge_label, source, destination, &properties);
     Ok(WriteOp::Put {
         ns: Namespace::Graph,
         key: edge.key,
@@ -149,13 +156,16 @@ fn encoded_weight_properties(weight: f64) -> [u8; 21] {
 
 fn malformed_stored_edge() -> LiteError {
     LiteError::Storage {
-        detail: "malformed Graphalytics durable edge key".to_string(),
+        detail: "malformed durable weighted edge key".to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const COLLECTION: &str = "g";
+    const EDGE_LABEL: &str = "E";
 
     #[test]
     fn fixed_weight_encoding_matches_canonical_messagepack() {
@@ -167,10 +177,14 @@ mod tests {
 
     #[test]
     fn compact_spill_regenerates_the_exact_stored_value_shape() {
-        let WriteOp::Put { key, value, .. } = sorted_edge_write(SortedEdge {
-            key: edge_store_key(COLLECTION, "a", EDGE_LABEL, "b"),
-            weight: 2.5,
-        })
+        let WriteOp::Put { key, value, .. } = sorted_edge_write(
+            SortedEdge {
+                key: edge_store_key(COLLECTION, "a", EDGE_LABEL, "b"),
+                weight: 2.5,
+            },
+            COLLECTION,
+            EDGE_LABEL,
+        )
         .unwrap() else {
             panic!("expected put");
         };
@@ -193,10 +207,14 @@ mod tests {
     #[test]
     fn marker_named_edge_source_remains_an_edge() {
         let source = std::str::from_utf8(DURABLE_VERTEX_MARKER).unwrap();
-        let WriteOp::Put { value, .. } = sorted_edge_write(SortedEdge {
-            key: edge_store_key(COLLECTION, source, EDGE_LABEL, "b"),
-            weight: 2.5,
-        })
+        let WriteOp::Put { value, .. } = sorted_edge_write(
+            SortedEdge {
+                key: edge_store_key(COLLECTION, source, EDGE_LABEL, "b"),
+                weight: 2.5,
+            },
+            COLLECTION,
+            EDGE_LABEL,
+        )
         .unwrap() else {
             panic!("expected put");
         };
@@ -205,10 +223,14 @@ mod tests {
 
     #[test]
     fn exact_vertex_marker_has_an_empty_value() {
-        let WriteOp::Put { value, .. } = sorted_edge_write(SortedEdge {
-            key: durable_vertex_store_key(COLLECTION, "isolated"),
-            weight: 0.0,
-        })
+        let WriteOp::Put { value, .. } = sorted_edge_write(
+            SortedEdge {
+                key: durable_vertex_store_key(COLLECTION, "isolated"),
+                weight: 0.0,
+            },
+            COLLECTION,
+            EDGE_LABEL,
+        )
         .unwrap() else {
             panic!("expected put");
         };
@@ -220,7 +242,7 @@ mod tests {
         for length in [31usize, 32, 255, 256, 65_535, 65_536] {
             let source = "s".repeat(length);
             let properties = zerompk::to_msgpack_vec(&WeightProperties(2.5)).unwrap();
-            let direct = encode_stored_edge(&source, "b", &properties);
+            let direct = encode_stored_edge(COLLECTION, EDGE_LABEL, &source, "b", &properties);
             let canonical = crate::query::graph_ops::edges::edge_to_value(
                 COLLECTION,
                 &source,
@@ -239,7 +261,7 @@ mod tests {
     #[test]
     fn specialized_edge_encoding_matches_stored_value_shape() {
         let properties = zerompk::to_msgpack_vec(&WeightProperties(2.5)).unwrap();
-        let value = encode_stored_edge("a", "b", &properties);
+        let value = encode_stored_edge(COLLECTION, EDGE_LABEL, "a", "b", &properties);
         let Value::Object(edge) = zerompk::from_msgpack::<Value>(&value).unwrap() else {
             panic!("expected edge object");
         };

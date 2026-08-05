@@ -13,7 +13,7 @@ use nodedb_types::value::Value;
 
 use crate::engine::graph::index::CsrIndex;
 use crate::error::LiteError;
-use crate::query::graph_ops::graphalytics_results::{GraphalyticsRawValues, raw_to_query};
+use crate::query::graph_ops::analytics_results::{AnalyticsRawValues, raw_to_query};
 
 mod communities;
 mod lcc;
@@ -33,19 +33,19 @@ use sssp::{sssp_raw, validate_sssp_weights};
 
 type CsrMap = Arc<Mutex<HashMap<String, CsrIndex>>>;
 
-/// Run a Graphalytics algorithm without node-name or query-row materialization.
-pub(crate) fn run_graphalytics_raw(
+/// Run a dense algorithm without node-name or query-row materialization.
+pub(crate) fn run_dense_raw(
     csr_map: &CsrMap,
     algorithm: GraphAlgorithm,
     params: &AlgoParams,
-) -> Result<GraphalyticsRawValues, LiteError> {
+) -> Result<AnalyticsRawValues, LiteError> {
     let map = csr_map.lock().map_err(|_| LiteError::LockPoisoned)?;
     let csr = graph_csr(&map, &params.collection)?;
-    run_graphalytics_raw_on_csr(csr, algorithm, params, false)
+    run_dense_raw_on_csr(csr, algorithm, params, false)
 }
 
-/// Validate all SSSP weights before starting a timed primitive computation.
-pub(crate) fn validate_graphalytics_sssp_weights(
+/// Validate all SSSP weights before starting a dense primitive computation.
+pub(crate) fn validate_dense_sssp_weights(
     csr_map: &CsrMap,
     collection: &str,
 ) -> Result<(), LiteError> {
@@ -54,23 +54,22 @@ pub(crate) fn validate_graphalytics_sssp_weights(
     validate_sssp_weights(csr, csr.compacted_out_weighted_adjacency_raw())
 }
 
-/// Run a Graphalytics primitive after the caller has separately validated SSSP weights.
-#[doc(hidden)]
-pub(crate) fn run_graphalytics_raw_prevalidated_sssp(
+/// Run a dense SSSP primitive after the caller has separately validated weights.
+pub(crate) fn run_dense_raw_prevalidated_sssp(
     csr_map: &CsrMap,
     algorithm: GraphAlgorithm,
     params: &AlgoParams,
-) -> Result<GraphalyticsRawValues, LiteError> {
+) -> Result<AnalyticsRawValues, LiteError> {
     let map = csr_map.lock().map_err(|_| LiteError::LockPoisoned)?;
     let csr = graph_csr(&map, &params.collection)?;
-    run_graphalytics_raw_on_csr(csr, algorithm, params, algorithm == GraphAlgorithm::Sssp)
+    run_dense_raw_on_csr(csr, algorithm, params, algorithm == GraphAlgorithm::Sssp)
 }
 
-pub(crate) fn materialize_graphalytics_raw(
+pub(crate) fn materialize_dense_raw(
     csr_map: &CsrMap,
     collection: &str,
     algorithm: GraphAlgorithm,
-    raw: GraphalyticsRawValues,
+    raw: AnalyticsRawValues,
 ) -> Result<QueryResult, LiteError> {
     let map = csr_map.lock().map_err(|_| LiteError::LockPoisoned)?;
     let csr = graph_csr(&map, collection)?;
@@ -86,26 +85,26 @@ fn graph_csr<'a>(
     })
 }
 
-fn run_graphalytics_raw_on_csr(
+fn run_dense_raw_on_csr(
     csr: &CsrIndex,
     algorithm: GraphAlgorithm,
     params: &AlgoParams,
     sssp_prevalidated: bool,
-) -> Result<GraphalyticsRawValues, LiteError> {
+) -> Result<AnalyticsRawValues, LiteError> {
     match algorithm {
-        GraphAlgorithm::PageRank => Ok(GraphalyticsRawValues::PageRank(pagerank_raw(csr, params))),
-        GraphAlgorithm::Wcc => Ok(GraphalyticsRawValues::Wcc(wcc_raw(csr))),
-        GraphAlgorithm::Lcc => Ok(GraphalyticsRawValues::Lcc(lcc_raw(csr))),
-        GraphAlgorithm::Sssp => Ok(GraphalyticsRawValues::Sssp(sssp_raw(
+        GraphAlgorithm::PageRank => Ok(AnalyticsRawValues::PageRank(pagerank_raw(csr, params))),
+        GraphAlgorithm::Wcc => Ok(AnalyticsRawValues::Wcc(wcc_raw(csr))),
+        GraphAlgorithm::Lcc => Ok(AnalyticsRawValues::Lcc(lcc_raw(csr))),
+        GraphAlgorithm::Sssp => Ok(AnalyticsRawValues::Sssp(sssp_raw(
             csr,
             params,
             sssp_prevalidated,
         )?)),
-        GraphAlgorithm::LabelPropagation => Ok(GraphalyticsRawValues::LabelPropagation(
+        GraphAlgorithm::LabelPropagation => Ok(AnalyticsRawValues::LabelPropagation(
             label_propagation_raw(csr, params),
         )),
         _ => Err(LiteError::Storage {
-            detail: format!("{algorithm:?} is not a Graphalytics primitive-result algorithm"),
+            detail: format!("{algorithm:?} does not support dense primitive output"),
         }),
     }
 }
@@ -130,7 +129,7 @@ pub fn run_algo(
         return raw_to_query(
             csr,
             algorithm,
-            run_graphalytics_raw_on_csr(csr, algorithm, params, false)?,
+            run_dense_raw_on_csr(csr, algorithm, params, false)?,
         );
     }
 
@@ -142,7 +141,7 @@ pub fn run_algo(
         | GraphAlgorithm::Wcc
         | GraphAlgorithm::LabelPropagation
         | GraphAlgorithm::Lcc
-        | GraphAlgorithm::Sssp => unreachable!("handled as primitive Graphalytics output"),
+        | GraphAlgorithm::Sssp => unreachable!("handled as dense primitive output"),
         GraphAlgorithm::Betweenness => betweenness(csr, params),
         GraphAlgorithm::Closeness => closeness(csr, params),
         GraphAlgorithm::Harmonic => harmonic(csr),
@@ -561,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_graphalytics_results_adapt_to_the_existing_query_schema_and_rows() {
+    fn dense_results_adapt_to_the_existing_query_schema_and_rows() {
         for algorithm in [
             GraphAlgorithm::PageRank,
             GraphAlgorithm::Wcc,
@@ -580,8 +579,8 @@ mod tests {
                 ..Default::default()
             };
             let expected = run_algo(&map, algorithm, &params).unwrap();
-            let raw = run_graphalytics_raw(&map, algorithm, &params).unwrap();
-            let actual = materialize_graphalytics_raw(&map, "g", algorithm, raw).unwrap();
+            let raw = run_dense_raw(&map, algorithm, &params).unwrap();
+            let actual = materialize_dense_raw(&map, "g", algorithm, raw).unwrap();
             assert_eq!(actual, expected, "{algorithm:?}");
             assert_eq!(actual.columns[0], "node_id");
             assert_eq!(actual.rows.len(), 3);
@@ -597,12 +596,10 @@ mod tests {
             max_iterations: Some(1),
             ..Default::default()
         };
-        let raw = run_graphalytics_raw(&map, GraphAlgorithm::LabelPropagation, &params).unwrap();
-        assert!(
-            matches!(&raw, GraphalyticsRawValues::LabelPropagation(labels) if labels.len() == 3)
-        );
+        let raw = run_dense_raw(&map, GraphAlgorithm::LabelPropagation, &params).unwrap();
+        assert!(matches!(&raw, AnalyticsRawValues::LabelPropagation(labels) if labels.len() == 3));
         let result =
-            materialize_graphalytics_raw(&map, "g", GraphAlgorithm::LabelPropagation, raw).unwrap();
+            materialize_dense_raw(&map, "g", GraphAlgorithm::LabelPropagation, raw).unwrap();
         assert_eq!(result.columns, vec!["node_id", "community_id"]);
         assert!(
             result

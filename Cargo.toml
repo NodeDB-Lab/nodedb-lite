@@ -55,7 +55,7 @@ zerompk = { version = "0.7", git = "https://github.com/farhan-syah/zerompk", rev
 # A caret requirement never matches a prerelease, so `version = "0"` could not
 # resolve against a registry that only publishes `0.1.0-beta.*`. Name the
 # prerelease explicitly.
-pagedb = { version = "=0.1.0", default-features = false }
+pagedb = { git = "https://github.com/NodeDB-Lab/pagedb", rev = "216a84d5f271db140f7f8887d0b636e822dfab82", default-features = false }
 # Matches the `Bytes` type pagedb's txn API returns; must track pagedb's own
 # `bytes` major so the two resolve to one version and stay assignable.
 bytes = "1"
