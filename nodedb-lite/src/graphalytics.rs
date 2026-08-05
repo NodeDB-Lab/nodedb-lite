@@ -3,25 +3,31 @@
 //! Feature-gated embedded runner support for LDBC Graphalytics.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use nodedb_graph::params::{AlgoParams, GraphAlgorithm};
+use nodedb_types::Namespace;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
 use crate::NodeDbLite;
 use crate::engine::graph::index::CsrIndex;
 use crate::error::LiteError;
-use crate::graphalytics_external_sort::ExternalEdgeSorter;
+use crate::graphalytics_external_sort::{ExternalEdgeSorter, SortedEdge};
 use crate::query::graph_ops::algorithms::run_algo;
 use crate::query::graph_ops::edges::edge_store_key;
-use crate::storage::engine::StorageEngine;
+use crate::storage::engine::{StorageEngine, WriteOp};
 
 const COLLECTION: &str = "graphalytics";
 const EDGE_LABEL: &str = "EDGE";
 const BATCH_SIZE: usize = 1_000_000;
+const VERTEX_BATCH_SIZE: usize = 100_000;
+const MAX_VERTEX_ID_BYTES: usize = 512 * 1024 - 64;
+const MAX_EDGE_LINE_BYTES: usize = MAX_VERTEX_ID_BYTES * 2 + 128;
+const MAX_PENDING_ID_BYTES: usize = 256 * 1024 * 1024;
+const MAX_MERGE_KEY_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct ImportMetrics {
@@ -91,37 +97,46 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let load_start = Instant::now();
         let mut prepare_duration = Duration::ZERO;
         let file = File::open(vertex_file).map_err(io_error)?;
-        let vertices: Vec<String> = BufReader::with_capacity(1 << 20, file)
-            .lines()
-            .map(|line| line.map_err(io_error))
-            .collect::<Result<_, _>>()?;
-        let vertex_count = vertices
-            .iter()
-            .filter(|vertex| !vertex.trim().is_empty())
-            .count();
-        let vertex_prepare_start = Instant::now();
-        {
-            let mut map = self.csr.lock().map_err(|_| LiteError::LockPoisoned)?;
-            let csr = map.entry(COLLECTION.to_string()).or_default();
-            for vertex in &vertices {
-                let vertex = vertex.trim();
-                if !vertex.is_empty() {
-                    csr.add_node(vertex).map_err(graph_error)?;
-                }
+        let mut reader = BufReader::with_capacity(1 << 20, file);
+        let mut line = String::new();
+        let mut pending_vertices = Vec::with_capacity(VERTEX_BATCH_SIZE);
+        let mut pending_vertex_bytes = 0usize;
+        let mut vertex_count = 0usize;
+        while read_bounded_line(&mut reader, &mut line, MAX_VERTEX_ID_BYTES + 2)? != 0 {
+            let vertex = line.trim();
+            if vertex.is_empty() {
+                continue;
             }
+            validate_vertex_id(vertex, &line)?;
+            if pending_vertices.len() == VERTEX_BATCH_SIZE
+                || (!pending_vertices.is_empty()
+                    && pending_vertex_bytes + vertex.len() > MAX_PENDING_ID_BYTES)
+            {
+                prepare_duration += self.graphalytics_stage_vertices(&pending_vertices)?;
+                pending_vertices.clear();
+                pending_vertex_bytes = 0;
+            }
+            pending_vertex_bytes += vertex.len();
+            pending_vertices.push(vertex.to_string());
+            vertex_count += 1;
         }
-        prepare_duration += vertex_prepare_start.elapsed();
+        if !pending_vertices.is_empty() {
+            prepare_duration += self.graphalytics_stage_vertices(&pending_vertices)?;
+        }
 
         let file = File::open(edge_file).map_err(io_error)?;
+        let mut reader = BufReader::with_capacity(1 << 20, file);
         let mut pending = Vec::with_capacity(BATCH_SIZE);
+        let mut pending_id_bytes = 0usize;
         let mut sorter = ExternalEdgeSorter::new(BATCH_SIZE)?;
         let mut edge_count = 0usize;
         let mut ordinal = 0u64;
-        for line in BufReader::with_capacity(1 << 20, file).lines() {
-            let line = line.map_err(io_error)?;
+        while read_bounded_line(&mut reader, &mut line, MAX_EDGE_LINE_BYTES)? != 0 {
             let mut fields = line.split_whitespace();
             let source = fields.next().ok_or_else(|| malformed_edge(&line))?;
             let destination = fields.next().ok_or_else(|| malformed_edge(&line))?;
+            validate_vertex_id(source, &line)?;
+            validate_vertex_id(destination, &line)?;
             let weight = fields
                 .next()
                 .ok_or_else(|| malformed_edge(&line))?
@@ -130,20 +145,29 @@ impl<S: StorageEngine> NodeDbLite<S> {
             if !weight.is_finite() || weight < 0.0 {
                 return Err(malformed_edge(&line));
             }
-            pending.push((source.to_string(), destination.to_string(), weight));
-            edge_count += 1;
-            if pending.len() == BATCH_SIZE {
+            let id_bytes = source.len() + destination.len();
+            if pending.len() == BATCH_SIZE
+                || (!pending.is_empty() && pending_id_bytes + id_bytes > MAX_PENDING_ID_BYTES)
+            {
                 prepare_duration +=
                     self.graphalytics_stage_edges(&pending, &mut sorter, &mut ordinal)?;
                 pending.clear();
+                pending_id_bytes = 0;
             }
+            pending_id_bytes += id_bytes;
+            pending.push((source.to_string(), destination.to_string(), weight));
+            edge_count += 1;
         }
         if !pending.is_empty() {
             prepare_duration +=
                 self.graphalytics_stage_edges(&pending, &mut sorter, &mut ordinal)?;
         }
         let mut merge = sorter.finish()?;
-        while let Some(writes) = merge.next_batch(BATCH_SIZE)? {
+        while let Some(edges) = merge.next_batch(BATCH_SIZE, MAX_MERGE_KEY_BYTES)? {
+            let writes = edges
+                .into_iter()
+                .map(sorted_edge_write)
+                .collect::<Result<Vec<_>, _>>()?;
             self.storage.batch_write(&writes).await?;
         }
         let total_import = load_start.elapsed();
@@ -167,6 +191,16 @@ impl<S: StorageEngine> NodeDbLite<S> {
         })
     }
 
+    fn graphalytics_stage_vertices(&self, vertices: &[String]) -> Result<Duration, LiteError> {
+        let prepare_start = Instant::now();
+        let mut map = self.csr.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let csr = map.entry(COLLECTION.to_string()).or_default();
+        for vertex in vertices {
+            csr.add_node(vertex).map_err(graph_error)?;
+        }
+        Ok(prepare_start.elapsed())
+    }
+
     fn graphalytics_stage_edges(
         &self,
         edges: &[(String, String, f64)],
@@ -184,23 +218,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let prepare_duration = prepare_start.elapsed();
 
         for (source, destination, weight) in edges {
-            let properties =
-                zerompk::to_msgpack_vec(&WeightProperties(*weight)).map_err(|error| {
-                    LiteError::Serialization {
-                        detail: error.to_string(),
-                    }
-                })?;
-            let value = zerompk::to_msgpack_vec(&StoredGraphalyticsEdge {
-                source,
-                destination,
-                properties: &properties,
-            })
-            .map_err(|error| LiteError::Serialization {
-                detail: error.to_string(),
-            })?;
             sorter.push(
                 edge_store_key(COLLECTION, source, EDGE_LABEL, destination),
-                value,
+                *weight,
                 *ordinal,
             )?;
             *ordinal = ordinal.checked_add(1).ok_or_else(|| LiteError::Storage {
@@ -295,6 +315,50 @@ impl<S: StorageEngine> NodeDbLite<S> {
     }
 }
 
+fn sorted_edge_write(edge: SortedEdge) -> Result<WriteOp, LiteError> {
+    let prefix_len = COLLECTION.len() + 1;
+    if edge.key.get(..COLLECTION.len()) != Some(COLLECTION.as_bytes())
+        || edge.key.get(COLLECTION.len()) != Some(&0)
+    {
+        return Err(malformed_stored_edge());
+    }
+    let suffix = edge
+        .key
+        .get(prefix_len..)
+        .ok_or_else(malformed_stored_edge)?;
+    let source_end = suffix
+        .iter()
+        .position(|byte| *byte == 0)
+        .map(|offset| prefix_len + offset)
+        .ok_or_else(malformed_stored_edge)?;
+    let label_start = source_end + 1;
+    let label_end = label_start + EDGE_LABEL.len();
+    let destination_start = label_end + 1;
+    if edge.key.get(label_start..label_end) != Some(EDGE_LABEL.as_bytes())
+        || edge.key.get(label_end) != Some(&0)
+        || destination_start > edge.key.len()
+    {
+        return Err(malformed_stored_edge());
+    }
+    let source = std::str::from_utf8(&edge.key[prefix_len..source_end])
+        .map_err(|_| malformed_stored_edge())?;
+    let destination =
+        std::str::from_utf8(&edge.key[destination_start..]).map_err(|_| malformed_stored_edge())?;
+    let properties =
+        zerompk::to_msgpack_vec(&WeightProperties(edge.weight)).map_err(serialization_error)?;
+    let value = zerompk::to_msgpack_vec(&StoredGraphalyticsEdge {
+        source,
+        destination,
+        properties: &properties,
+    })
+    .map_err(serialization_error)?;
+    Ok(WriteOp::Put {
+        ns: Namespace::Graph,
+        key: edge.key,
+        value,
+    })
+}
+
 fn upsert_graphalytics_edge(
     csr: &mut CsrIndex,
     source: &str,
@@ -307,6 +371,43 @@ fn upsert_graphalytics_edge(
     }
     csr.add_edge_weighted(source, EDGE_LABEL, destination, weight)
         .map_err(graph_error)
+}
+
+fn read_bounded_line(
+    reader: &mut impl BufRead,
+    line: &mut String,
+    max_bytes: usize,
+) -> Result<usize, LiteError> {
+    line.clear();
+    let read = reader
+        .take((max_bytes + 1) as u64)
+        .read_line(line)
+        .map_err(io_error)?;
+    if read > max_bytes {
+        return Err(LiteError::Storage {
+            detail: format!("Graphalytics input line exceeds the {max_bytes}-byte bound"),
+        });
+    }
+    Ok(read)
+}
+
+fn validate_vertex_id(vertex: &str, line: &str) -> Result<(), LiteError> {
+    if vertex.as_bytes().contains(&0) || vertex.len() > MAX_VERTEX_ID_BYTES {
+        return Err(malformed_edge(line));
+    }
+    Ok(())
+}
+
+fn serialization_error(error: impl std::fmt::Display) -> LiteError {
+    LiteError::Serialization {
+        detail: error.to_string(),
+    }
+}
+
+fn malformed_stored_edge() -> LiteError {
+    LiteError::Storage {
+        detail: "malformed Graphalytics edge key".to_string(),
+    }
 }
 
 fn io_error(error: std::io::Error) -> LiteError {
@@ -332,12 +433,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bounded_line_reader_rejects_oversized_records_before_allocation_growth() {
+        let mut reader = std::io::Cursor::new(b"abcdef\n");
+        let mut line = String::new();
+        let error = read_bounded_line(&mut reader, &mut line, 4).unwrap_err();
+        assert!(error.to_string().contains("exceeds the 4-byte bound"));
+    }
+
+    #[test]
+    fn vertex_ids_reject_ambiguous_nul_delimiters() {
+        let error = validate_vertex_id("a\0b", "a\0b c 1").unwrap_err();
+        assert!(error.to_string().contains("malformed Graphalytics edge"));
+    }
+
+    #[test]
     fn duplicate_edge_uses_last_weight_in_csr() {
         let mut csr = CsrIndex::new();
         upsert_graphalytics_edge(&mut csr, "a", "b", 1.0).unwrap();
         upsert_graphalytics_edge(&mut csr, "a", "b", 2.5).unwrap();
         assert_eq!(csr.edge_weight("a", EDGE_LABEL, "b"), Some(2.5));
         assert_eq!(csr.edge_count(), 1);
+    }
+
+    #[test]
+    fn compact_spill_regenerates_the_exact_stored_value_shape() {
+        let WriteOp::Put { key, value, .. } = sorted_edge_write(SortedEdge {
+            key: edge_store_key(COLLECTION, "a", EDGE_LABEL, "b"),
+            weight: 2.5,
+        })
+        .unwrap() else {
+            panic!("expected put");
+        };
+        assert_eq!(key, edge_store_key(COLLECTION, "a", EDGE_LABEL, "b"));
+        let properties = zerompk::to_msgpack_vec(&WeightProperties(2.5)).unwrap();
+        let legacy = crate::query::graph_ops::edges::edge_to_value(
+            COLLECTION,
+            "a",
+            EDGE_LABEL,
+            "b",
+            &properties,
+        )
+        .unwrap();
+        assert_eq!(
+            zerompk::from_msgpack::<Value>(&value).unwrap(),
+            zerompk::from_msgpack::<Value>(&legacy).unwrap()
+        );
     }
 
     #[test]

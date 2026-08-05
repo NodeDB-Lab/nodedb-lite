@@ -6,24 +6,29 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 
-use nodedb_types::Namespace;
-
 use crate::error::LiteError;
-use crate::storage::engine::WriteOp;
 
 const MAX_OPEN_RUNS: usize = 64;
+const MAX_KEY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PENDING_KEY_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Debug)]
 struct SortableEdge {
     key: Vec<u8>,
-    value: Vec<u8>,
+    weight: f64,
     ordinal: u64,
+}
+
+pub(crate) struct SortedEdge {
+    pub(crate) key: Vec<u8>,
+    pub(crate) weight: f64,
 }
 
 pub(crate) struct ExternalEdgeSorter {
     temp_dir: tempfile::TempDir,
     run_capacity: usize,
     pending: Vec<SortableEdge>,
+    pending_key_bytes: usize,
     runs: Vec<PathBuf>,
 }
 
@@ -39,6 +44,7 @@ impl ExternalEdgeSorter {
                 .map_err(io_error)?,
             run_capacity,
             pending: Vec::with_capacity(run_capacity),
+            pending_key_bytes: 0,
             runs: Vec::new(),
         })
     }
@@ -46,12 +52,23 @@ impl ExternalEdgeSorter {
     pub(crate) fn push(
         &mut self,
         key: Vec<u8>,
-        value: Vec<u8>,
+        weight: f64,
         ordinal: u64,
     ) -> Result<(), LiteError> {
+        if key.len() > MAX_KEY_BYTES {
+            return Err(storage_error(format!(
+                "external-sort key exceeds the {MAX_KEY_BYTES}-byte bound"
+            )));
+        }
+        if !self.pending.is_empty()
+            && self.pending_key_bytes.saturating_add(key.len()) > MAX_PENDING_KEY_BYTES
+        {
+            self.spill_run()?;
+        }
+        self.pending_key_bytes += key.len();
         self.pending.push(SortableEdge {
             key,
-            value,
+            weight,
             ordinal,
         });
         if self.pending.len() == self.run_capacity {
@@ -83,6 +100,7 @@ impl ExternalEdgeSorter {
         for record in self.pending.drain(..) {
             write_record(&mut writer, &record)?;
         }
+        self.pending_key_bytes = 0;
         writer.flush().map_err(io_error)?;
         self.runs.push(path);
         Ok(())
@@ -102,6 +120,7 @@ impl ExternalEdgeSorter {
         Ok(ExternalEdgeMerge {
             readers,
             heap,
+            pending_output: None,
             _temp_dir: self.temp_dir,
         })
     }
@@ -110,6 +129,7 @@ impl ExternalEdgeSorter {
 pub(crate) struct ExternalEdgeMerge {
     readers: Vec<BufReader<File>>,
     heap: BinaryHeap<HeapRecord>,
+    pending_output: Option<SortedEdge>,
     // Declared last so run readers close before TempDir removes their files.
     _temp_dir: tempfile::TempDir,
 }
@@ -118,38 +138,52 @@ impl ExternalEdgeMerge {
     pub(crate) fn next_batch(
         &mut self,
         capacity: usize,
-    ) -> Result<Option<Vec<WriteOp>>, LiteError> {
-        if capacity == 0 {
-            return Err(storage_error("merge batch capacity must be positive"));
+        key_byte_capacity: usize,
+    ) -> Result<Option<Vec<SortedEdge>>, LiteError> {
+        if capacity == 0 || key_byte_capacity == 0 {
+            return Err(storage_error("merge batch capacities must be positive"));
         }
-        let mut writes = Vec::with_capacity(capacity);
-        while writes.len() < capacity {
-            let Some(first) = self.pop_and_advance()? else {
+        let mut edges = Vec::with_capacity(capacity);
+        let mut key_bytes = 0usize;
+        while edges.len() < capacity {
+            let next = match self.pending_output.take() {
+                Some(edge) => Some(edge),
+                None => self.next_unique_edge()?,
+            };
+            let Some(edge) = next else {
                 break;
             };
-            let key = first.key;
-            let mut value = first.value;
-            let mut ordinal = first.ordinal;
-            while self
-                .heap
-                .peek()
-                .is_some_and(|candidate| candidate.record.key == key)
-            {
-                let duplicate = self
-                    .pop_and_advance()?
-                    .expect("peeked merge record remains available");
-                if duplicate.ordinal > ordinal {
-                    value = duplicate.value;
-                    ordinal = duplicate.ordinal;
-                }
+            if !edges.is_empty() && key_bytes + edge.key.len() > key_byte_capacity {
+                self.pending_output = Some(edge);
+                break;
             }
-            writes.push(WriteOp::Put {
-                ns: Namespace::Graph,
-                key,
-                value,
-            });
+            key_bytes += edge.key.len();
+            edges.push(edge);
         }
-        Ok((!writes.is_empty()).then_some(writes))
+        Ok((!edges.is_empty()).then_some(edges))
+    }
+
+    fn next_unique_edge(&mut self) -> Result<Option<SortedEdge>, LiteError> {
+        let Some(first) = self.pop_and_advance()? else {
+            return Ok(None);
+        };
+        let key = first.key;
+        let mut weight = first.weight;
+        let mut ordinal = first.ordinal;
+        while self
+            .heap
+            .peek()
+            .is_some_and(|candidate| candidate.record.key == key)
+        {
+            let duplicate = self
+                .pop_and_advance()?
+                .expect("peeked merge record remains available");
+            if duplicate.ordinal > ordinal {
+                weight = duplicate.weight;
+                ordinal = duplicate.ordinal;
+            }
+        }
+        Ok(Some(SortedEdge { key, weight }))
     }
 
     fn pop_and_advance(&mut self) -> Result<Option<SortableEdge>, LiteError> {
@@ -201,22 +235,19 @@ impl Ord for HeapRecord {
 fn write_record(writer: &mut impl Write, record: &SortableEdge) -> Result<(), LiteError> {
     let key_len = u32::try_from(record.key.len())
         .map_err(|_| storage_error("external-sort key exceeds u32 length"))?;
-    let value_len = u32::try_from(record.value.len())
-        .map_err(|_| storage_error("external-sort value exceeds u32 length"))?;
     writer.write_all(&key_len.to_le_bytes()).map_err(io_error)?;
-    writer
-        .write_all(&value_len.to_le_bytes())
-        .map_err(io_error)?;
     writer
         .write_all(&record.ordinal.to_le_bytes())
         .map_err(io_error)?;
+    writer
+        .write_all(&record.weight.to_bits().to_le_bytes())
+        .map_err(io_error)?;
     writer.write_all(&record.key).map_err(io_error)?;
-    writer.write_all(&record.value).map_err(io_error)?;
     Ok(())
 }
 
 fn read_record(reader: &mut impl Read) -> Result<Option<SortableEdge>, LiteError> {
-    let mut header = [0u8; 16];
+    let mut header = [0u8; 20];
     let mut read = 0usize;
     while read < header.len() {
         let count = reader.read(&mut header[read..]).map_err(io_error)?;
@@ -229,15 +260,18 @@ fn read_record(reader: &mut impl Read) -> Result<Option<SortableEdge>, LiteError
         read += count;
     }
     let key_len = u32::from_le_bytes(header[0..4].try_into().expect("fixed header")) as usize;
-    let value_len = u32::from_le_bytes(header[4..8].try_into().expect("fixed header")) as usize;
-    let ordinal = u64::from_le_bytes(header[8..16].try_into().expect("fixed header"));
+    if key_len > MAX_KEY_BYTES {
+        return Err(storage_error(format!(
+            "external-sort key exceeds the {MAX_KEY_BYTES}-byte bound"
+        )));
+    }
+    let ordinal = u64::from_le_bytes(header[4..12].try_into().expect("fixed header"));
+    let weight_bits = u64::from_le_bytes(header[12..20].try_into().expect("fixed header"));
     let mut key = vec![0u8; key_len];
-    let mut value = vec![0u8; value_len];
     reader.read_exact(&mut key).map_err(io_error)?;
-    reader.read_exact(&mut value).map_err(io_error)?;
     Ok(Some(SortableEdge {
         key,
-        value,
+        weight: f64::from_bits(weight_bits),
         ordinal,
     }))
 }
@@ -258,81 +292,76 @@ fn storage_error(detail: impl Into<String>) -> LiteError {
 mod tests {
     use super::*;
 
-    fn put_parts(write: WriteOp) -> (Vec<u8>, Vec<u8>) {
-        match write {
-            WriteOp::Put { key, value, .. } => (key, value),
-            WriteOp::Delete { .. } => panic!("unexpected delete"),
-        }
-    }
-
     #[test]
     fn merge_orders_runs_and_keeps_last_duplicate() {
         let mut sorter = ExternalEdgeSorter::new(2).unwrap();
-        sorter.push(b"c".to_vec(), b"c0".to_vec(), 0).unwrap();
-        sorter.push(b"a".to_vec(), b"a1".to_vec(), 1).unwrap();
-        sorter.push(b"b".to_vec(), b"b2".to_vec(), 2).unwrap();
-        sorter.push(b"a".to_vec(), b"a3".to_vec(), 3).unwrap();
-        sorter.push(b"d".to_vec(), b"d4".to_vec(), 4).unwrap();
+        sorter.push(b"c".to_vec(), 0.0, 0).unwrap();
+        sorter.push(b"a".to_vec(), 1.0, 1).unwrap();
+        sorter.push(b"b".to_vec(), 2.0, 2).unwrap();
+        sorter.push(b"a".to_vec(), 3.0, 3).unwrap();
+        sorter.push(b"d".to_vec(), 4.0, 4).unwrap();
         let mut merge = sorter.finish().unwrap();
         let first: Vec<_> = merge
-            .next_batch(2)
+            .next_batch(2, 1024)
             .unwrap()
             .unwrap()
             .into_iter()
-            .map(put_parts)
+            .map(|edge| (edge.key, edge.weight))
             .collect();
         let second: Vec<_> = merge
-            .next_batch(2)
+            .next_batch(2, 1024)
             .unwrap()
             .unwrap()
             .into_iter()
-            .map(put_parts)
+            .map(|edge| (edge.key, edge.weight))
             .collect();
-        assert_eq!(
-            first,
-            vec![
-                (b"a".to_vec(), b"a3".to_vec()),
-                (b"b".to_vec(), b"b2".to_vec())
-            ]
-        );
-        assert_eq!(
-            second,
-            vec![
-                (b"c".to_vec(), b"c0".to_vec()),
-                (b"d".to_vec(), b"d4".to_vec())
-            ]
-        );
-        assert!(merge.next_batch(2).unwrap().is_none());
+        assert_eq!(first, vec![(b"a".to_vec(), 3.0), (b"b".to_vec(), 2.0)]);
+        assert_eq!(second, vec![(b"c".to_vec(), 0.0), (b"d".to_vec(), 4.0)]);
+        assert!(merge.next_batch(2, 1024).unwrap().is_none());
     }
 
     #[test]
     fn merge_keeps_last_duplicate_within_one_run() {
         let mut sorter = ExternalEdgeSorter::new(3).unwrap();
-        sorter.push(b"a".to_vec(), b"first".to_vec(), 1).unwrap();
-        sorter.push(b"a".to_vec(), b"last".to_vec(), 2).unwrap();
-        sorter.push(b"b".to_vec(), b"value".to_vec(), 3).unwrap();
+        sorter.push(b"a".to_vec(), 1.0, 1).unwrap();
+        sorter.push(b"a".to_vec(), 2.0, 2).unwrap();
+        sorter.push(b"b".to_vec(), 3.0, 3).unwrap();
         let mut merge = sorter.finish().unwrap();
-        let writes: Vec<_> = merge
-            .next_batch(3)
+        let edges: Vec<_> = merge
+            .next_batch(3, 1024)
             .unwrap()
             .unwrap()
             .into_iter()
-            .map(put_parts)
+            .map(|edge| (edge.key, edge.weight))
             .collect();
-        assert_eq!(
-            writes,
-            vec![
-                (b"a".to_vec(), b"last".to_vec()),
-                (b"b".to_vec(), b"value".to_vec())
-            ]
-        );
+        assert_eq!(edges, vec![(b"a".to_vec(), 2.0), (b"b".to_vec(), 3.0)]);
+    }
+
+    #[test]
+    fn merge_respects_key_byte_capacity_without_losing_records() {
+        let mut sorter = ExternalEdgeSorter::new(2).unwrap();
+        sorter.push(b"aa".to_vec(), 1.0, 0).unwrap();
+        sorter.push(b"bb".to_vec(), 2.0, 1).unwrap();
+        let mut merge = sorter.finish().unwrap();
+        assert_eq!(merge.next_batch(2, 2).unwrap().unwrap().len(), 1);
+        assert_eq!(merge.next_batch(2, 2).unwrap().unwrap().len(), 1);
+        assert!(merge.next_batch(2, 2).unwrap().is_none());
+    }
+
+    #[test]
+    fn spill_preserves_negative_zero_weight_bits() {
+        let mut sorter = ExternalEdgeSorter::new(1).unwrap();
+        sorter.push(b"a".to_vec(), -0.0, 0).unwrap();
+        let mut merge = sorter.finish().unwrap();
+        let edge = merge.next_batch(1, 1024).unwrap().unwrap().pop().unwrap();
+        assert_eq!(edge.weight.to_bits(), (-0.0f64).to_bits());
     }
 
     #[test]
     fn dropping_merge_removes_spill_directory() {
         let mut sorter = ExternalEdgeSorter::new(1).unwrap();
         let path = sorter.temp_dir.path().to_path_buf();
-        sorter.push(b"a".to_vec(), b"value".to_vec(), 0).unwrap();
+        sorter.push(b"a".to_vec(), 1.0, 0).unwrap();
         let merge = sorter.finish().unwrap();
         assert!(path.exists());
         drop(merge);
@@ -343,9 +372,8 @@ mod tests {
     fn truncated_record_is_rejected() {
         let mut header = Vec::new();
         header.extend_from_slice(&1u32.to_le_bytes());
-        header.extend_from_slice(&2u32.to_le_bytes());
         header.extend_from_slice(&0u64.to_le_bytes());
-        header.extend_from_slice(b"ab");
+        header.extend_from_slice(&1.0f64.to_bits().to_le_bytes());
         let error = read_record(&mut header.as_slice()).unwrap_err();
         assert!(error.to_string().contains("failed to fill whole buffer"));
     }
