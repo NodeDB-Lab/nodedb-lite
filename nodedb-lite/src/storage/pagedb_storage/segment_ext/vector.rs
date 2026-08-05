@@ -30,8 +30,7 @@ where
 
         // Chunk the NDVS bytes into page-sized pieces.
         // Page body capacity = 4096 - ENVELOPE_OVERHEAD (40).
-        const PAGE_BODY_CAP: usize = 4096 - 40;
-        let chunks: Vec<&[u8]> = ndvs.chunks(PAGE_BODY_CAP).collect();
+        let chunks: Vec<&[u8]> = ndvs.chunks(self.page_body_capacity()).collect();
 
         let realm = RealmId::new([0u8; 16]);
         let segment_name = format!("vec/hnsw/{collection_name}");

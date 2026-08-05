@@ -40,10 +40,6 @@ use crate::storage::pagedb_storage::PagedbStorage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::storage::spatial_segment_ext::SpatialSegmentExt;
 
-/// pagedb page body capacity in bytes: 4096 - 40 bytes AEAD/header envelope.
-#[cfg(not(target_arch = "wasm32"))]
-const PAGE_BODY_CAP: usize = 4096 - 40;
-
 /// pagedb segment name prefix for R-tree checkpoint segments.
 #[cfg(not(target_arch = "wasm32"))]
 const SPATIAL_SEG_PREFIX: &str = "spatial/rtree/";
@@ -78,7 +74,7 @@ where
         payload.extend_from_slice(&byte_len.to_le_bytes());
         payload.extend_from_slice(bytes);
 
-        let chunks: Vec<&[u8]> = payload.chunks(PAGE_BODY_CAP).collect();
+        let chunks: Vec<&[u8]> = payload.chunks(self.page_body_capacity()).collect();
 
         let realm = RealmId::new([0u8; 16]);
         let name = segment_name(collection, field);

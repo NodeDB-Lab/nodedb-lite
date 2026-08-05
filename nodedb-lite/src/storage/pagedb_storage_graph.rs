@@ -39,10 +39,6 @@ use crate::storage::graph_segment_ext::GraphSegmentExt;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::storage::pagedb_storage::PagedbStorage;
 
-/// pagedb page body capacity in bytes: 4096 - 40 bytes AEAD/header envelope.
-#[cfg(not(target_arch = "wasm32"))]
-const PAGE_BODY_CAP: usize = 4096 - 40;
-
 /// pagedb segment name prefix for CSR adjacency segments.
 #[cfg(not(target_arch = "wasm32"))]
 const GRAPH_SEG_PREFIX: &str = "graph/csr/";
@@ -66,7 +62,7 @@ where
         payload.extend_from_slice(&byte_len.to_le_bytes());
         payload.extend_from_slice(bytes);
 
-        let chunks: Vec<&[u8]> = payload.chunks(PAGE_BODY_CAP).collect();
+        let chunks: Vec<&[u8]> = payload.chunks(self.page_body_capacity()).collect();
 
         let realm = RealmId::new([0u8; 16]);
         let segment_name = format!("{GRAPH_SEG_PREFIX}{collection}");
@@ -214,6 +210,40 @@ mod tests {
 
     async fn make_storage() -> PagedbStorage<MemVfs> {
         PagedbStorage::open_in_memory().await.unwrap()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn graph_segment_roundtrip_with_64k_pages() {
+        use crate::storage::corruption::CorruptionPolicy;
+        use crate::storage::encryption::Encryption;
+        use crate::storage::pagedb_storage::PagedbStorageDefault;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = PagedbStorageDefault::open_with_policy_and_page_size(
+            dir.path().join("graph.pagedb"),
+            Encryption::Plaintext,
+            CorruptionPolicy::FailClosed,
+            64 * 1024,
+        )
+        .await
+        .unwrap();
+        let bytes: Vec<u8> = (0..200_000).map(|i| (i % 251) as u8).collect();
+        storage.write_graph_segment("large", &bytes).await.unwrap();
+        drop(storage);
+
+        let reopened = PagedbStorageDefault::open_with_policy_and_page_size(
+            dir.path().join("graph.pagedb"),
+            Encryption::Plaintext,
+            CorruptionPolicy::FailClosed,
+            64 * 1024,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reopened.open_graph_segment("large").await.unwrap().unwrap(),
+            bytes.into_boxed_slice()
+        );
     }
 
     #[tokio::test]

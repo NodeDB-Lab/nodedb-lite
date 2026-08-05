@@ -49,10 +49,28 @@ impl NodeDbLite<PagedbStorageDefault> {
         encryption: Encryption,
         config: LiteConfig,
     ) -> NodeDbResult<Arc<Self>> {
+        Self::open_at_path_with_config_and_page_size(path, encryption, config, 4096).await
+    }
+
+    /// Like [`open_at_path_with_config`](Self::open_at_path_with_config), but
+    /// chooses the durable PageDB page size when creating the store.
+    ///
+    /// The same size must be supplied on every reopen of that store.
+    pub async fn open_at_path_with_config_and_page_size(
+        path: impl AsRef<Path>,
+        encryption: Encryption,
+        config: LiteConfig,
+        page_size: usize,
+    ) -> NodeDbResult<Arc<Self>> {
         let path = path.as_ref();
         let policy = config.corruption_policy;
-        let storage =
-            PagedbStorageDefault::open_with_policy(path, encryption.clone(), policy).await?;
+        let storage = PagedbStorageDefault::open_with_policy_and_page_size(
+            path,
+            encryption.clone(),
+            policy,
+            page_size,
+        )
+        .await?;
         match Self::open_with_config(storage, config.clone()).await {
             Ok(db) => Ok(db),
             Err(e)
@@ -65,7 +83,12 @@ impl NodeDbLite<PagedbStorageDefault> {
                     "post-open corruption detected after storage opened cleanly — the caller \
                      opted into discarding the store, renaming it aside and retrying once"
                 );
-                let storage = PagedbStorageDefault::discard_and_recreate(path, &encryption).await?;
+                let storage = PagedbStorageDefault::discard_and_recreate_with_page_size(
+                    path,
+                    &encryption,
+                    page_size,
+                )
+                .await?;
                 Self::open_with_config(storage, config).await
             }
             Err(e) => Err(e),

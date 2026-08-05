@@ -41,6 +41,13 @@ pub(crate) fn lite_open_options() -> OpenOptions {
 /// async mutex (single-writer serialization is enforced by pagedb itself).
 pub struct PagedbStorage<V: Vfs + Clone> {
     pub(crate) db: Arc<Db<V>>,
+    pub(crate) page_size: usize,
+}
+
+impl<V: Vfs + Clone> PagedbStorage<V> {
+    pub(crate) fn page_body_capacity(&self) -> usize {
+        self.page_size - 40
+    }
 }
 
 // Manual Clone so we don't require `V: Clone` on the struct level — the
@@ -49,6 +56,7 @@ impl<V: Vfs + Clone> Clone for PagedbStorage<V> {
     fn clone(&self) -> Self {
         Self {
             db: Arc::clone(&self.db),
+            page_size: self.page_size,
         }
     }
 }

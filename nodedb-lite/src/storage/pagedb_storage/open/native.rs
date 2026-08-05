@@ -14,6 +14,8 @@ use crate::storage::encryption::Encryption;
 use crate::storage::pagedb_storage::errors::is_corruption;
 use crate::storage::pagedb_storage::types::{PagedbStorage, lite_open_options};
 
+const DEFAULT_PAGE_SIZE: usize = 4096;
+
 impl PagedbStorage<DefaultVfs> {
     /// Open or create a database at `path` using the platform-native async VFS.
     ///
@@ -49,14 +51,30 @@ impl PagedbStorage<DefaultVfs> {
         encryption: Encryption,
         policy: CorruptionPolicy,
     ) -> Result<Self, LiteError> {
+        Self::open_with_policy_and_page_size(path, encryption, policy, DEFAULT_PAGE_SIZE).await
+    }
+
+    /// Open or create a database with an explicit durable page size.
+    ///
+    /// The supplied size is part of the persistent format and must match on
+    /// reopen. It must satisfy PageDB's supported page-size constraints.
+    pub async fn open_with_policy_and_page_size(
+        path: impl AsRef<Path>,
+        encryption: Encryption,
+        policy: CorruptionPolicy,
+        page_size: usize,
+    ) -> Result<Self, LiteError> {
         let path = path.as_ref();
         let kek = crate::storage::encryption::resolve_kek_native(&encryption, path)?;
         let realm = RealmId::new([0u8; 16]);
 
         let vfs = pagedb::vfs::open_default(path).map_err(LiteError::from)?;
 
-        match Db::open(vfs, kek, 4096, realm, lite_open_options()).await {
-            Ok(db) => Ok(Self { db: Arc::new(db) }),
+        match Db::open(vfs, kek, page_size, realm, lite_open_options()).await {
+            Ok(db) => Ok(Self {
+                db: Arc::new(db),
+                page_size,
+            }),
             Err(e) if is_corruption(&e) && path.exists() => {
                 if !policy.may_discard() {
                     tracing::error!(
@@ -73,7 +91,7 @@ impl PagedbStorage<DefaultVfs> {
                     "pagedb open detected corruption — the caller opted into discarding the \
                      store (rename aside, recreate fresh). The new database is empty."
                 );
-                Self::discard_and_recreate(path, &encryption).await
+                Self::discard_and_recreate_with_page_size(path, &encryption, page_size).await
             }
             Err(e) => Err(LiteError::from(e)),
         }
@@ -89,9 +107,10 @@ impl PagedbStorage<DefaultVfs> {
     /// [`CorruptionPolicy::DiscardStoreAndRecreate`]; the open paths call it
     /// after checking, so the destructive step has exactly one gate in front of
     /// it and exactly one implementation behind it.
-    pub(crate) async fn discard_and_recreate(
+    pub(crate) async fn discard_and_recreate_with_page_size(
         path: &Path,
         encryption: &Encryption,
+        page_size: usize,
     ) -> Result<Self, LiteError> {
         let kek = crate::storage::encryption::resolve_kek_native(encryption, path)?;
         let realm = RealmId::new([0u8; 16]);
@@ -113,7 +132,7 @@ impl PagedbStorage<DefaultVfs> {
         }
 
         let vfs = pagedb::vfs::open_default(path).map_err(LiteError::from)?;
-        let db = Db::open(vfs, kek, 4096, realm, lite_open_options())
+        let db = Db::open(vfs, kek, page_size, realm, lite_open_options())
             .await
             .map_err(|e2| LiteError::Storage {
                 detail: format!(
@@ -121,6 +140,63 @@ impl PagedbStorage<DefaultVfs> {
                     corrupt_path.display()
                 ),
             })?;
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            page_size,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nodedb_types::Namespace;
+
+    use super::*;
+    use crate::storage::engine::StorageEngine;
+
+    #[tokio::test]
+    async fn explicit_page_size_reopens_and_rejects_a_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sized.pagedb");
+        let storage = PagedbStorage::<DefaultVfs>::open_with_policy_and_page_size(
+            &path,
+            Encryption::Plaintext,
+            CorruptionPolicy::FailClosed,
+            16 * 1024,
+        )
+        .await
+        .unwrap();
+        storage
+            .put(Namespace::Vector, b"key", b"value")
+            .await
+            .unwrap();
+        drop(storage);
+
+        let reopened = PagedbStorage::<DefaultVfs>::open_with_policy_and_page_size(
+            &path,
+            Encryption::Plaintext,
+            CorruptionPolicy::FailClosed,
+            16 * 1024,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reopened.get(Namespace::Vector, b"key").await.unwrap(),
+            Some(b"value".to_vec())
+        );
+        drop(reopened);
+
+        let error = match PagedbStorage::<DefaultVfs>::open_with_policy_and_page_size(
+            &path,
+            Encryption::Plaintext,
+            CorruptionPolicy::FailClosed,
+            4096,
+        )
+        .await
+        {
+            Ok(_) => panic!("mismatched page size must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("page size"));
     }
 }

@@ -33,8 +33,7 @@ where
 
         // Chunk the length-prefixed payload into pagedb page-body-sized pieces.
         // Page body capacity = 4096 - ENVELOPE_OVERHEAD (40).
-        const PAGE_BODY_CAP: usize = 4096 - 40;
-        let chunks: Vec<&[u8]> = payload.chunks(PAGE_BODY_CAP).collect();
+        let chunks: Vec<&[u8]> = payload.chunks(self.page_body_capacity()).collect();
 
         let realm = RealmId::new([0u8; 16]);
         let segment_name = format!("arr/tile/{array_name}/{seg_id}");

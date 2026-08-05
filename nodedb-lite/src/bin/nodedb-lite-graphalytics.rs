@@ -6,11 +6,12 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use nodedb_graph::params::GraphAlgorithm;
-use nodedb_lite::{Encryption, NodeDbLite};
+use nodedb_lite::{Encryption, LiteConfig, NodeDbLite};
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
 const OPERATION_TIMEOUT_SECONDS: f64 = 300.0;
+const DURABLE_PAGE_SIZE: usize = 64 * 1024;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -38,7 +39,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         fs::remove_file(&database)?;
     }
 
-    let db = NodeDbLite::open_at_path(&database, Encryption::Plaintext).await?;
+    let db = NodeDbLite::open_at_path_with_config_and_page_size(
+        &database,
+        Encryption::Plaintext,
+        LiteConfig::default(),
+        DURABLE_PAGE_SIZE,
+    )
+    .await?;
     let metrics = db
         .graphalytics_import(
             &dataset.join(format!("{dataset_name}.v")),

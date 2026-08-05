@@ -39,10 +39,6 @@ use crate::storage::columnar_segment_ext::ColumnarSegmentExt;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::storage::pagedb_storage::PagedbStorage;
 
-/// pagedb page body capacity in bytes: 4096 - 40 bytes AEAD/header envelope.
-#[cfg(not(target_arch = "wasm32"))]
-const PAGE_BODY_CAP: usize = 4096 - 40;
-
 /// pagedb segment name prefix for columnar segments.
 #[cfg(not(target_arch = "wasm32"))]
 const COL_SEG_PREFIX: &str = "col/seg/";
@@ -67,7 +63,7 @@ where
         payload.extend_from_slice(&byte_len.to_le_bytes());
         payload.extend_from_slice(bytes);
 
-        let chunks: Vec<&[u8]> = payload.chunks(PAGE_BODY_CAP).collect();
+        let chunks: Vec<&[u8]> = payload.chunks(self.page_body_capacity()).collect();
 
         let realm = RealmId::new([0u8; 16]);
         let segment_name = format!("{COL_SEG_PREFIX}{collection}/{segment_id}");

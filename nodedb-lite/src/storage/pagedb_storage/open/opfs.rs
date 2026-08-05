@@ -107,6 +107,9 @@ impl PagedbStorage<pagedb::vfs::opfs::OpfsVfs> {
                 other => LiteError::from(other),
             })?;
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            page_size: 4096,
+        })
     }
 }
