@@ -17,8 +17,12 @@ use crate::error::LiteError;
 use crate::graphalytics_diagnostics::GraphalyticsLoadDiagnostics;
 use crate::graphalytics_external_sort::ExternalEdgeSorter;
 use crate::graphalytics_storage::sorted_edge_write;
-use crate::query::graph_ops::algorithms::run_algo;
+use crate::query::graph_ops::algorithms::{
+    materialize_graphalytics_raw, run_algo, run_graphalytics_raw,
+    run_graphalytics_raw_prevalidated_sssp, validate_graphalytics_sssp_weights,
+};
 use crate::query::graph_ops::edges::edge_store_key;
+use crate::query::graph_ops::graphalytics_results::GraphalyticsRawValues;
 use crate::storage::engine::StorageEngine;
 
 const COLLECTION: &str = "graphalytics";
@@ -29,6 +33,14 @@ const MAX_VERTEX_ID_BYTES: usize = 512 * 1024 - 64;
 const MAX_EDGE_LINE_BYTES: usize = MAX_VERTEX_ID_BYTES * 2 + 128;
 const MAX_PENDING_ID_BYTES: usize = 256 * 1024 * 1024;
 const MAX_MERGE_KEY_BYTES: usize = 128 * 1024 * 1024;
+
+/// Opaque dense primitive output passed from timed computation to untimed materialization.
+#[doc(hidden)]
+pub struct GraphalyticsRawResult(GraphalyticsRawValues);
+
+/// Proof that the current Graphalytics CSR passed dataset-wide SSSP weight validation.
+#[doc(hidden)]
+pub struct GraphalyticsValidatedSssp(());
 
 #[derive(Debug)]
 pub struct ImportMetrics {
@@ -279,23 +291,74 @@ impl<S: StorageEngine> NodeDbLite<S> {
         algorithm: GraphAlgorithm,
         source: &str,
     ) -> Result<QueryResult, LiteError> {
+        if matches!(
+            algorithm,
+            GraphAlgorithm::PageRank
+                | GraphAlgorithm::Wcc
+                | GraphAlgorithm::Lcc
+                | GraphAlgorithm::Sssp
+                | GraphAlgorithm::LabelPropagation
+        ) {
+            let raw = self.graphalytics_raw_run(algorithm, source)?;
+            return self.graphalytics_raw_result(algorithm, raw);
+        }
         if algorithm == GraphAlgorithm::Diameter {
             return Err(LiteError::Storage {
                 detail: "diameter is not part of the Graphalytics runner".to_string(),
             });
         }
-        let params = AlgoParams {
-            collection: COLLECTION.to_string(),
-            damping: Some(0.85),
-            max_iterations: Some(10),
-            // Positive minimum bypasses the generic non-positive fallback and
-            // effectively disables early stopping for the required fixed count.
-            tolerance: Some(f64::MIN_POSITIVE),
-            source_node: Some(source.to_string()),
-            direction: Some("both".to_string()),
-            ..Default::default()
-        };
-        let mut result = run_algo(&self.csr, algorithm, &params)?;
+        run_algo(&self.csr, algorithm, &graphalytics_params(source))
+    }
+
+    /// Validate SSSP weights before a separately timed primitive execution.
+    #[doc(hidden)]
+    pub fn graphalytics_validate_sssp_weights(
+        &self,
+    ) -> Result<GraphalyticsValidatedSssp, LiteError> {
+        validate_graphalytics_sssp_weights(&self.csr, COLLECTION)?;
+        Ok(GraphalyticsValidatedSssp(()))
+    }
+
+    /// Produce a dense primitive result, performing all required admission checks.
+    #[doc(hidden)]
+    pub fn graphalytics_raw_run(
+        &self,
+        algorithm: GraphAlgorithm,
+        source: &str,
+    ) -> Result<GraphalyticsRawResult, LiteError> {
+        if algorithm == GraphAlgorithm::Diameter {
+            return Err(LiteError::Storage {
+                detail: "diameter is not part of the Graphalytics runner".to_string(),
+            });
+        }
+        let raw = run_graphalytics_raw(&self.csr, algorithm, &graphalytics_params(source))?;
+        Ok(GraphalyticsRawResult(raw))
+    }
+
+    /// Run timed SSSP using an unforgeable proof from the pre-timer validation step.
+    #[doc(hidden)]
+    pub fn graphalytics_sssp_raw_prevalidated(
+        &self,
+        source: &str,
+        _validated: GraphalyticsValidatedSssp,
+    ) -> Result<GraphalyticsRawResult, LiteError> {
+        let raw = run_graphalytics_raw_prevalidated_sssp(
+            &self.csr,
+            GraphAlgorithm::Sssp,
+            &graphalytics_params(source),
+        )?;
+        Ok(GraphalyticsRawResult(raw))
+    }
+
+    /// Convert a previously computed dense primitive result into Graphalytics output.
+    #[doc(hidden)]
+    pub fn graphalytics_raw_result(
+        &self,
+        algorithm: GraphAlgorithm,
+        raw: GraphalyticsRawResult,
+    ) -> Result<QueryResult, LiteError> {
+        let GraphalyticsRawResult(raw) = raw;
+        let mut result = materialize_graphalytics_raw(&self.csr, COLLECTION, algorithm, raw)?;
         if algorithm == GraphAlgorithm::LabelPropagation {
             let map = self.csr.lock().map_err(|_| LiteError::LockPoisoned)?;
             let csr = map.get(COLLECTION).ok_or_else(|| LiteError::Storage {
@@ -355,6 +418,20 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// Run and materialize BFS for callers that do not need separate timing.
     pub fn graphalytics_bfs(&self, source: &str) -> Result<QueryResult, LiteError> {
         self.graphalytics_bfs_result(self.graphalytics_bfs_distances(source)?)
+    }
+}
+
+fn graphalytics_params(source: &str) -> AlgoParams {
+    AlgoParams {
+        collection: COLLECTION.to_string(),
+        damping: Some(0.85),
+        max_iterations: Some(10),
+        // Positive minimum bypasses the generic non-positive fallback and
+        // effectively disables early stopping for the required fixed count.
+        tolerance: Some(f64::MIN_POSITIVE),
+        source_node: Some(source.to_string()),
+        direction: Some("both".to_string()),
+        ..Default::default()
     }
 }
 

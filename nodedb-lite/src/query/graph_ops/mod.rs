@@ -2,6 +2,7 @@
 pub mod algorithms;
 pub mod edges;
 pub mod fusion;
+pub(crate) mod graphalytics_results;
 pub mod labels;
 pub mod match_engine;
 pub mod stats;

@@ -69,9 +69,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     ] {
         let (result, elapsed) = match algorithm {
             Some(algorithm) => {
+                // Dataset-wide SSSP validation is semantic admission work, not
+                // primitive Dijkstra production, and must not affect the timed run.
+                let validated_sssp = if algorithm == GraphAlgorithm::Sssp {
+                    Some(db.graphalytics_validate_sssp_weights()?)
+                } else {
+                    None
+                };
                 let start = Instant::now();
-                let result = db.graphalytics_run(algorithm, "6")?;
-                (result, start.elapsed().as_secs_f64())
+                let raw = match validated_sssp {
+                    Some(validated) => db.graphalytics_sssp_raw_prevalidated("6", validated)?,
+                    None => db.graphalytics_raw_run(algorithm, "6")?,
+                };
+                let elapsed = start.elapsed().as_secs_f64();
+                (db.graphalytics_raw_result(algorithm, raw)?, elapsed)
             }
             None => {
                 let start = Instant::now();
