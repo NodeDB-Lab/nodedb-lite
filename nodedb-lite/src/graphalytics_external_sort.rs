@@ -5,6 +5,9 @@ use std::collections::BinaryHeap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
+use std::time::Instant;
+
+use crate::graphalytics_diagnostics::SortDiagnostics;
 
 use crate::error::LiteError;
 
@@ -30,10 +33,11 @@ pub(crate) struct ExternalEdgeSorter {
     pending: Vec<SortableEdge>,
     pending_key_bytes: usize,
     runs: Vec<PathBuf>,
+    diagnostics: Option<SortDiagnostics>,
 }
 
 impl ExternalEdgeSorter {
-    pub(crate) fn new(run_capacity: usize) -> Result<Self, LiteError> {
+    pub(crate) fn new(run_capacity: usize, diagnostics_enabled: bool) -> Result<Self, LiteError> {
         if run_capacity == 0 {
             return Err(storage_error("external-sort run capacity must be positive"));
         }
@@ -46,6 +50,7 @@ impl ExternalEdgeSorter {
             pending: Vec::with_capacity(run_capacity),
             pending_key_bytes: 0,
             runs: Vec::new(),
+            diagnostics: diagnostics_enabled.then(SortDiagnostics::default),
         })
     }
 
@@ -86,15 +91,21 @@ impl ExternalEdgeSorter {
                 "Graphalytics external sort exceeds the {MAX_OPEN_RUNS}-run bound"
             )));
         }
+        let records = self.pending.len() as u64;
+        let sort_start = self.diagnostics.as_ref().map(|_| Instant::now());
         self.pending.sort_unstable_by(|left, right| {
             left.key
                 .cmp(&right.key)
                 .then_with(|| left.ordinal.cmp(&right.ordinal))
         });
+        if let (Some(diagnostics), Some(sort_start)) = (self.diagnostics.as_mut(), sort_start) {
+            diagnostics.spill_sort += sort_start.elapsed();
+        }
         let path = self
             .temp_dir
             .path()
             .join(format!("run-{:08}.bin", self.runs.len()));
+        let write_start = self.diagnostics.as_ref().map(|_| Instant::now());
         let file = File::create(&path).map_err(io_error)?;
         let mut writer = BufWriter::with_capacity(1 << 20, file);
         for record in self.pending.drain(..) {
@@ -102,6 +113,15 @@ impl ExternalEdgeSorter {
         }
         self.pending_key_bytes = 0;
         writer.flush().map_err(io_error)?;
+        if let (Some(diagnostics), Some(write_start)) = (self.diagnostics.as_mut(), write_start) {
+            diagnostics.spill_write += write_start.elapsed();
+            diagnostics.spill_runs += 1;
+            diagnostics.spill_records += records;
+            // Diagnostics cannot make an otherwise successful spill fail.
+            diagnostics.spill_bytes += std::fs::metadata(&path)
+                .map(|metadata| metadata.len())
+                .unwrap_or_default();
+        }
         self.runs.push(path);
         Ok(())
     }
@@ -121,6 +141,7 @@ impl ExternalEdgeSorter {
             readers,
             heap,
             pending_output: None,
+            diagnostics: self.diagnostics,
             _temp_dir: self.temp_dir,
         })
     }
@@ -130,6 +151,7 @@ pub(crate) struct ExternalEdgeMerge {
     readers: Vec<BufReader<File>>,
     heap: BinaryHeap<HeapRecord>,
     pending_output: Option<SortedEdge>,
+    diagnostics: Option<SortDiagnostics>,
     // Declared last so run readers close before TempDir removes their files.
     _temp_dir: tempfile::TempDir,
 }
@@ -143,6 +165,25 @@ impl ExternalEdgeMerge {
         if capacity == 0 || key_byte_capacity == 0 {
             return Err(storage_error("merge batch capacities must be positive"));
         }
+        if self.diagnostics.is_some() {
+            let started = Instant::now();
+            let batch = self.next_batch_unprofiled(capacity, key_byte_capacity)?;
+            if let Some(diagnostics) = self.diagnostics.as_mut() {
+                diagnostics.merge_batches += started.elapsed();
+                diagnostics.merge_unique_records +=
+                    batch.as_ref().map_or(0, |edges| edges.len() as u64);
+            }
+            return Ok(batch);
+        }
+        self.next_batch_unprofiled(capacity, key_byte_capacity)
+    }
+
+    // Keep the diagnostics-off merge path identical to the original hot loop.
+    fn next_batch_unprofiled(
+        &mut self,
+        capacity: usize,
+        key_byte_capacity: usize,
+    ) -> Result<Option<Vec<SortedEdge>>, LiteError> {
         let mut edges = Vec::with_capacity(capacity);
         let mut key_bytes = 0usize;
         while edges.len() < capacity {
@@ -161,6 +202,10 @@ impl ExternalEdgeMerge {
             edges.push(edge);
         }
         Ok((!edges.is_empty()).then_some(edges))
+    }
+
+    pub(crate) fn take_diagnostics(&mut self) -> Option<SortDiagnostics> {
+        self.diagnostics.take()
     }
 
     fn next_unique_edge(&mut self) -> Result<Option<SortedEdge>, LiteError> {
@@ -294,7 +339,7 @@ mod tests {
 
     #[test]
     fn merge_orders_runs_and_keeps_last_duplicate() {
-        let mut sorter = ExternalEdgeSorter::new(2).unwrap();
+        let mut sorter = ExternalEdgeSorter::new(2, true).unwrap();
         sorter.push(b"c".to_vec(), 0.0, 0).unwrap();
         sorter.push(b"a".to_vec(), 1.0, 1).unwrap();
         sorter.push(b"b".to_vec(), 2.0, 2).unwrap();
@@ -321,8 +366,36 @@ mod tests {
     }
 
     #[test]
+    fn disabled_diagnostics_keep_the_merge_path_uninstrumented() {
+        let mut sorter = ExternalEdgeSorter::new(1, false).unwrap();
+        sorter.push(b"a".to_vec(), 1.0, 0).unwrap();
+        sorter.push(b"b".to_vec(), 2.0, 1).unwrap();
+        let mut merge = sorter.finish().unwrap();
+        assert_eq!(merge.next_batch(1, 1024).unwrap().unwrap().len(), 1);
+        assert_eq!(merge.next_batch(1, 1024).unwrap().unwrap().len(), 1);
+        assert!(merge.next_batch(1, 1024).unwrap().is_none());
+        assert!(merge.take_diagnostics().is_none());
+    }
+
+    #[test]
+    fn diagnostics_count_spills_and_merge_records() {
+        let mut sorter = ExternalEdgeSorter::new(2, true).unwrap();
+        sorter.push(b"a".to_vec(), 1.0, 0).unwrap();
+        sorter.push(b"a".to_vec(), 2.0, 1).unwrap();
+        sorter.push(b"b".to_vec(), 3.0, 2).unwrap();
+        let mut merge = sorter.finish().unwrap();
+        assert_eq!(merge.next_batch(10, 1024).unwrap().unwrap().len(), 2);
+        let diagnostics = merge.take_diagnostics().unwrap();
+        assert_eq!(diagnostics.spill_runs, 2);
+        assert_eq!(diagnostics.spill_records, 3);
+        assert!(diagnostics.spill_bytes > 0);
+        assert_eq!(diagnostics.merge_unique_records, 2);
+        assert!(diagnostics.merge_batches > std::time::Duration::ZERO);
+    }
+
+    #[test]
     fn merge_keeps_last_duplicate_within_one_run() {
-        let mut sorter = ExternalEdgeSorter::new(3).unwrap();
+        let mut sorter = ExternalEdgeSorter::new(3, true).unwrap();
         sorter.push(b"a".to_vec(), 1.0, 1).unwrap();
         sorter.push(b"a".to_vec(), 2.0, 2).unwrap();
         sorter.push(b"b".to_vec(), 3.0, 3).unwrap();
@@ -338,19 +411,22 @@ mod tests {
     }
 
     #[test]
-    fn merge_respects_key_byte_capacity_without_losing_records() {
-        let mut sorter = ExternalEdgeSorter::new(2).unwrap();
+    fn diagnostics_count_unique_outputs_across_pending_batches() {
+        let mut sorter = ExternalEdgeSorter::new(2, true).unwrap();
         sorter.push(b"aa".to_vec(), 1.0, 0).unwrap();
         sorter.push(b"bb".to_vec(), 2.0, 1).unwrap();
         let mut merge = sorter.finish().unwrap();
         assert_eq!(merge.next_batch(2, 2).unwrap().unwrap().len(), 1);
         assert_eq!(merge.next_batch(2, 2).unwrap().unwrap().len(), 1);
         assert!(merge.next_batch(2, 2).unwrap().is_none());
+        let diagnostics = merge.take_diagnostics().unwrap();
+        assert_eq!(diagnostics.spill_records, 2);
+        assert_eq!(diagnostics.merge_unique_records, 2);
     }
 
     #[test]
     fn spill_preserves_negative_zero_weight_bits() {
-        let mut sorter = ExternalEdgeSorter::new(1).unwrap();
+        let mut sorter = ExternalEdgeSorter::new(1, true).unwrap();
         sorter.push(b"a".to_vec(), -0.0, 0).unwrap();
         let mut merge = sorter.finish().unwrap();
         let edge = merge.next_batch(1, 1024).unwrap().unwrap().pop().unwrap();
@@ -359,7 +435,7 @@ mod tests {
 
     #[test]
     fn dropping_merge_removes_spill_directory() {
-        let mut sorter = ExternalEdgeSorter::new(1).unwrap();
+        let mut sorter = ExternalEdgeSorter::new(1, true).unwrap();
         let path = sorter.temp_dir.path().to_path_buf();
         sorter.push(b"a".to_vec(), 1.0, 0).unwrap();
         let merge = sorter.finish().unwrap();

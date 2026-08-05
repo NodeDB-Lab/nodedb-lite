@@ -2,6 +2,8 @@
 
 //! `StorageEngine` implementation for native targets.
 
+use std::time::Instant;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use pagedb::vfs::Vfs;
@@ -9,7 +11,9 @@ use pagedb::vfs::Vfs;
 use nodedb_types::Namespace;
 
 use crate::error::LiteError;
-use crate::storage::engine::{CompactionOutcome, KvPair, StorageEngine, WriteOp};
+use crate::storage::engine::{
+    CompactionOutcome, KvPair, StorageEngine, StorageWriteProfile, WriteOp,
+};
 use crate::storage::pagedb_storage::keys::{KeyBuf, ns_end, prefix_key, strip_prefix};
 use crate::storage::pagedb_storage::types::PagedbStorage;
 
@@ -55,100 +59,15 @@ where
     }
 
     async fn batch_write(&self, ops: &[WriteOp]) -> Result<(), LiteError> {
-        if ops.is_empty() {
-            return Ok(());
-        }
+        self.batch_write_inner(ops, None).await.map(|_| ())
+    }
 
-        let mut txn = self.db.begin_write().await.map_err(LiteError::from)?;
-
-        // Put-only batches are the dominant bulk-ingest path. Build and sort
-        // their owned buffers once instead of first cloning every key solely
-        // for duplicate detection and then rebuilding the same buffers.
-        if ops.iter().all(|op| matches!(op, WriteOp::Put { .. })) {
-            let mut puts: Vec<(Bytes, Bytes)> = ops
-                .iter()
-                .map(|op| match op {
-                    WriteOp::Put { ns, key, value } => (
-                        Bytes::from(prefix_key(*ns, key)),
-                        Bytes::from(value.clone()),
-                    ),
-                    WriteOp::Delete { .. } => unreachable!("put-only batch"),
-                })
-                .collect();
-            puts.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
-            let unique = puts.windows(2).all(|pair| pair[0].0 != pair[1].0);
-            if unique {
-                txn.put_batch(puts).await.map_err(LiteError::from)?;
-                return txn.commit().await.map(|_| ()).map_err(LiteError::from);
-            }
-        }
-
-        // Detect duplicate keys (a key that appears in both a Put and a Delete,
-        // or appears multiple times). When duplicates exist we fall through to
-        // sequential per-op application to preserve original-order semantics.
-        // Uniqueness check: if all keys are distinct we can use the fast batch path.
-        let all_keys: Vec<Vec<u8>> = ops
-            .iter()
-            .map(|op| match op {
-                WriteOp::Put { ns, key, .. } => prefix_key(*ns, key),
-                WriteOp::Delete { ns, key } => prefix_key(*ns, key),
-            })
-            .collect();
-        let unique_count = {
-            let mut dedup = all_keys.clone();
-            dedup.sort_unstable();
-            dedup.dedup();
-            dedup.len()
-        };
-
-        if unique_count < all_keys.len() {
-            // Duplicate keys present — apply in order to preserve last-write semantics.
-            for op in ops {
-                match op {
-                    WriteOp::Put { ns, key, value } => {
-                        let composite = prefix_key(*ns, key);
-                        txn.put(&composite, value).await.map_err(LiteError::from)?;
-                    }
-                    WriteOp::Delete { ns, key } => {
-                        let composite = prefix_key(*ns, key);
-                        txn.delete(&composite).await.map_err(LiteError::from)?;
-                    }
-                }
-            }
-        } else {
-            // All keys distinct — partition into sorted puts + sorted deletes,
-            // then call the batch APIs within the same WriteTxn (both commit atomically).
-            // `put_batch` takes `Bytes` so the tree can store the buffer without
-            // re-copying it; `delete_batch` still takes owned key vectors.
-            let mut puts: Vec<(Bytes, Bytes)> = Vec::new();
-            let mut deletes: Vec<Vec<u8>> = Vec::new();
-
-            for op in ops {
-                match op {
-                    WriteOp::Put { ns, key, value } => {
-                        puts.push((
-                            Bytes::from(prefix_key(*ns, key)),
-                            Bytes::from(value.clone()),
-                        ));
-                    }
-                    WriteOp::Delete { ns, key } => {
-                        deletes.push(prefix_key(*ns, key));
-                    }
-                }
-            }
-
-            puts.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-            deletes.sort_unstable();
-
-            if !puts.is_empty() {
-                txn.put_batch(puts).await.map_err(LiteError::from)?;
-            }
-            if !deletes.is_empty() {
-                txn.delete_batch(deletes).await.map_err(LiteError::from)?;
-            }
-        }
-
-        txn.commit().await.map(|_| ()).map_err(LiteError::from)
+    async fn batch_write_profiled(
+        &self,
+        ops: &[WriteOp],
+    ) -> Result<StorageWriteProfile, LiteError> {
+        self.batch_write_inner(ops, Some(StorageWriteProfile::default()))
+            .await
     }
 
     async fn count(&self, ns: Namespace) -> Result<u64, LiteError> {
@@ -254,5 +173,196 @@ where
         &self,
     ) -> Option<&dyn crate::storage::spatial_segment_ext::SpatialSegmentExt> {
         Some(self)
+    }
+}
+
+impl<V: Vfs + Clone + Send + Sync + 'static> PagedbStorage<V>
+where
+    <V as Vfs>::LockHandle: Sync,
+    <V as Vfs>::File: Sync,
+{
+    async fn batch_write_inner(
+        &self,
+        ops: &[WriteOp],
+        mut profile: Option<StorageWriteProfile>,
+    ) -> Result<StorageWriteProfile, LiteError> {
+        let total_started = profile.as_ref().map(|_| Instant::now());
+        if let Some(profile) = profile.as_mut() {
+            profile.operations = ops.len() as u64;
+        }
+        if ops.is_empty() {
+            if let (Some(profile), Some(started)) = (profile.as_mut(), total_started) {
+                profile.total = started.elapsed();
+            }
+            return Ok(profile.unwrap_or_default());
+        }
+
+        let begin_started = profile.as_ref().map(|_| Instant::now());
+        let mut txn = self.db.begin_write().await.map_err(LiteError::from)?;
+        if let (Some(profile), Some(started)) = (profile.as_mut(), begin_started) {
+            profile.begin = started.elapsed();
+        }
+
+        let prepare_started = profile.as_ref().map(|_| Instant::now());
+        // Put-only batches are the dominant bulk-ingest path. Build and sort
+        // their owned buffers once instead of first cloning every key solely
+        // for duplicate detection and then rebuilding the same buffers.
+        if ops.iter().all(|op| matches!(op, WriteOp::Put { .. })) {
+            let mut puts: Vec<(Bytes, Bytes)> = ops
+                .iter()
+                .map(|op| match op {
+                    WriteOp::Put { ns, key, value } => (
+                        Bytes::from(prefix_key(*ns, key)),
+                        Bytes::from(value.clone()),
+                    ),
+                    WriteOp::Delete { .. } => unreachable!("put-only batch"),
+                })
+                .collect();
+            puts.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            let unique = puts.windows(2).all(|pair| pair[0].0 != pair[1].0);
+            if unique {
+                if let (Some(profile), Some(started)) = (profile.as_mut(), prepare_started) {
+                    profile.prepare = started.elapsed();
+                }
+                let apply_started = profile.as_ref().map(|_| Instant::now());
+                txn.put_batch(puts).await.map_err(LiteError::from)?;
+                if let (Some(profile), Some(started)) = (profile.as_mut(), apply_started) {
+                    profile.apply = started.elapsed();
+                }
+                let commit_started = profile.as_ref().map(|_| Instant::now());
+                txn.commit().await.map_err(LiteError::from)?;
+                if let (Some(profile), Some(started)) = (profile.as_mut(), commit_started) {
+                    profile.commit = started.elapsed();
+                }
+                if let (Some(profile), Some(started)) = (profile.as_mut(), total_started) {
+                    profile.total = started.elapsed();
+                }
+                return Ok(profile.unwrap_or_default());
+            }
+        }
+
+        // Detect duplicate keys (a key that appears in both a Put and a Delete,
+        // or appears multiple times). When duplicates exist we fall through to
+        // sequential per-op application to preserve original-order semantics.
+        let all_keys: Vec<Vec<u8>> = ops
+            .iter()
+            .map(|op| match op {
+                WriteOp::Put { ns, key, .. } => prefix_key(*ns, key),
+                WriteOp::Delete { ns, key } => prefix_key(*ns, key),
+            })
+            .collect();
+        let unique_count = {
+            let mut dedup = all_keys.clone();
+            dedup.sort_unstable();
+            dedup.dedup();
+            dedup.len()
+        };
+
+        if unique_count < all_keys.len() {
+            if let (Some(profile), Some(started)) = (profile.as_mut(), prepare_started) {
+                profile.prepare = started.elapsed();
+            }
+            let apply_started = profile.as_ref().map(|_| Instant::now());
+            // Duplicate keys present — apply in order to preserve last-write semantics.
+            for op in ops {
+                match op {
+                    WriteOp::Put { ns, key, value } => {
+                        let composite = prefix_key(*ns, key);
+                        txn.put(&composite, value).await.map_err(LiteError::from)?;
+                    }
+                    WriteOp::Delete { ns, key } => {
+                        let composite = prefix_key(*ns, key);
+                        txn.delete(&composite).await.map_err(LiteError::from)?;
+                    }
+                }
+            }
+            if let (Some(profile), Some(started)) = (profile.as_mut(), apply_started) {
+                profile.apply = started.elapsed();
+            }
+        } else {
+            // All keys distinct — partition into sorted puts + sorted deletes,
+            // then call the batch APIs within the same WriteTxn (both commit atomically).
+            let mut puts: Vec<(Bytes, Bytes)> = Vec::new();
+            let mut deletes: Vec<Vec<u8>> = Vec::new();
+            for op in ops {
+                match op {
+                    WriteOp::Put { ns, key, value } => puts.push((
+                        Bytes::from(prefix_key(*ns, key)),
+                        Bytes::from(value.clone()),
+                    )),
+                    WriteOp::Delete { ns, key } => deletes.push(prefix_key(*ns, key)),
+                }
+            }
+            puts.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+            deletes.sort_unstable();
+            if let (Some(profile), Some(started)) = (profile.as_mut(), prepare_started) {
+                profile.prepare = started.elapsed();
+            }
+            let apply_started = profile.as_ref().map(|_| Instant::now());
+            if !puts.is_empty() {
+                txn.put_batch(puts).await.map_err(LiteError::from)?;
+            }
+            if !deletes.is_empty() {
+                txn.delete_batch(deletes).await.map_err(LiteError::from)?;
+            }
+            if let (Some(profile), Some(started)) = (profile.as_mut(), apply_started) {
+                profile.apply = started.elapsed();
+            }
+        }
+
+        let commit_started = profile.as_ref().map(|_| Instant::now());
+        txn.commit().await.map_err(LiteError::from)?;
+        if let (Some(profile), Some(started)) = (profile.as_mut(), commit_started) {
+            profile.commit = started.elapsed();
+        }
+        if let (Some(profile), Some(started)) = (profile.as_mut(), total_started) {
+            profile.total = started.elapsed();
+        }
+        Ok(profile.unwrap_or_default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::pagedb_storage::PagedbStorage;
+
+    #[tokio::test]
+    async fn profiled_unique_put_batch_commits_values_and_reports_all_operations() {
+        let storage = PagedbStorage::open_in_memory().await.unwrap();
+        let profile = storage
+            .batch_write_profiled(&[
+                WriteOp::Put {
+                    ns: Namespace::Graph,
+                    key: b"b".to_vec(),
+                    value: b"second".to_vec(),
+                },
+                WriteOp::Put {
+                    ns: Namespace::Graph,
+                    key: b"a".to_vec(),
+                    value: b"first".to_vec(),
+                },
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(profile.operations, 2);
+        assert!(profile.total >= profile.begin + profile.prepare + profile.apply + profile.commit);
+        assert_eq!(
+            storage
+                .get(Namespace::Graph, b"a")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(b"first".as_slice())
+        );
+        assert_eq!(
+            storage
+                .get(Namespace::Graph, b"b")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(b"second".as_slice())
+        );
     }
 }

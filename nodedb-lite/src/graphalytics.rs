@@ -8,17 +8,18 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use nodedb_graph::params::{AlgoParams, GraphAlgorithm};
-use nodedb_types::Namespace;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
 use crate::NodeDbLite;
 use crate::engine::graph::index::CsrIndex;
 use crate::error::LiteError;
-use crate::graphalytics_external_sort::{ExternalEdgeSorter, SortedEdge};
+use crate::graphalytics_diagnostics::GraphalyticsLoadDiagnostics;
+use crate::graphalytics_external_sort::ExternalEdgeSorter;
+use crate::graphalytics_storage::sorted_edge_write;
 use crate::query::graph_ops::algorithms::run_algo;
 use crate::query::graph_ops::edges::edge_store_key;
-use crate::storage::engine::{StorageEngine, WriteOp};
+use crate::storage::engine::StorageEngine;
 
 const COLLECTION: &str = "graphalytics";
 const EDGE_LABEL: &str = "EDGE";
@@ -37,55 +38,6 @@ pub struct ImportMetrics {
     pub prepare_seconds: f64,
 }
 
-struct WeightProperties(f64);
-
-impl zerompk::ToMessagePack for WeightProperties {
-    fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
-        // Value::Object({"weight": Value::Float(weight)})
-        writer.write_array_len(2)?;
-        writer.write_u8(7)?;
-        writer.write_map_len(1)?;
-        writer.write_string("weight")?;
-        writer.write_array_len(2)?;
-        writer.write_u8(3)?;
-        writer.write_f64(self.0)
-    }
-}
-
-struct StoredGraphalyticsEdge<'a> {
-    source: &'a str,
-    destination: &'a str,
-    properties: &'a [u8],
-}
-
-impl zerompk::ToMessagePack for StoredGraphalyticsEdge<'_> {
-    fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
-        // Value::Object with the same fields produced by edge_to_value().
-        writer.write_array_len(2)?;
-        writer.write_u8(7)?;
-        writer.write_map_len(5)?;
-        write_string_value(writer, "collection", COLLECTION)?;
-        write_string_value(writer, "src", self.source)?;
-        write_string_value(writer, "label", EDGE_LABEL)?;
-        write_string_value(writer, "dst", self.destination)?;
-        writer.write_string("props")?;
-        writer.write_array_len(2)?;
-        writer.write_u8(5)?;
-        writer.write_binary(self.properties)
-    }
-}
-
-fn write_string_value<W: zerompk::Write>(
-    writer: &mut W,
-    key: &str,
-    value: &str,
-) -> zerompk::Result<()> {
-    writer.write_string(key)?;
-    writer.write_array_len(2)?;
-    writer.write_u8(4)?;
-    writer.write_string(value)
-}
-
 impl<S: StorageEngine> NodeDbLite<S> {
     /// Import a weighted Graphalytics edge-list into the normal durable graph
     /// table while building the embedded CSR once in process.
@@ -93,6 +45,30 @@ impl<S: StorageEngine> NodeDbLite<S> {
         &self,
         vertex_file: &Path,
         edge_file: &Path,
+    ) -> Result<ImportMetrics, LiteError> {
+        self.graphalytics_import_internal(vertex_file, edge_file, None)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn graphalytics_import_with_diagnostics(
+        &self,
+        vertex_file: &Path,
+        edge_file: &Path,
+        enabled: bool,
+    ) -> Result<(ImportMetrics, Option<GraphalyticsLoadDiagnostics>), LiteError> {
+        let mut diagnostics = enabled.then(GraphalyticsLoadDiagnostics::new);
+        let metrics = self
+            .graphalytics_import_internal(vertex_file, edge_file, diagnostics.as_mut())
+            .await?;
+        Ok((metrics, diagnostics))
+    }
+
+    async fn graphalytics_import_internal(
+        &self,
+        vertex_file: &Path,
+        edge_file: &Path,
+        mut diagnostics: Option<&mut GraphalyticsLoadDiagnostics>,
     ) -> Result<ImportMetrics, LiteError> {
         let load_start = Instant::now();
         let mut prepare_duration = Duration::ZERO;
@@ -102,6 +78,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let mut pending_vertices = Vec::with_capacity(VERTEX_BATCH_SIZE);
         let mut pending_vertex_bytes = 0usize;
         let mut vertex_count = 0usize;
+        let mut vertex_parse_start = diagnostics.is_some().then(Instant::now);
         while read_bounded_line(&mut reader, &mut line, MAX_VERTEX_ID_BYTES + 2)? != 0 {
             let vertex = line.trim();
             if vertex.is_empty() {
@@ -112,8 +89,18 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 || (!pending_vertices.is_empty()
                     && pending_vertex_bytes + vertex.len() > MAX_PENDING_ID_BYTES)
             {
-                prepare_duration += self.graphalytics_stage_vertices(&pending_vertices)?;
+                if let (Some(diagnostics), Some(start)) =
+                    (diagnostics.as_deref_mut(), vertex_parse_start)
+                {
+                    diagnostics.add_vertex_parse(start.elapsed());
+                }
+                let staging = self.graphalytics_stage_vertices(&pending_vertices)?;
+                if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                    diagnostics.add_csr_staging(staging);
+                }
+                prepare_duration += staging;
                 pending_vertices.clear();
+                vertex_parse_start = diagnostics.is_some().then(Instant::now);
                 pending_vertex_bytes = 0;
             }
             pending_vertex_bytes += vertex.len();
@@ -121,16 +108,30 @@ impl<S: StorageEngine> NodeDbLite<S> {
             vertex_count += 1;
         }
         if !pending_vertices.is_empty() {
-            prepare_duration += self.graphalytics_stage_vertices(&pending_vertices)?;
+            if let (Some(diagnostics), Some(start)) =
+                (diagnostics.as_deref_mut(), vertex_parse_start)
+            {
+                diagnostics.add_vertex_parse(start.elapsed());
+            }
+            let staging = self.graphalytics_stage_vertices(&pending_vertices)?;
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics.add_csr_staging(staging);
+            }
+            prepare_duration += staging;
+        } else if let (Some(diagnostics), Some(start)) =
+            (diagnostics.as_deref_mut(), vertex_parse_start)
+        {
+            diagnostics.add_vertex_parse(start.elapsed());
         }
 
         let file = File::open(edge_file).map_err(io_error)?;
         let mut reader = BufReader::with_capacity(1 << 20, file);
         let mut pending = Vec::with_capacity(BATCH_SIZE);
         let mut pending_id_bytes = 0usize;
-        let mut sorter = ExternalEdgeSorter::new(BATCH_SIZE)?;
+        let mut sorter = ExternalEdgeSorter::new(BATCH_SIZE, diagnostics.is_some())?;
         let mut edge_count = 0usize;
         let mut ordinal = 0u64;
+        let mut edge_parse_start = diagnostics.is_some().then(Instant::now);
         while read_bounded_line(&mut reader, &mut line, MAX_EDGE_LINE_BYTES)? != 0 {
             let mut fields = line.split_whitespace();
             let source = fields.next().ok_or_else(|| malformed_edge(&line))?;
@@ -149,9 +150,18 @@ impl<S: StorageEngine> NodeDbLite<S> {
             if pending.len() == BATCH_SIZE
                 || (!pending.is_empty() && pending_id_bytes + id_bytes > MAX_PENDING_ID_BYTES)
             {
-                prepare_duration +=
-                    self.graphalytics_stage_edges(&pending, &mut sorter, &mut ordinal)?;
+                if let (Some(diagnostics), Some(start)) =
+                    (diagnostics.as_deref_mut(), edge_parse_start)
+                {
+                    diagnostics.add_edge_parse(start.elapsed());
+                }
+                let staging = self.graphalytics_stage_edges(&pending, &mut sorter, &mut ordinal)?;
+                if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                    diagnostics.add_csr_staging(staging);
+                }
+                prepare_duration += staging;
                 pending.clear();
+                edge_parse_start = diagnostics.is_some().then(Instant::now);
                 pending_id_bytes = 0;
             }
             pending_id_bytes += id_bytes;
@@ -159,19 +169,47 @@ impl<S: StorageEngine> NodeDbLite<S> {
             edge_count += 1;
         }
         if !pending.is_empty() {
-            prepare_duration +=
-                self.graphalytics_stage_edges(&pending, &mut sorter, &mut ordinal)?;
+            if let (Some(diagnostics), Some(start)) = (diagnostics.as_deref_mut(), edge_parse_start)
+            {
+                diagnostics.add_edge_parse(start.elapsed());
+            }
+            let staging = self.graphalytics_stage_edges(&pending, &mut sorter, &mut ordinal)?;
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics.add_csr_staging(staging);
+            }
+            prepare_duration += staging;
+        } else if let (Some(diagnostics), Some(start)) =
+            (diagnostics.as_deref_mut(), edge_parse_start)
+        {
+            diagnostics.add_edge_parse(start.elapsed());
         }
         let mut merge = sorter.finish()?;
         while let Some(edges) = merge.next_batch(BATCH_SIZE, MAX_MERGE_KEY_BYTES)? {
+            let regeneration_start = diagnostics.is_some().then(Instant::now);
             let writes = edges
                 .into_iter()
                 .map(sorted_edge_write)
                 .collect::<Result<Vec<_>, _>>()?;
-            self.storage.batch_write(&writes).await?;
+            if let (Some(diagnostics), Some(regeneration_start)) =
+                (diagnostics.as_deref_mut(), regeneration_start)
+            {
+                diagnostics.add_value_regeneration(regeneration_start.elapsed());
+            }
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics
+                    .add_storage_batch_write(self.storage.batch_write_profiled(&writes).await?);
+            } else {
+                self.storage.batch_write(&writes).await?;
+            }
+        }
+        if let (Some(diagnostics), Some(sort)) =
+            (diagnostics.as_deref_mut(), merge.take_diagnostics())
+        {
+            diagnostics.add_sort(sort);
         }
         let total_import = load_start.elapsed();
-        let load_seconds = total_import.saturating_sub(prepare_duration).as_secs_f64();
+        let load_duration = total_import.saturating_sub(prepare_duration);
+        let load_seconds = load_duration.as_secs_f64();
 
         let prepare_start = Instant::now();
         {
@@ -183,11 +221,16 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 .compact_initial_build()
                 .map_err(graph_error)?;
         }
+        let prepare_duration = prepare_duration + prepare_start.elapsed();
+        if let Some(diagnostics) = diagnostics.as_deref_mut() {
+            diagnostics.finish(total_import, load_duration, prepare_duration);
+            diagnostics.set_counts(vertex_count, edge_count);
+        }
         Ok(ImportMetrics {
             vertices: vertex_count,
             edges: edge_count,
             load_seconds,
-            prepare_seconds: (prepare_duration + prepare_start.elapsed()).as_secs_f64(),
+            prepare_seconds: prepare_duration.as_secs_f64(),
         })
     }
 
@@ -315,50 +358,6 @@ impl<S: StorageEngine> NodeDbLite<S> {
     }
 }
 
-fn sorted_edge_write(edge: SortedEdge) -> Result<WriteOp, LiteError> {
-    let prefix_len = COLLECTION.len() + 1;
-    if edge.key.get(..COLLECTION.len()) != Some(COLLECTION.as_bytes())
-        || edge.key.get(COLLECTION.len()) != Some(&0)
-    {
-        return Err(malformed_stored_edge());
-    }
-    let suffix = edge
-        .key
-        .get(prefix_len..)
-        .ok_or_else(malformed_stored_edge)?;
-    let source_end = suffix
-        .iter()
-        .position(|byte| *byte == 0)
-        .map(|offset| prefix_len + offset)
-        .ok_or_else(malformed_stored_edge)?;
-    let label_start = source_end + 1;
-    let label_end = label_start + EDGE_LABEL.len();
-    let destination_start = label_end + 1;
-    if edge.key.get(label_start..label_end) != Some(EDGE_LABEL.as_bytes())
-        || edge.key.get(label_end) != Some(&0)
-        || destination_start > edge.key.len()
-    {
-        return Err(malformed_stored_edge());
-    }
-    let source = std::str::from_utf8(&edge.key[prefix_len..source_end])
-        .map_err(|_| malformed_stored_edge())?;
-    let destination =
-        std::str::from_utf8(&edge.key[destination_start..]).map_err(|_| malformed_stored_edge())?;
-    let properties =
-        zerompk::to_msgpack_vec(&WeightProperties(edge.weight)).map_err(serialization_error)?;
-    let value = zerompk::to_msgpack_vec(&StoredGraphalyticsEdge {
-        source,
-        destination,
-        properties: &properties,
-    })
-    .map_err(serialization_error)?;
-    Ok(WriteOp::Put {
-        ns: Namespace::Graph,
-        key: edge.key,
-        value,
-    })
-}
-
 fn upsert_graphalytics_edge(
     csr: &mut CsrIndex,
     source: &str,
@@ -396,18 +395,6 @@ fn validate_vertex_id(vertex: &str, line: &str) -> Result<(), LiteError> {
         return Err(malformed_edge(line));
     }
     Ok(())
-}
-
-fn serialization_error(error: impl std::fmt::Display) -> LiteError {
-    LiteError::Serialization {
-        detail: error.to_string(),
-    }
-}
-
-fn malformed_stored_edge() -> LiteError {
-    LiteError::Storage {
-        detail: "malformed Graphalytics edge key".to_string(),
-    }
 }
 
 fn io_error(error: std::io::Error) -> LiteError {
@@ -453,68 +440,5 @@ mod tests {
         upsert_graphalytics_edge(&mut csr, "a", "b", 2.5).unwrap();
         assert_eq!(csr.edge_weight("a", EDGE_LABEL, "b"), Some(2.5));
         assert_eq!(csr.edge_count(), 1);
-    }
-
-    #[test]
-    fn compact_spill_regenerates_the_exact_stored_value_shape() {
-        let WriteOp::Put { key, value, .. } = sorted_edge_write(SortedEdge {
-            key: edge_store_key(COLLECTION, "a", EDGE_LABEL, "b"),
-            weight: 2.5,
-        })
-        .unwrap() else {
-            panic!("expected put");
-        };
-        assert_eq!(key, edge_store_key(COLLECTION, "a", EDGE_LABEL, "b"));
-        let properties = zerompk::to_msgpack_vec(&WeightProperties(2.5)).unwrap();
-        let legacy = crate::query::graph_ops::edges::edge_to_value(
-            COLLECTION,
-            "a",
-            EDGE_LABEL,
-            "b",
-            &properties,
-        )
-        .unwrap();
-        assert_eq!(
-            zerompk::from_msgpack::<Value>(&value).unwrap(),
-            zerompk::from_msgpack::<Value>(&legacy).unwrap()
-        );
-    }
-
-    #[test]
-    fn specialized_edge_encoding_matches_stored_value_shape() {
-        let properties = zerompk::to_msgpack_vec(&WeightProperties(2.5)).unwrap();
-        let value = zerompk::to_msgpack_vec(&StoredGraphalyticsEdge {
-            source: "a",
-            destination: "b",
-            properties: &properties,
-        })
-        .unwrap();
-        let legacy = crate::query::graph_ops::edges::edge_to_value(
-            COLLECTION,
-            "a",
-            EDGE_LABEL,
-            "b",
-            &properties,
-        )
-        .unwrap();
-        assert_eq!(
-            zerompk::from_msgpack::<Value>(&value).unwrap(),
-            zerompk::from_msgpack::<Value>(&legacy).unwrap()
-        );
-
-        let Value::Object(edge) = zerompk::from_msgpack::<Value>(&value).unwrap() else {
-            panic!("expected edge object");
-        };
-        assert_eq!(edge["collection"], Value::String(COLLECTION.to_string()));
-        assert_eq!(edge["src"], Value::String("a".to_string()));
-        assert_eq!(edge["label"], Value::String(EDGE_LABEL.to_string()));
-        assert_eq!(edge["dst"], Value::String("b".to_string()));
-        let Value::Bytes(properties) = &edge["props"] else {
-            panic!("expected property bytes");
-        };
-        let Value::Object(properties) = zerompk::from_msgpack::<Value>(properties).unwrap() else {
-            panic!("expected property object");
-        };
-        assert_eq!(properties["weight"], Value::Float(2.5));
     }
 }

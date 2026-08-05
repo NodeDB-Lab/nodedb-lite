@@ -39,6 +39,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         fs::remove_file(&database)?;
     }
 
+    let diagnostics_path = std::env::var_os("NODEDB_GRAPHALYTICS_DIAGNOSTICS").map(PathBuf::from);
+
     let db = NodeDbLite::open_at_path_with_config_and_page_size(
         &database,
         Encryption::Plaintext,
@@ -46,10 +48,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         DURABLE_PAGE_SIZE,
     )
     .await?;
-    let metrics = db
-        .graphalytics_import(
+    let (metrics, mut diagnostics) = db
+        .graphalytics_import_with_diagnostics(
             &dataset.join(format!("{dataset_name}.v")),
             &dataset.join(format!("{dataset_name}.e")),
+            diagnostics_path.is_some(),
         )
         .await?;
     enforce_timeout("load", metrics.load_seconds)?;
@@ -103,7 +106,31 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     writeln!(summary, "  }}")?;
     writeln!(summary, "}}")?;
+    drop(summary);
+    if let (Some(path), Some(diagnostics)) = (diagnostics_path, diagnostics.as_mut()) {
+        diagnostics.set_database_bytes(directory_size_bytes(&database).ok());
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, diagnostics.to_json(dataset_name)?)?;
+    }
     Ok(())
+}
+
+fn directory_size_bytes(path: &Path) -> std::io::Result<u64> {
+    let metadata = fs::metadata(path)?;
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+    fs::read_dir(path)?.try_fold(0u64, |total, entry| {
+        let entry = entry?;
+        total
+            .checked_add(directory_size_bytes(&entry.path())?)
+            .ok_or_else(|| std::io::Error::other("PageDB directory size overflow"))
+    })
 }
 
 fn enforce_timeout(operation: &str, seconds: f64) -> Result<(), Box<dyn std::error::Error>> {

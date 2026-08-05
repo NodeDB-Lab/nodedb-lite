@@ -6,6 +6,8 @@
 //! opaque blobs and store them here. The storage layer never interprets the
 //! data.
 
+use std::time::{Duration, Instant};
+
 use async_trait::async_trait;
 
 use crate::error::LiteError;
@@ -43,6 +45,20 @@ pub struct CompactionOutcome {
     pub reclaimed_segments: u64,
     /// Bytes freed by deleting tombstoned segment files.
     pub segment_bytes_freed: u64,
+}
+
+/// Timings and operation count for one atomic batch write.
+///
+/// Engines that cannot expose internal stages retain the total wall duration
+/// from the default [`StorageEngine::batch_write_profiled`] implementation.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StorageWriteProfile {
+    pub total: Duration,
+    pub begin: Duration,
+    pub prepare: Duration,
+    pub apply: Duration,
+    pub commit: Duration,
+    pub operations: u64,
 }
 
 /// A write operation for batch writes.
@@ -93,6 +109,23 @@ pub trait StorageEngine: Send + Sync + 'static {
     /// This is the primary write path for engines that need to persist
     /// multiple related blobs atomically (e.g., HNSW node + metadata).
     async fn batch_write(&self, ops: &[WriteOp]) -> Result<(), LiteError>;
+
+    /// Atomically apply a batch and report its wall-clock cost.
+    ///
+    /// Backends without stage-level visibility use the normal write path and
+    /// report only the total duration and operation count.
+    async fn batch_write_profiled(
+        &self,
+        ops: &[WriteOp],
+    ) -> Result<StorageWriteProfile, LiteError> {
+        let started = Instant::now();
+        self.batch_write(ops).await?;
+        Ok(StorageWriteProfile {
+            total: started.elapsed(),
+            operations: ops.len() as u64,
+            ..StorageWriteProfile::default()
+        })
+    }
 
     /// Count the number of entries in a namespace.
     ///
