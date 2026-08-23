@@ -34,6 +34,14 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.draft != true
     uses: ./.github/workflows/test.yml
+    with:
+      # Temporary pin: nodedb main is mid-workspace-refactor and the
+      # nodedb-array/nodedb-wal workspace-dependency state has been
+      # inconsistent on and off, which fails `cargo metadata` in
+      # setup-workspace for every PR. 0f625a6 is a verified-consistent
+      # commit. Remove this pin once nodedb main settles (and prefer
+      # re-pointing it to a release tag).
+      nodedb-ref: 0f625a6a287d8b2d8c0ee04dc14ff2618cc5f115
 
   wasm:
     name: WASM
@@ -41,3 +49,5 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.draft != true
     uses: ./.github/workflows/wasm.yml
+    with:
+      nodedb-ref: 0f625a6a287d8b2d8c0ee04dc14ff2618cc5f115
