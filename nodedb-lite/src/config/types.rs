@@ -5,9 +5,11 @@
 use serde::{Deserialize, Serialize};
 
 use super::defaults::{
-    default_argon2_m_cost, default_argon2_p_cost, default_argon2_t_cost, default_auto_compact_ms,
-    default_auto_flush_ms, default_kv_cache_capacity, default_outbound_queue_cap,
-    default_sync_enabled,
+    default_argon2_m_cost, default_argon2_p_cost, default_argon2_t_cost, default_array_percent,
+    default_auto_compact_ms, default_auto_flush_ms, default_columnar_percent,
+    default_document_percent, default_fts_percent, default_kv_cache_capacity, default_kv_percent,
+    default_outbound_queue_cap, default_sparse_percent, default_spatial_percent,
+    default_strict_percent, default_sync_enabled, default_timeseries_percent,
 };
 use crate::storage::corruption::CorruptionPolicy;
 
@@ -41,6 +43,42 @@ pub struct LiteConfig {
 
     /// Percentage of `memory_budget` reserved for query scratch space. Default: 15.
     pub query_percent: usize,
+
+    /// Percentage of `memory_budget` reserved for the key-value engine. Default: 2.
+    #[serde(default = "default_kv_percent")]
+    pub kv_percent: usize,
+
+    /// Percentage of `memory_budget` reserved for the schemaless document engine. Default: 2.
+    #[serde(default = "default_document_percent")]
+    pub document_percent: usize,
+
+    /// Percentage of `memory_budget` reserved for the strict document engine. Default: 2.
+    #[serde(default = "default_strict_percent")]
+    pub strict_percent: usize,
+
+    /// Percentage of `memory_budget` reserved for the columnar engine. Default: 2.
+    #[serde(default = "default_columnar_percent")]
+    pub columnar_percent: usize,
+
+    /// Percentage of `memory_budget` reserved for the timeseries engine. Default: 1.
+    #[serde(default = "default_timeseries_percent")]
+    pub timeseries_percent: usize,
+
+    /// Percentage of `memory_budget` reserved for the spatial engine. Default: 1.
+    #[serde(default = "default_spatial_percent")]
+    pub spatial_percent: usize,
+
+    /// Percentage of `memory_budget` reserved for the full-text search engine. Default: 1.
+    #[serde(default = "default_fts_percent")]
+    pub fts_percent: usize,
+
+    /// Percentage of `memory_budget` reserved for the array engine. Default: 1.
+    #[serde(default = "default_array_percent")]
+    pub array_percent: usize,
+
+    /// Percentage of `memory_budget` reserved for the sparse-vector metadata engine. Default: 1.
+    #[serde(default = "default_sparse_percent")]
+    pub sparse_percent: usize,
 
     /// Enable CRDT sync for KV operations. Default: `true`.
     ///
@@ -142,6 +180,15 @@ impl Default for LiteConfig {
             csr_percent: 15,
             loro_percent: 15,
             query_percent: 15,
+            kv_percent: default_kv_percent(),
+            document_percent: default_document_percent(),
+            strict_percent: default_strict_percent(),
+            columnar_percent: default_columnar_percent(),
+            timeseries_percent: default_timeseries_percent(),
+            spatial_percent: default_spatial_percent(),
+            fts_percent: default_fts_percent(),
+            array_percent: default_array_percent(),
+            sparse_percent: default_sparse_percent(),
             sync_enabled: true,
             outbound_queue_cap: default_outbound_queue_cap(),
             argon2_m_cost: default_argon2_m_cost(),
@@ -167,6 +214,15 @@ mod tests {
         assert_eq!(cfg.csr_percent, 15);
         assert_eq!(cfg.loro_percent, 15);
         assert_eq!(cfg.query_percent, 15);
+        assert_eq!(cfg.kv_percent, 2);
+        assert_eq!(cfg.document_percent, 2);
+        assert_eq!(cfg.strict_percent, 2);
+        assert_eq!(cfg.columnar_percent, 2);
+        assert_eq!(cfg.timeseries_percent, 1);
+        assert_eq!(cfg.spatial_percent, 1);
+        assert_eq!(cfg.fts_percent, 1);
+        assert_eq!(cfg.array_percent, 1);
+        assert_eq!(cfg.sparse_percent, 1);
         assert_eq!(cfg.argon2_m_cost, 19_456);
         assert_eq!(cfg.argon2_t_cost, 2);
         assert_eq!(cfg.argon2_p_cost, 1);

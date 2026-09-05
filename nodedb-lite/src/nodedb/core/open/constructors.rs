@@ -78,7 +78,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
     async fn open_inner(storage: S, config: LiteConfig) -> NodeDbResult<Arc<Self>> {
         config.validate()?;
 
-        let governor = crate::memory::MemoryGovernor::from_config(&config);
+        let governor = Arc::new(
+            nodedb_mem::MemoryGovernor::new(config.to_governor_config())
+                .map_err(NodeDbError::config)?,
+        );
         let sync_enabled = config.sync_enabled;
         let kv_cache_capacity = NonZeroUsize::new(config.kv_cache_capacity)
             .ok_or_else(|| NodeDbError::config("kv_cache_capacity must be greater than 0"))?;
@@ -212,6 +215,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
             csr: csr_arc,
             crdt,
             governor,
+            vector_mem_token: Mutex::new(None),
+            graph_mem_token: Mutex::new(None),
+            crdt_mem_token: Mutex::new(None),
             query_engine,
             fts_state,
             sparse_state,

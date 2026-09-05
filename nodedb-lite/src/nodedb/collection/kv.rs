@@ -114,10 +114,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
         value: &[u8],
         deadline_ms: u64,
     ) -> NodeDbResult<()> {
-        if self.governor.pressure() == crate::memory::PressureLevel::Critical {
+        if self.governor.worst_engine_pressure() == nodedb_mem::PressureLevel::Emergency {
             return Err(nodedb_types::error::NodeDbError::storage(
                 crate::error::LiteError::Backpressure {
-                    detail: "KV write rejected: memory governor is at Critical pressure".into(),
+                    detail: "KV write rejected: memory governor is at Emergency pressure".into(),
                 },
             ));
         }

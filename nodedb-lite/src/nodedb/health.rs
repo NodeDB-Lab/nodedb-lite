@@ -10,9 +10,9 @@
 
 use serde::Serialize;
 
+use nodedb_mem::{EngineId, PressureLevel};
 use nodedb_types::error::NodeDbResult;
 
-use crate::memory::{EngineId, PressureLevel};
 use crate::storage::engine::StorageEngine;
 
 use super::core::NodeDbLite;
@@ -106,13 +106,15 @@ fn pressure_str(p: PressureLevel) -> &'static str {
         PressureLevel::Normal => "normal",
         PressureLevel::Warning => "warning",
         PressureLevel::Critical => "critical",
+        PressureLevel::Emergency => "emergency",
     }
 }
 
-fn engine_memory(gov: &crate::memory::MemoryGovernor, id: EngineId) -> EngineMemory {
+fn engine_memory(gov: &nodedb_mem::MemoryGovernor, id: EngineId) -> EngineMemory {
+    let budget = gov.budget(id);
     EngineMemory {
-        budget_bytes: gov.budget_for(id),
-        used_bytes: gov.usage_for(id),
+        budget_bytes: budget.limit(),
+        used_bytes: budget.allocated(),
         pressure: pressure_str(gov.engine_pressure(id)),
     }
 }
@@ -148,14 +150,14 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let gov = &self.governor;
 
         let memory = MemoryHealth {
-            budget_bytes: gov.total_budget(),
-            used_bytes: gov.total_used(),
-            usage_ratio: gov.usage_ratio(),
-            pressure: pressure_str(gov.pressure()),
+            budget_bytes: gov.global_ceiling(),
+            used_bytes: gov.total_allocated(),
+            usage_ratio: gov.global_utilization_percent() as f64 / 100.0,
+            pressure: pressure_str(gov.global_pressure()),
             engines: EngineMemoryBreakdown {
-                hnsw: engine_memory(gov, EngineId::Hnsw),
-                csr: engine_memory(gov, EngineId::Csr),
-                loro: engine_memory(gov, EngineId::Loro),
+                hnsw: engine_memory(gov, EngineId::Vector),
+                csr: engine_memory(gov, EngineId::Graph),
+                loro: engine_memory(gov, EngineId::Crdt),
                 query: engine_memory(gov, EngineId::Query),
             },
         };
@@ -194,10 +196,13 @@ impl<S: StorageEngine> NodeDbLite<S> {
             pending_deltas,
         };
 
-        // Determine overall status.
-        let overall = match gov.pressure() {
-            PressureLevel::Critical => OverallStatus::Unhealthy,
-            PressureLevel::Warning => OverallStatus::Degraded,
+        // Determine overall status. Matches the old thresholds: nodedb_mem's
+        // Critical (85-95%) is where Lite's own Warning used to start, and
+        // Emergency (>95%) is where Lite's own Critical used to start.
+        let overall = match gov.global_pressure() {
+            PressureLevel::Emergency => OverallStatus::Unhealthy,
+            PressureLevel::Critical => OverallStatus::Degraded,
+            PressureLevel::Warning => OverallStatus::Healthy,
             PressureLevel::Normal => OverallStatus::Healthy,
         };
 

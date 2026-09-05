@@ -117,7 +117,7 @@ async fn check_and_evict_responds_to_pressure() {
     let evicted = db.check_and_evict().await.unwrap();
     // Should evict something if pressure is Critical/Warning.
     // With 100 byte budget, any HNSW data exceeds it.
-    assert!(evicted > 0 || db.governor().total_used() <= db.governor().total_budget());
+    assert!(evicted > 0 || db.governor().total_allocated() <= db.governor().global_ceiling());
 }
 
 #[tokio::test]

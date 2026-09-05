@@ -23,6 +23,7 @@
 
 pub mod defaults;
 pub mod env;
+pub mod governor;
 pub mod types;
 pub mod validate;
 

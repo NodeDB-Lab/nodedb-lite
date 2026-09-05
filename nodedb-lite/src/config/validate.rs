@@ -19,6 +19,15 @@ impl LiteConfig {
             ("csr_percent", self.csr_percent),
             ("loro_percent", self.loro_percent),
             ("query_percent", self.query_percent),
+            ("kv_percent", self.kv_percent),
+            ("document_percent", self.document_percent),
+            ("strict_percent", self.strict_percent),
+            ("columnar_percent", self.columnar_percent),
+            ("timeseries_percent", self.timeseries_percent),
+            ("spatial_percent", self.spatial_percent),
+            ("fts_percent", self.fts_percent),
+            ("array_percent", self.array_percent),
+            ("sparse_percent", self.sparse_percent),
         ] {
             if pct > 100 {
                 return Err(NodeDbError::config(format!(
@@ -31,7 +40,16 @@ impl LiteConfig {
             .hnsw_percent
             .saturating_add(self.csr_percent)
             .saturating_add(self.loro_percent)
-            .saturating_add(self.query_percent);
+            .saturating_add(self.query_percent)
+            .saturating_add(self.kv_percent)
+            .saturating_add(self.document_percent)
+            .saturating_add(self.strict_percent)
+            .saturating_add(self.columnar_percent)
+            .saturating_add(self.timeseries_percent)
+            .saturating_add(self.spatial_percent)
+            .saturating_add(self.fts_percent)
+            .saturating_add(self.array_percent)
+            .saturating_add(self.sparse_percent);
 
         if total > MAX_TOTAL_ENGINE_PERCENT {
             return Err(NodeDbError::config(format!(

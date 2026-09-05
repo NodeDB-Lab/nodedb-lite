@@ -28,6 +28,7 @@ nodedb-columnar = { version = "0.5" }
 nodedb-sql = { version = "0.5" }
 nodedb-array = { version = "0.5" }
 nodedb-physical = { version = "0.5" }
+nodedb-mem = { version = "0.5" }
 
 # Async
 tokio = { version = "1" }
@@ -43,13 +44,10 @@ tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sonic-rs = "0.5"
-# Fork pending upstream nuskey8/zerompk#61: the derived codecs are
-# `inline(always)`, which folds whole codec trees into one function and makes
-# large plan enums cost minutes to compile. Drop the git source once released.
-zerompk = { version = "0.7", git = "https://github.com/farhan-syah/zerompk", rev = "bb3156cf17b399b0dc2dd90895133a169a29cac0", features = [
-  "std",
-  "derive",
-] }
+# Must match the nodedb workspace pin exactly. A second zerompk copy gives the
+# shared engine crates a different `ToMessagePack`/`FromMessagePack` than Lite,
+# and every type crossing that line stops satisfying the trait.
+zerompk = { version = "0.8", features = ["std", "derive"] }
 
 # Storage
 # A caret requirement never matches a prerelease, so `version = "0"` could not

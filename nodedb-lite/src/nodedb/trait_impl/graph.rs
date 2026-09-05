@@ -145,10 +145,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
         edge_type: &str,
         properties: Option<Document>,
     ) -> NodeDbResult<EdgeId> {
-        if self.governor.pressure() == crate::memory::PressureLevel::Critical {
+        if self.governor.worst_engine_pressure() == nodedb_mem::PressureLevel::Emergency {
             return Err(NodeDbError::storage(
                 crate::error::LiteError::Backpressure {
-                    detail: "graph edge insert rejected: memory governor is at Critical pressure"
+                    detail: "graph edge insert rejected: memory governor is at Emergency pressure"
                         .into(),
                 },
             ));

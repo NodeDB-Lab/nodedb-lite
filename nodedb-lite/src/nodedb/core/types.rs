@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use nodedb_mem::{MemoryGovernor, ReservationToken};
+
 use crate::engine::columnar::ColumnarEngine;
 use crate::engine::crdt::CrdtEngine;
 use crate::engine::fts::FtsState;
@@ -13,7 +15,6 @@ use crate::engine::htap::HtapBridge;
 use crate::engine::sparse_vector::SparseVectorState;
 use crate::engine::strict::StrictEngine;
 use crate::engine::vector::VectorState;
-use crate::memory::MemoryGovernor;
 use crate::storage::engine::StorageEngine;
 
 /// Storage key constants.
@@ -40,7 +41,18 @@ pub struct NodeDbLite<S: StorageEngine> {
     /// Arc-wrapped for sharing with the query engine's TableProvider.
     pub(crate) crdt: Arc<Mutex<CrdtEngine>>,
     /// Memory budget governor.
-    pub(crate) governor: MemoryGovernor,
+    pub(crate) governor: Arc<MemoryGovernor>,
+    /// Held reservation for HNSW vector-index memory, last reported by
+    /// `update_memory_stats`. Replaced (drop old, charge new) on every
+    /// report so accounting tracks the current footprint, not the sum of
+    /// every report.
+    pub(crate) vector_mem_token: Mutex<Option<ReservationToken>>,
+    /// Held reservation for CSR graph-index memory. Same replace-on-report
+    /// discipline as `vector_mem_token`.
+    pub(crate) graph_mem_token: Mutex<Option<ReservationToken>>,
+    /// Held reservation for CRDT/Loro memory. Same replace-on-report
+    /// discipline as `vector_mem_token`.
+    pub(crate) crdt_mem_token: Mutex<Option<ReservationToken>>,
     /// SQL query engine (DataFusion over Loro documents and strict collections).
     pub(crate) query_engine: crate::query::LiteQueryEngine<S>,
     /// Shared FTS runtime state.

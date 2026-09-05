@@ -4,10 +4,11 @@
 
 use std::sync::{Arc, Mutex};
 
+use nodedb_mem::{EngineId, MemoryGovernor, ReservationToken, ScopedMemory};
 use nodedb_types::error::NodeDbResult;
+use nodedb_types::{DatabaseId, TenantId};
 
 use crate::engine::strict::StrictEngine;
-use crate::memory::{EngineId, MemoryGovernor};
 use crate::nodedb::core::types::NodeDbLite;
 use crate::nodedb::lock_ext::LockExt;
 use crate::storage::engine::StorageEngine;
@@ -20,19 +21,46 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 .values()
                 .map(|idx| idx.len() * (idx.dim() * 4 + 128))
                 .sum();
-            self.governor.report_usage(EngineId::Hnsw, hnsw_bytes);
+            self.charge_engine_usage(&self.vector_mem_token, EngineId::Vector, hnsw_bytes);
         }
         if let Ok(csr_map) = self.csr.lock() {
             let total: usize = csr_map
                 .values()
                 .map(|idx| idx.estimated_memory_bytes())
                 .sum();
-            self.governor.report_usage(EngineId::Csr, total);
+            self.charge_engine_usage(&self.graph_mem_token, EngineId::Graph, total);
         }
         if let Ok(crdt) = self.crdt.lock() {
-            self.governor
-                .report_usage(EngineId::Loro, crdt.estimated_memory_bytes());
+            self.charge_engine_usage(
+                &self.crdt_mem_token,
+                EngineId::Crdt,
+                crdt.estimated_memory_bytes(),
+            );
         }
+    }
+
+    /// Replace `slot`'s held reservation with one charging `bytes` for `engine`.
+    ///
+    /// `report_usage` reports an absolute current footprint, not a delta, so
+    /// the previous token drops before the new one is charged — otherwise the
+    /// governor would see the sum of every report instead of the current one.
+    /// Single-database, single-tenant: uses [`DatabaseId::DEFAULT`] and
+    /// `TenantId::new(0)`, matching every other Lite call site.
+    fn charge_engine_usage(
+        &self,
+        slot: &Mutex<Option<ReservationToken>>,
+        engine: EngineId,
+        bytes: usize,
+    ) {
+        let scoped = ScopedMemory::new(
+            Arc::clone(&self.governor),
+            DatabaseId::DEFAULT,
+            TenantId::new(0),
+            engine,
+        );
+        let mut token = slot.lock_or_recover();
+        token.take();
+        *token = Some(scoped.charge(bytes));
     }
 
     /// List currently loaded HNSW collections.
@@ -42,7 +70,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     }
 
     /// Access the memory governor.
-    pub fn governor(&self) -> &MemoryGovernor {
+    pub fn governor(&self) -> &Arc<MemoryGovernor> {
         &self.governor
     }
 

@@ -66,10 +66,11 @@ impl<S: StorageEngine> NodeDbLite<S> {
         collection: &str,
         doc: Document,
     ) -> NodeDbResult<()> {
-        if self.governor.pressure() == crate::memory::PressureLevel::Critical {
+        if self.governor.worst_engine_pressure() == nodedb_mem::PressureLevel::Emergency {
             return Err(NodeDbError::storage(
                 crate::error::LiteError::Backpressure {
-                    detail: "document put rejected: memory governor is at Critical pressure".into(),
+                    detail: "document put rejected: memory governor is at Emergency pressure"
+                        .into(),
                 },
             ));
         }

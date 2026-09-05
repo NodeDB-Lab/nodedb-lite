@@ -43,8 +43,8 @@ async fn e2e_memory_stays_within_budget() {
         .collect();
     db.batch_vector_insert("vecs", &refs).await.unwrap();
 
-    let used = db.governor().total_used();
-    let budget = db.governor().total_budget();
+    let used = db.governor().total_allocated();
+    let budget = db.governor().global_ceiling();
 
     assert!(used <= budget, "memory {used} exceeds budget {budget}");
 }

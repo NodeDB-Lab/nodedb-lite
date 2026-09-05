@@ -74,10 +74,11 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // the single-item `document_put_impl` / `vector_insert_impl` guard. A batch
         // can ingest many documents plus embeddings at once, so the early gate is
         // even more important here than on the single-item path.
-        if self.governor.pressure() == crate::memory::PressureLevel::Critical {
+        if self.governor.worst_engine_pressure() == nodedb_mem::PressureLevel::Emergency {
             return Err(NodeDbError::storage(
                 crate::error::LiteError::Backpressure {
-                    detail: "batch ingest rejected: memory governor is at Critical pressure".into(),
+                    detail: "batch ingest rejected: memory governor is at Emergency pressure"
+                        .into(),
                 },
             ));
         }

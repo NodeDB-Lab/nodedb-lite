@@ -38,7 +38,7 @@ mod tests {
     #[tokio::test]
     async fn open_empty_db() {
         let db = make_db().await;
-        assert_eq!(db.governor().total_used(), 0);
+        assert_eq!(db.governor().total_allocated(), 0);
     }
 
     #[tokio::test]
@@ -257,7 +257,7 @@ mod tests {
                 .unwrap();
         }
 
-        assert!(db.governor().total_used() > 0);
+        assert!(db.governor().total_allocated() > 0);
     }
 
     #[tokio::test]
@@ -271,18 +271,18 @@ mod tests {
     }
 
     /// Verify that a vector insert is rejected with Backpressure when the
-    /// memory governor reports Critical pressure.
+    /// memory governor reports Emergency pressure.
     ///
     /// Strategy: open a db with a tiny budget so that a first insert (which
     /// calls `update_memory_stats` at the end) pushes reported usage over the
     /// 95% threshold, then assert the second insert returns a Backpressure
     /// error.
     #[tokio::test]
-    async fn vector_insert_rejected_at_critical_pressure() {
+    async fn vector_insert_rejected_at_emergency_pressure() {
         use crate::config::LiteConfig;
-        use crate::memory::PressureLevel;
+        use nodedb_mem::PressureLevel;
 
-        // Budget is tiny (1 byte) so any HNSW usage immediately reports Critical.
+        // Budget is tiny (1 byte) so any HNSW usage immediately reports Emergency.
         let config = LiteConfig {
             memory_budget: 1,
             ..LiteConfig::default()
@@ -291,16 +291,16 @@ mod tests {
         let db = NodeDbLite::open_with_config(storage, config).await.unwrap();
 
         // First insert: succeeds and updates memory stats so the governor
-        // reports Critical after this call returns.
+        // reports Emergency after this call returns.
         db.vector_insert("embeddings", "v1", &[1.0, 0.0, 0.0], None)
             .await
             .unwrap();
 
-        // Confirm the governor is now Critical before the second insert.
+        // Confirm the governor is now Emergency before the second insert.
         assert_eq!(
-            db.governor().pressure(),
-            PressureLevel::Critical,
-            "governor should be Critical after first insert with 1-byte budget"
+            db.governor().worst_engine_pressure(),
+            PressureLevel::Emergency,
+            "governor should be Emergency after first insert with 1-byte budget"
         );
 
         // Second insert must be rejected with a Backpressure error.
@@ -310,7 +310,7 @@ mod tests {
 
         assert!(
             result.is_err(),
-            "second vector insert should fail under Critical pressure"
+            "second vector insert should fail under Emergency pressure"
         );
         let err_str = result.unwrap_err().to_string();
         assert!(

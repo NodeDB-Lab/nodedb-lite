@@ -24,11 +24,12 @@ impl<S: StorageEngine> NodeDbLite<S> {
             return Ok(());
         }
 
-        if self.governor.pressure() == crate::memory::PressureLevel::Critical {
+        if self.governor.worst_engine_pressure() == nodedb_mem::PressureLevel::Emergency {
             return Err(NodeDbError::storage(
                 crate::error::LiteError::Backpressure {
-                    detail: "batch vector insert rejected: memory governor is at Critical pressure"
-                        .into(),
+                    detail:
+                        "batch vector insert rejected: memory governor is at Emergency pressure"
+                            .into(),
                 },
             ));
         }
@@ -278,13 +279,19 @@ impl<S: StorageEngine> NodeDbLite<S> {
     }
 
     /// Check memory pressure and evict if needed.
+    ///
+    /// Matches the old thresholds: nodedb_mem's Critical (85-95%) is where
+    /// Lite's own Warning used to start, and Emergency (>95%) is where
+    /// Lite's own Critical used to start. The new Warning tier (70-85%) is
+    /// below both old thresholds, so it evicts nothing, same as Normal.
     pub async fn check_and_evict(&self) -> NodeDbResult<usize> {
-        use crate::memory::PressureLevel;
+        use nodedb_mem::PressureLevel;
 
         self.update_memory_stats();
-        match self.governor.pressure() {
-            PressureLevel::Critical => self.evict_collections(2).await,
-            PressureLevel::Warning => self.evict_collections(1).await,
+        match self.governor.worst_engine_pressure() {
+            PressureLevel::Emergency => self.evict_collections(2).await,
+            PressureLevel::Critical => self.evict_collections(1).await,
+            PressureLevel::Warning => Ok(0),
             PressureLevel::Normal => Ok(0),
         }
     }

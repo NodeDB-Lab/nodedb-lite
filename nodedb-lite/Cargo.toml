@@ -39,6 +39,7 @@ pagedb = { workspace = true }
 bytes = { workspace = true }
 nodedb-sql = { workspace = true }
 nodedb-physical = { workspace = true }
+nodedb-mem = { workspace = true }
 arrow = { workspace = true }
 crc32c = { workspace = true }
 aes-gcm = { workspace = true }
