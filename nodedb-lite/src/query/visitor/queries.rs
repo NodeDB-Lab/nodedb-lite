@@ -272,7 +272,8 @@ pub(super) fn lower_document_index_lookup<'a, S: StorageEngine + 'a>(
     case_insensitive: bool,
     _temporal: &TemporalScope,
 ) -> Result<LiteFut<'a>, LiteError> {
-    let col = collection.to_string();
+    // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
+    let col = nodedb_types::QualifiedCollection::new(nodedb_types::DatabaseId::DEFAULT, collection);
     let path = field.to_string();
     let mut val_str = sql_value_to_index_str(value);
     if case_insensitive {
@@ -334,7 +335,8 @@ pub(super) fn lower_range_scan<'a, S: StorageEngine + 'a>(
     upper: Option<&SqlValue>,
     limit: usize,
 ) -> Result<LiteFut<'a>, LiteError> {
-    let col = collection.to_string();
+    // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
+    let col = nodedb_types::QualifiedCollection::new(nodedb_types::DatabaseId::DEFAULT, collection);
     let fld = field.to_string();
 
     let encode_bound = |v: &SqlValue| -> Result<Vec<u8>, LiteError> {

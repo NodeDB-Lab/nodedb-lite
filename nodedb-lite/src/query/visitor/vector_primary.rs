@@ -67,7 +67,9 @@ pub(super) fn lower_vector_primary_insert<'a, S: StorageEngine + 'a>(
         })
         .collect::<Result<Vec<_>, LiteError>>()?;
 
-    let collection = collection.to_string();
+    // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
+    let collection =
+        nodedb_types::QualifiedCollection::new(nodedb_types::DatabaseId::DEFAULT, collection);
     let field = field.to_string();
     let quantization = *quantization;
     let storage_dtype = *storage_dtype;

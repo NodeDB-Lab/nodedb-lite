@@ -99,7 +99,11 @@ pub(super) fn lower_timeseries_scan<'a, S: StorageEngine + 'a>(
     let scan_limit = if sorted { 0 } else { limit };
 
     let op = TimeseriesOp::Scan {
-        collection: collection.to_string(),
+        // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
+        collection: nodedb_types::QualifiedCollection::new(
+            nodedb_types::DatabaseId::DEFAULT,
+            collection,
+        ),
         time_range,
         projection: proj_cols,
         limit: scan_limit,
@@ -181,7 +185,11 @@ pub(super) fn lower_timeseries_ingest<'a, S: StorageEngine + 'a>(
     })?;
 
     let op = TimeseriesOp::Ingest {
-        collection: collection.to_string(),
+        // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
+        collection: nodedb_types::QualifiedCollection::new(
+            nodedb_types::DatabaseId::DEFAULT,
+            collection,
+        ),
         payload,
         format: "samples".to_string(),
         wal_lsn: None,
@@ -189,7 +197,8 @@ pub(super) fn lower_timeseries_ingest<'a, S: StorageEngine + 'a>(
         provenance: None,
         // Lite's planner produces no RLS program and no RETURNING projection;
         // the adapter rejects either if one ever appears.
-        rls_write_check: Vec::new(),
+        // Lite has no RLS policy engine: no write policy applies.
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         returning: None,
         rls_filters: Vec::new(),
     };

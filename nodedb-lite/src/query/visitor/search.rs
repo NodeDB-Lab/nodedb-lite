@@ -62,7 +62,11 @@ pub(super) fn lower_multi_vector_search<'a, S: StorageEngine + 'a>(
     ef_search: usize,
 ) -> Result<LiteFut<'a>, LiteError> {
     let op = VectorOp::MultiSearch {
-        collection: collection.to_string(),
+        // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
+        collection: nodedb_types::QualifiedCollection::new(
+            nodedb_types::DatabaseId::DEFAULT,
+            collection,
+        ),
         query_vector: query_vector.to_vec(),
         top_k,
         ef_search,
@@ -88,7 +92,11 @@ pub(super) fn lower_sparse_search<'a, S: StorageEngine + 'a>(
     top_k: usize,
 ) -> Result<LiteFut<'a>, LiteError> {
     let op = VectorOp::SparseSearch {
-        collection: collection.to_string(),
+        // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
+        collection: nodedb_types::QualifiedCollection::new(
+            nodedb_types::DatabaseId::DEFAULT,
+            collection,
+        ),
         field_name: field.to_string(),
         query_entries: query_entries.to_vec(),
         top_k,
@@ -114,7 +122,11 @@ pub(super) fn lower_hybrid_search<'a, S: StorageEngine + 'a>(
     score_alias: Option<&str>,
 ) -> Result<LiteFut<'a>, LiteError> {
     let op = TextOp::HybridSearch {
-        collection: collection.to_string(),
+        // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
+        collection: nodedb_types::QualifiedCollection::new(
+            nodedb_types::DatabaseId::DEFAULT,
+            collection,
+        ),
         query_vector: query_vector.to_vec(),
         query_text: query_text.to_string(),
         top_k,
@@ -149,7 +161,11 @@ pub(super) fn lower_hybrid_search_triple<'a, S: StorageEngine + 'a>(
     score_alias: Option<&str>,
 ) -> Result<LiteFut<'a>, LiteError> {
     let op = TextOp::HybridSearchTriple {
-        collection: collection.to_string(),
+        // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
+        collection: nodedb_types::QualifiedCollection::new(
+            nodedb_types::DatabaseId::DEFAULT,
+            collection,
+        ),
         query_vector: query_vector.to_vec(),
         query_text: query_text.to_string(),
         graph_seed_id: graph_seed_id.to_string(),
@@ -194,7 +210,11 @@ pub(super) fn lower_spatial_scan<'a, S: StorageEngine + 'a>(
         .collect();
 
     let op = SpatialOp::Scan {
-        collection: collection.to_string(),
+        // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
+        collection: nodedb_types::QualifiedCollection::new(
+            nodedb_types::DatabaseId::DEFAULT,
+            collection,
+        ),
         field: field.to_string(),
         predicate: map_spatial_predicate(predicate),
         query_geometry: query_geometry.clone(),

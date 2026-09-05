@@ -2,6 +2,7 @@
 //! SpatialOp dispatch for the Lite physical visitor.
 
 use nodedb_physical::physical_plan::SpatialOp;
+use nodedb_types::RlsWriteCheck;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
@@ -9,6 +10,7 @@ use crate::query::spatial_ops;
 use crate::storage::engine::StorageEngine;
 
 use super::LitePhysicalFut;
+use super::policy::deny_policy;
 
 pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
@@ -27,7 +29,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let sur = *surrogate;
             let geom = geometry.clone();
             Ok(Box::pin(async move {
-                spatial_ops::writes::spatial_insert(engine, &col, &fld, sur, &geom)
+                spatial_ops::writes::spatial_insert(engine, col.as_str(), &fld, sur, &geom)
             }))
         }
 
@@ -41,7 +43,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let fld = field.clone();
             let sur = *surrogate;
             Ok(Box::pin(async move {
-                spatial_ops::writes::spatial_delete(engine, &col, &fld, sur)
+                spatial_ops::writes::spatial_delete(engine, col.as_str(), &fld, sur)
             }))
         }
 
@@ -57,8 +59,15 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             rls_filters,
             prefilter,
         } => {
+            // Scan carries no rls_write_check slot: it never writes.
+            deny_policy(
+                "SpatialOp::Scan",
+                None,
+                &[rls_filters.as_slice()],
+                &RlsWriteCheck::NoPolicyApplies,
+            )?;
             let params = spatial_ops::reads::ScanParams {
-                collection: collection.clone(),
+                collection: collection.as_str().to_string(),
                 field: field.clone(),
                 predicate: *predicate,
                 query_geometry: query_geometry.clone(),

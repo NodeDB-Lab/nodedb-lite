@@ -47,7 +47,11 @@ pub(super) fn lower_recursive_scan<'a, S: StorageEngine + 'a>(
     let rec_bytes = encode_filters(recursive_filters)?;
 
     let op = QueryOp::RecursiveScan {
-        collection: collection.to_string(),
+        // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
+        collection: nodedb_types::QualifiedCollection::new(
+            nodedb_types::DatabaseId::DEFAULT,
+            collection,
+        ),
         base_filters: base_bytes,
         recursive_filters: rec_bytes,
         join_link: join_link.cloned(),

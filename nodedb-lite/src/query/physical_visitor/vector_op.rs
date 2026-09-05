@@ -47,9 +47,9 @@ where
             ..
         } => {
             let index_key = if field_name.is_empty() {
-                collection.clone()
+                collection.as_str().to_string()
             } else {
-                format!("{collection}:{field_name}")
+                format!("{}:{field_name}", collection.as_str())
             };
             let collection = collection.clone();
             let query = query_vector.clone();
@@ -74,7 +74,7 @@ where
                     &vector_state,
                     &crdt,
                     &index_key,
-                    &collection,
+                    collection.as_str(),
                     &query,
                     k,
                     metadata_filter.as_ref(),
@@ -121,7 +121,7 @@ where
             }
             Ok(vector_insert(
                 engine,
-                collection.clone(),
+                collection.as_str().to_string(),
                 vector.clone(),
                 field_name.clone(),
                 surrogate.to_string(),
@@ -131,7 +131,11 @@ where
         VectorOp::Delete {
             collection,
             vector_id,
-        } => Ok(vector_delete_by_id(engine, collection.clone(), *vector_id)),
+        } => Ok(vector_delete_by_id(
+            engine,
+            collection.as_str().to_string(),
+            *vector_id,
+        )),
 
         VectorOp::DeleteBySurrogate {
             collection,
@@ -140,7 +144,7 @@ where
             provenance: _,
         } => Ok(vector_delete_by_surrogate(
             engine,
-            collection.clone(),
+            collection.as_str().to_string(),
             *surrogate,
             field_name.clone(),
         )),
@@ -156,9 +160,9 @@ where
             ..
         } => {
             let index_key = if field_name.is_empty() {
-                collection.clone()
+                collection.as_str().to_string()
             } else {
-                format!("{collection}:{field_name}")
+                format!("{}:{field_name}", collection.as_str())
             };
             vector_set_params(engine, index_key, *m, *ef_construction, metric.clone())
         }
@@ -168,9 +172,9 @@ where
             field_name,
         } => {
             let index_key = if field_name.is_empty() {
-                collection.clone()
+                collection.as_str().to_string()
             } else {
-                format!("{collection}:{field_name}")
+                format!("{}:{field_name}", collection.as_str())
             };
             vector_drop_index(engine, index_key)
         }
@@ -189,7 +193,7 @@ where
             ..
         } => Ok(vector_direct_upsert(
             engine,
-            collection.clone(),
+            collection.as_str().to_string(),
             field.clone(),
             surrogate.to_string(),
             vector.clone(),
@@ -202,9 +206,9 @@ where
             field_name,
         } => {
             let index_key = if field_name.is_empty() {
-                collection.clone()
+                collection.as_str().to_string()
             } else {
-                format!("{collection}:{field_name}")
+                format!("{}:{field_name}", collection.as_str())
             };
             Ok(vector_query_stats(engine, index_key))
         }
@@ -259,7 +263,7 @@ where
             let doc_id = doc_id.clone();
             Ok(Box::pin(async move {
                 sparse_state.manager.lock_or_recover().index_document(
-                    &collection,
+                    collection.as_str(),
                     &field_name,
                     &doc_id,
                     &vector,
@@ -289,7 +293,7 @@ where
             let k = *top_k;
             Ok(Box::pin(async move {
                 let hits = sparse_state.manager.lock_or_recover().search(
-                    &collection,
+                    collection.as_str(),
                     &field_name,
                     &query,
                     k,
@@ -317,7 +321,7 @@ where
             let doc_id = doc_id.clone();
             Ok(Box::pin(async move {
                 let removed = sparse_state.manager.lock_or_recover().remove_document(
-                    &collection,
+                    collection.as_str(),
                     &field_name,
                     &doc_id,
                 );
@@ -354,9 +358,14 @@ mod tests {
     use std::sync::Arc;
 
     use nodedb_physical::physical_plan::VectorOp;
-    use nodedb_types::Surrogate;
     use nodedb_types::result::QueryResult;
     use nodedb_types::value::Value;
+    use nodedb_types::{DatabaseId, QualifiedCollection, Surrogate};
+
+    /// Build a bare-name `QualifiedCollection` for the single-database Lite tests.
+    fn qc(name: &str) -> QualifiedCollection {
+        QualifiedCollection::new(DatabaseId::DEFAULT, name)
+    }
 
     use crate::PagedbStorageMem;
     use crate::engine::array::ArrayEngineState;
@@ -413,7 +422,7 @@ mod tests {
     async fn vector_op_seal_returns_bad_request() {
         let engine = make_engine().await;
         let op = VectorOp::Seal {
-            collection: "col".to_string(),
+            collection: qc("col"),
             field_name: String::new(),
         };
         match super::execute_vector_op(&engine, &op) {
@@ -437,7 +446,7 @@ mod tests {
 
     fn sparse_insert(doc_id: &str, entries: Vec<(u32, f32)>) -> VectorOp {
         VectorOp::SparseInsert {
-            collection: "col".to_string(),
+            collection: qc("col"),
             field_name: "sparse".to_string(),
             doc_id: doc_id.to_string(),
             entries,
@@ -459,7 +468,7 @@ mod tests {
         let result = run_op(
             &engine,
             VectorOp::SparseSearch {
-                collection: "col".to_string(),
+                collection: qc("col"),
                 field_name: "sparse".to_string(),
                 query_entries: vec![(1, 1.0)],
                 top_k: 10,
@@ -479,7 +488,7 @@ mod tests {
         run_op(&engine, sparse_insert("d1", vec![(1, 1.0)])).await;
 
         let delete = VectorOp::SparseDelete {
-            collection: "col".to_string(),
+            collection: qc("col"),
             field_name: "sparse".to_string(),
             doc_id: "d1".to_string(),
         };
@@ -493,7 +502,7 @@ mod tests {
         let result = run_op(
             &engine,
             VectorOp::SparseSearch {
-                collection: "col".to_string(),
+                collection: qc("col"),
                 field_name: "sparse".to_string(),
                 query_entries: vec![(1, 1.0)],
                 top_k: 10,
@@ -509,7 +518,7 @@ mod tests {
         let result = run_op(
             &engine,
             VectorOp::SparseSearch {
-                collection: "never_written".to_string(),
+                collection: qc("never_written"),
                 field_name: "sparse".to_string(),
                 query_entries: vec![(1, 1.0)],
                 top_k: 10,
@@ -535,7 +544,7 @@ mod tests {
     async fn vector_op_multi_vector_score_search_returns_bad_request() {
         let engine = make_engine().await;
         let op = VectorOp::MultiVectorScoreSearch {
-            collection: "col".to_string(),
+            collection: qc("col"),
             field_name: String::new(),
             query_vector: vec![1.0, 2.0],
             top_k: 5,
@@ -558,7 +567,7 @@ mod tests {
     async fn vector_op_insert_routes_to_vector_insert_impl() {
         let engine = make_engine().await;
         let op = VectorOp::Insert {
-            collection: "col".to_string(),
+            collection: qc("col"),
             vector: vec![1.0f32, 0.0, 0.0, 0.0],
             dim: 4,
             field_name: String::new(),
@@ -580,7 +589,7 @@ mod tests {
         let engine = make_engine().await;
         // Insert first.
         let insert_op = VectorOp::Insert {
-            collection: "col".to_string(),
+            collection: qc("col"),
             vector: vec![1.0f32, 0.0, 0.0, 0.0],
             dim: 4,
             field_name: String::new(),
@@ -595,7 +604,7 @@ mod tests {
 
         // The HNSW node id for the first insert is 0.
         let delete_op = VectorOp::Delete {
-            collection: "col".to_string(),
+            collection: qc("col"),
             vector_id: 0u32,
         };
         let result = super::execute_vector_op(&engine, &delete_op)

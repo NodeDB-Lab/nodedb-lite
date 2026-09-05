@@ -2,6 +2,7 @@
 //! CrdtOp dispatch for the Lite physical visitor.
 
 use nodedb_physical::physical_plan::CrdtOp;
+use nodedb_types::RlsWriteCheck;
 
 use crate::error::LiteError;
 use crate::query::crdt_ops;
@@ -9,6 +10,7 @@ use crate::query::engine::LiteQueryEngine;
 use crate::storage::engine::StorageEngine;
 
 use super::LitePhysicalFut;
+use super::policy::deny_policy;
 
 pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
@@ -22,7 +24,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let col = collection.clone();
             let doc_id = document_id.clone();
             Ok(Box::pin(async move {
-                crdt_ops::read::handle_read(engine, &col, &doc_id).await
+                crdt_ops::read::handle_read(engine, col.as_str(), &doc_id).await
             }))
         }
 
@@ -36,7 +38,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let delta_bytes = delta.clone();
             let mid = *mutation_id;
             Ok(Box::pin(async move {
-                crdt_ops::write::handle_apply(engine, &col, &delta_bytes, mid).await
+                crdt_ops::write::handle_apply(engine, col.as_str(), &delta_bytes, mid).await
             }))
         }
 
@@ -46,7 +48,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let col = collection.clone();
             let bytes = bytes.clone();
             Ok(Box::pin(async move {
-                crdt_ops::write::handle_import_snapshot(engine, &col, &bytes).await
+                crdt_ops::write::handle_import_snapshot(engine, col.as_str(), &bytes).await
             }))
         }
 
@@ -96,14 +98,14 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let col = collection.clone();
             let json = policy_json.clone();
             Ok(Box::pin(async move {
-                crdt_ops::write::handle_set_policy(engine, &col, &json).await
+                crdt_ops::write::handle_set_policy(engine, col.as_str(), &json).await
             }))
         }
 
         CrdtOp::GetPolicy { collection } => {
             let col = collection.clone();
             Ok(Box::pin(async move {
-                crdt_ops::read::handle_get_policy(engine, &col).await
+                crdt_ops::read::handle_get_policy(engine, col.as_str()).await
             }))
         }
 
@@ -116,7 +118,8 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let doc_id = document_id.clone();
             let vv_json = version_vector_json.clone();
             Ok(Box::pin(async move {
-                crdt_ops::version::handle_read_at_version(engine, &col, &doc_id, &vv_json).await
+                crdt_ops::version::handle_read_at_version(engine, col.as_str(), &doc_id, &vv_json)
+                    .await
             }))
         }
 
@@ -131,7 +134,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let col = collection.clone();
             let from_json = from_version_json.clone();
             Ok(Box::pin(async move {
-                crdt_ops::version::handle_export_delta(engine, &col, &from_json).await
+                crdt_ops::version::handle_export_delta(engine, col.as_str(), &from_json).await
             }))
         }
 
@@ -145,8 +148,13 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let doc_id = document_id.clone();
             let target_json = target_version_json.clone();
             Ok(Box::pin(async move {
-                crdt_ops::version::handle_restore_to_version(engine, &col, &doc_id, &target_json)
-                    .await
+                crdt_ops::version::handle_restore_to_version(
+                    engine,
+                    col.as_str(),
+                    &doc_id,
+                    &target_json,
+                )
+                .await
             }))
         }
 
@@ -157,7 +165,8 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let col = collection.clone();
             let target_json = target_version_json.clone();
             Ok(Box::pin(async move {
-                crdt_ops::version::handle_compact_at_version(engine, &col, &target_json).await
+                crdt_ops::version::handle_compact_at_version(engine, col.as_str(), &target_json)
+                    .await
             }))
         }
 
@@ -175,7 +184,15 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let idx = *index;
             let fields = fields_json.clone();
             Ok(Box::pin(async move {
-                crdt_ops::list::handle_list_insert(engine, &col, &doc_id, &path, idx, &fields).await
+                crdt_ops::list::handle_list_insert(
+                    engine,
+                    col.as_str(),
+                    &doc_id,
+                    &path,
+                    idx,
+                    &fields,
+                )
+                .await
             }))
         }
 
@@ -191,7 +208,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let path = list_path.clone();
             let idx = *index;
             Ok(Box::pin(async move {
-                crdt_ops::list::handle_list_delete(engine, &col, &doc_id, &path, idx).await
+                crdt_ops::list::handle_list_delete(engine, col.as_str(), &doc_id, &path, idx).await
             }))
         }
 
@@ -209,7 +226,8 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let from = *from_index;
             let to = *to_index;
             Ok(Box::pin(async move {
-                crdt_ops::list::handle_list_move(engine, &col, &doc_id, &path, from, to).await
+                crdt_ops::list::handle_list_move(engine, col.as_str(), &doc_id, &path, from, to)
+                    .await
             }))
         }
 
@@ -219,8 +237,17 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             fields_json,
             partial,
             returning,
+            rls_filters,
             ..
         } => {
+            // DocUpsert has no rls_write_check slot: only returning and
+            // rls_filters carry a policy here.
+            deny_policy(
+                "CrdtOp::DocUpsert",
+                returning.as_ref(),
+                &[rls_filters.as_slice()],
+                &RlsWriteCheck::NoPolicyApplies,
+            )?;
             let col = collection.clone();
             let doc_id = document_id.clone();
             let fields = fields_json.clone();
@@ -229,7 +256,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             Ok(Box::pin(async move {
                 crdt_ops::doc_row::handle_doc_upsert(
                     engine,
-                    &col,
+                    col.as_str(),
                     &doc_id,
                     &fields,
                     partial,
@@ -243,14 +270,27 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             collection,
             document_id,
             returning,
+            rls_filters,
             ..
         } => {
+            // DocDelete has no rls_write_check slot; see DocUpsert above.
+            deny_policy(
+                "CrdtOp::DocDelete",
+                returning.as_ref(),
+                &[rls_filters.as_slice()],
+                &RlsWriteCheck::NoPolicyApplies,
+            )?;
             let col = collection.clone();
             let doc_id = document_id.clone();
             let returning = returning.clone();
             Ok(Box::pin(async move {
-                crdt_ops::doc_row::handle_doc_delete(engine, &col, &doc_id, returning.as_ref())
-                    .await
+                crdt_ops::doc_row::handle_doc_delete(
+                    engine,
+                    col.as_str(),
+                    &doc_id,
+                    returning.as_ref(),
+                )
+                .await
             }))
         }
 

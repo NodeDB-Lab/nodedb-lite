@@ -71,7 +71,9 @@ pub(super) fn lower_kv_insert<'a, S: StorageEngine + 'a>(
     }
 
     let ttl_ms = ttl_secs * 1000;
-    let collection = collection.to_string();
+    // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
+    let collection =
+        nodedb_types::QualifiedCollection::new(nodedb_types::DatabaseId::DEFAULT, collection);
 
     // Pre-encode all entries so errors surface before the future is spawned.
     let mut ops: Vec<KvOp> = Vec::with_capacity(entries.len());
@@ -135,7 +137,8 @@ pub(super) fn lower_kv_insert<'a, S: StorageEngine + 'a>(
                 ttl_ms,
                 updates,
                 surrogate: Surrogate::ZERO,
-                rls_write_check: Vec::new(),
+                // Lite has no RLS policy engine: no write policy applies.
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 returning: None,
                 rls_filters: Vec::new(),
             },

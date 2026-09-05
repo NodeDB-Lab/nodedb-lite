@@ -74,7 +74,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             Ok(Box::pin(async move {
                 timeseries_ops::reads::scan(
                     engine,
-                    &col,
+                    col.as_str(),
                     timeseries_ops::reads::ScanParams {
                         time_range: tr,
                         projection: proj,
@@ -107,7 +107,8 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             deny_policy(
                 "TimeseriesOp::Ingest",
                 returning.as_ref(),
-                &[rls_filters.as_slice(), rls_write_check.as_slice()],
+                &[rls_filters.as_slice()],
+                rls_write_check,
             )?;
             let col = collection.clone();
             let pay = payload.clone();
@@ -118,20 +119,20 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                 // `samples` feeds outbound sync, which is compiled out on wasm32.
                 #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
                 let (result, samples) =
-                    timeseries_ops::writes::ingest(engine, &col, &pay, &fmt, lsn, &surr)?;
+                    timeseries_ops::writes::ingest(engine, col.as_str(), &pay, &fmt, lsn, &surr)?;
                 #[cfg(not(target_arch = "wasm32"))]
                 if !samples.is_empty() {
                     let col_names: Option<Vec<String>> = engine
                         .columnar
-                        .schema(&col)
+                        .schema(col.as_str())
                         .map(|s| s.columns.into_iter().map(|c| c.name).collect());
                     if let Some(col_names) = col_names {
                         let rows = timeseries_ops::writes::samples_to_rows(&samples, &col_names);
                         if !rows.is_empty() {
                             crate::sync::reconcile_outbound_enqueue(
-                                engine.columnar.enqueue_outbound(&col, &rows).await,
+                                engine.columnar.enqueue_outbound(col.as_str(), &rows).await,
                                 "timeseries insert",
-                                &col,
+                                col.as_str(),
                                 "",
                             )?;
                         }
@@ -140,5 +141,14 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                 Ok(result)
             }))
         }
+        // Origin resolves a cross-vshard ingest before proposing it. Lite's
+        // single-node engine resolves every write directly, so it never emits
+        // this shape and cannot interpret one.
+        TimeseriesOp::ResolveIngest(_) => Err(LiteError::Unsupported {
+            detail: "TimeseriesOp::ResolveIngest is the resolve-before-propose wire \
+                     shape of Origin's cross-vshard write path, which Lite's \
+                     single-node engine never emits or needs to interpret"
+                .into(),
+        }),
     }
 }

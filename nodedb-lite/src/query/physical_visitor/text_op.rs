@@ -58,9 +58,16 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                     fuzzy,
                     mode: QueryMode::Or,
                 };
-                let mut results =
-                    run_text_search(&fts_state, &crdt, &collection, &query, top_k, &params, None)
-                        .map_err(|e| LiteError::Query(e.to_string()))?;
+                let mut results = run_text_search(
+                    &fts_state,
+                    &crdt,
+                    collection.as_str(),
+                    &query,
+                    top_k,
+                    &params,
+                    None,
+                )
+                .map_err(|e| LiteError::Query(e.to_string()))?;
                 if let Some(filter) = metadata_filter {
                     results.retain(|r| {
                         let json_doc = serde_json::to_value(&r.metadata).unwrap_or_default();
@@ -100,7 +107,7 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                     .manager
                     .lock()
                     .map_err(|_| LiteError::LockPoisoned)?
-                    .scan_all_with_scores(&collection, &query, &params);
+                    .scan_all_with_scores(collection.as_str(), &query, &params);
                 let columns = vec!["id".to_string(), score_alias];
                 let rows: Vec<Vec<Value>> = scored
                     .into_iter()
@@ -133,7 +140,7 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                     .manager
                     .lock()
                     .map_err(|_| LiteError::LockPoisoned)?
-                    .phrase_search(&collection, &terms, top_k, &params);
+                    .phrase_search(collection.as_str(), &terms, top_k, &params);
                 let columns = vec!["id".to_string(), "score".to_string()];
                 let rows: Vec<Vec<Value>> = results
                     .into_iter()
@@ -188,7 +195,7 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                 let text_results = run_text_search(
                     &fts_state,
                     &crdt,
-                    &collection,
+                    collection.as_str(),
                     &query_text,
                     top_k * 3,
                     &text_params,
@@ -198,8 +205,8 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                 let vector_results = run_vector_search(
                     &vector_state,
                     &crdt,
-                    &collection,
-                    &collection,
+                    collection.as_str(),
+                    collection.as_str(),
                     &query_vector,
                     top_k * 3,
                     metadata_filter.as_ref(),
@@ -304,7 +311,7 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                 let text_results = run_text_search(
                     &fts_state,
                     &crdt,
-                    &collection,
+                    collection.as_str(),
                     &query_text,
                     top_k * 3,
                     &text_params,
@@ -316,8 +323,8 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                 let vector_results = run_vector_search(
                     &vector_state,
                     &crdt,
-                    &collection,
-                    &collection,
+                    collection.as_str(),
+                    collection.as_str(),
                     &query_vector,
                     top_k * 3,
                     metadata_filter.as_ref(),
@@ -334,7 +341,7 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                 // Leg 3: graph BFS from seed node.
                 let graph_ranked: Vec<RankedResult> = if graph_depth > 0 {
                     let csr_guard = csr.lock().map_err(|_| LiteError::LockPoisoned)?;
-                    if let Some(csr_idx) = csr_guard.get(&collection) {
+                    if let Some(csr_idx) = csr_guard.get(collection.as_str()) {
                         let edge_label = graph_edge_label.as_deref();
                         let max_vis = graph_depth
                             .saturating_mul(top_k * 3)
@@ -430,13 +437,13 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                     .manager
                     .lock()
                     .map_err(|_| LiteError::LockPoisoned)?;
-                mgr.index_document(&collection, &text, &text)?;
+                mgr.index_document(collection.as_str(), &text, &text)?;
                 mgr.register_origin_surrogate(surrogate, &text);
                 drop(mgr);
                 // Stage for durable sync outbound (SQL path — no await needed).
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(q) = fts_outbound {
-                    q.stage_index(&collection, &text, text.clone());
+                    q.stage_index(collection.as_str(), &text, text.clone());
                 }
                 Ok(QueryResult {
                     columns: vec![],
@@ -461,12 +468,13 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                     .manager
                     .lock()
                     .map_err(|_| LiteError::LockPoisoned)?;
-                let removed_doc_id = mgr.remove_by_origin_surrogate(&collection, surrogate)?;
+                let removed_doc_id =
+                    mgr.remove_by_origin_surrogate(collection.as_str(), surrogate)?;
                 drop(mgr);
                 // Stage delete for durable sync outbound (SQL path — no await needed).
                 #[cfg(not(target_arch = "wasm32"))]
                 if let (Some(q), Some(doc_id)) = (fts_outbound, removed_doc_id.as_deref()) {
-                    q.stage_delete(&collection, doc_id);
+                    q.stage_delete(collection.as_str(), doc_id);
                 }
                 Ok(QueryResult {
                     columns: vec![],
@@ -483,7 +491,7 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
             fuzzy_default,
         } => text_set_config(
             engine,
-            collection.clone(),
+            collection.as_str().to_string(),
             analyzer_name.clone(),
             *fuzzy_default,
         ),

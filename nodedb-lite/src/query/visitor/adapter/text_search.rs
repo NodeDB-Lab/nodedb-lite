@@ -40,7 +40,11 @@ pub(super) fn lower_text_search<'a, S: StorageEngine + 'a>(
                 }));
             }
             TextOp::PhraseSearch {
-                collection: collection.to_string(),
+                // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
+                collection: nodedb_types::QualifiedCollection::new(
+                    nodedb_types::DatabaseId::DEFAULT,
+                    collection,
+                ),
                 terms: terms.clone(),
                 top_k,
                 prefilter: None,
@@ -76,14 +80,22 @@ pub(super) fn lower_text_search<'a, S: StorageEngine + 'a>(
             };
             if let Some(alias) = score_alias {
                 TextOp::BM25ScoreScan {
-                    collection: collection.to_string(),
+                    // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
+                    collection: nodedb_types::QualifiedCollection::new(
+                        nodedb_types::DatabaseId::DEFAULT,
+                        collection,
+                    ),
                     query: plain,
                     score_alias: alias.to_string(),
                     fuzzy,
                 }
             } else {
                 TextOp::Search {
-                    collection: collection.to_string(),
+                    // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
+                    collection: nodedb_types::QualifiedCollection::new(
+                        nodedb_types::DatabaseId::DEFAULT,
+                        collection,
+                    ),
                     query: plain,
                     top_k,
                     fuzzy,

@@ -8,6 +8,7 @@
 //! defensively if one ever reaches this dispatcher.
 
 use nodedb_physical::physical_plan::QueryOp;
+use nodedb_types::RlsWriteCheck;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
@@ -27,6 +28,7 @@ use crate::query::query_ops::{
 use crate::storage::engine::StorageEngine;
 
 use super::LitePhysicalFut;
+use super::policy::deny_policy;
 
 pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
@@ -51,7 +53,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let sort_keys = sort_keys.clone();
             let grouping_sets = grouping_sets.clone();
             Ok(Box::pin(async move {
-                let rows = scan_collection(engine, &collection).await?;
+                let rows = scan_collection(engine, collection.as_str()).await?;
                 execute_aggregate(
                     rows,
                     &group_by,
@@ -75,7 +77,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let aggregates = aggregates.clone();
             let filters = filters.clone();
             Ok(Box::pin(async move {
-                let rows = scan_collection(engine, &collection).await?;
+                let rows = scan_collection(engine, collection.as_str()).await?;
                 execute_partial_aggregate(rows, &group_by, &aggregates, &filters)
             }))
         }
@@ -96,8 +98,18 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             post_aggregates,
             projection,
             post_filters,
+            left_rls_filters,
+            right_rls_filters,
             ..
         } => {
+            // HashJoin carries no returning/rls_write_check slots: a join
+            // never writes. Only the per-side read filters can hide a policy.
+            deny_policy(
+                "QueryOp::HashJoin",
+                None,
+                &[left_rls_filters.as_slice(), right_rls_filters.as_slice()],
+                &RlsWriteCheck::NoPolicyApplies,
+            )?;
             let lc = left_collection.clone();
             let rc = right_collection.clone();
             let la = left_alias.clone();
@@ -112,8 +124,8 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             Ok(Box::pin(async move {
                 execute_hash_join(
                     engine,
-                    &lc,
-                    &rc,
+                    lc.as_str(),
+                    rc.as_str(),
                     la.as_deref(),
                     ra.as_deref(),
                     &on,
@@ -181,7 +193,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let jt = join_type.clone();
             let lim = *limit;
             Ok(Box::pin(async move {
-                execute_nested_loop_join(engine, &lc, &rc, &cond, &jt, lim).await
+                execute_nested_loop_join(engine, lc.as_str(), rc.as_str(), &cond, &jt, lim).await
             }))
         }
 
@@ -211,7 +223,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let lim = *limit;
             let ps = *pre_sorted;
             Ok(Box::pin(async move {
-                execute_sort_merge_join(engine, &lc, &rc, &on, &jt, lim, ps).await
+                execute_sort_merge_join(engine, lc.as_str(), rc.as_str(), &on, &jt, lim, ps).await
             }))
         }
 
@@ -226,7 +238,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let fields = fields.clone();
             let lpf = *limit_per_facet;
             Ok(Box::pin(async move {
-                execute_facet_counts(engine, &col, &filt, &fields, lpf).await
+                execute_facet_counts(engine, col.as_str(), &filt, &fields, lpf).await
             }))
         }
 
@@ -247,7 +259,8 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let dist = *distinct;
             let lim = *limit;
             Ok(Box::pin(async move {
-                execute_recursive_scan(engine, &col, &bf, &rf, jl.as_ref(), mi, dist, lim).await
+                execute_recursive_scan(engine, col.as_str(), &bf, &rf, jl.as_ref(), mi, dist, lim)
+                    .await
             }))
         }
 
@@ -296,7 +309,17 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let lj = *left_join;
             Ok(Box::pin(async move {
                 execute_lateral_top_k(
-                    engine, &op_clone, &oa, &ic, &inf, &iob, il, &ck, &la, &proj, lj,
+                    engine,
+                    &op_clone,
+                    &oa,
+                    ic.as_str(),
+                    &inf,
+                    &iob,
+                    il,
+                    &ck,
+                    &la,
+                    &proj,
+                    lj,
                 )
                 .await
             }))
@@ -323,8 +346,19 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let lj = *left_join;
             let orc = *outer_row_cap;
             Ok(Box::pin(async move {
-                execute_lateral_loop(engine, &op_clone, &oa, &ic, &inf, &cp, &la, &proj, lj, orc)
-                    .await
+                execute_lateral_loop(
+                    engine,
+                    &op_clone,
+                    &oa,
+                    ic.as_str(),
+                    &inf,
+                    &cp,
+                    &la,
+                    &proj,
+                    lj,
+                    orc,
+                )
+                .await
             }))
         }
     }

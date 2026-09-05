@@ -55,7 +55,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             Ok(Box::pin(async move {
                 columnar_ops::reads::scan(
                     engine,
-                    &col,
+                    col.as_str(),
                     columnar_ops::reads::ScanParams {
                         projection: proj,
                         limit: lim,
@@ -88,7 +88,8 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             deny_policy(
                 "ColumnarOp::Insert",
                 returning.as_ref(),
-                &[rls_filters.as_slice(), rls_write_check.as_slice()],
+                &[rls_filters.as_slice()],
+                rls_write_check,
             )?;
             let col = collection.clone();
             let pay = payload.clone();
@@ -102,7 +103,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                 #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
                 let (result, inserted_rows) = columnar_ops::writes::insert(
                     engine,
-                    &col,
+                    col.as_str(),
                     columnar_ops::writes::InsertParams {
                         payload: &pay,
                         format: &fmt,
@@ -115,9 +116,12 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                 #[cfg(not(target_arch = "wasm32"))]
                 if !inserted_rows.is_empty() {
                     crate::sync::reconcile_outbound_enqueue(
-                        engine.columnar.enqueue_outbound(&col, &inserted_rows).await,
+                        engine
+                            .columnar
+                            .enqueue_outbound(col.as_str(), &inserted_rows)
+                            .await,
                         "columnar insert",
-                        &col,
+                        col.as_str(),
                         "",
                     )?;
                 }
@@ -131,12 +135,12 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             updates,
             rls_write_check,
         } => {
-            deny_policy("ColumnarOp::Update", None, &[rls_write_check.as_slice()])?;
+            deny_policy("ColumnarOp::Update", None, &[], rls_write_check)?;
             let col = collection.clone();
             let filt = filters.clone();
             let upd = updates.clone();
             Ok(Box::pin(async move {
-                columnar_ops::writes::update(engine, &col, &filt, &upd)
+                columnar_ops::writes::update(engine, col.as_str(), &filt, &upd)
             }))
         }
 
@@ -145,11 +149,11 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             filters,
             rls_write_check,
         } => {
-            deny_policy("ColumnarOp::Delete", None, &[rls_write_check.as_slice()])?;
+            deny_policy("ColumnarOp::Delete", None, &[], rls_write_check)?;
             let col = collection.clone();
             let filt = filters.clone();
             Ok(Box::pin(async move {
-                columnar_ops::writes::delete(engine, &col, &filt)
+                columnar_ops::writes::delete(engine, col.as_str(), &filt)
             }))
         }
 
@@ -164,8 +168,38 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let cnt = *count;
             let sys_as_of = *system_as_of_ms;
             Ok(Box::pin(async move {
-                columnar_ops::reads::materialize_scan(engine, &col, &cur, cnt, sys_as_of).await
+                columnar_ops::reads::materialize_scan(engine, col.as_str(), &cur, cnt, sys_as_of)
+                    .await
             }))
         }
+
+        // ResolvedUpdate/ResolvedDelete/ResolveDml are the resolve-before-propose
+        // wire shape Origin uses so a follower applies exactly the rows a Raft
+        // leader already decided against a live write identity. Lite is
+        // single-node with no Raft replay, so its SQL visitor and CRDT sync
+        // resolve predicate UPDATE/DELETE directly and never emit these.
+        ColumnarOp::ResolvedUpdate { collection, .. } => Err(LiteError::Unsupported {
+            detail: format!(
+                "ColumnarOp::ResolvedUpdate on {collection}: replays a decision \
+                 made by Origin's Raft leader, which has no equivalent on the \
+                 single-node Lite engine"
+            ),
+        }),
+
+        ColumnarOp::ResolvedDelete { collection, .. } => Err(LiteError::Unsupported {
+            detail: format!(
+                "ColumnarOp::ResolvedDelete on {collection}: replays a decision \
+                 made by Origin's Raft leader, which has no equivalent on the \
+                 single-node Lite engine"
+            ),
+        }),
+
+        ColumnarOp::ResolveDml { collection, .. } => Err(LiteError::Unsupported {
+            detail: format!(
+                "ColumnarOp::ResolveDml on {collection}: is the resolve pass of \
+                 Origin's cross-vshard write path, which Lite's single-node \
+                 engine never emits or needs to interpret"
+            ),
+        }),
     }
 }

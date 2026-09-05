@@ -58,7 +58,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let old = old_collection.clone();
             let new = new_collection.clone();
             Ok(Box::pin(async move {
-                meta_ops::handle_rename_collection(engine, tid, &old, &new).await
+                meta_ops::handle_rename_collection(engine, tid, old.as_str(), new.as_str()).await
             }))
         }
         MetaOp::ConvertCollection {
@@ -70,7 +70,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let tt = target_type.clone();
             let sj = schema_json.clone();
             Ok(Box::pin(async move {
-                meta_ops::handle_convert_collection(engine, &col, &tt, &sj).await
+                meta_ops::handle_convert_collection(engine, col.as_str(), &tt, &sj).await
             }))
         }
         MetaOp::RegisterContinuousAggregate { def } => {
@@ -100,7 +100,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
         MetaOp::QueryLastValues { collection } => {
             let col = collection.clone();
             Ok(Box::pin(async move {
-                meta_ops::handle_query_aggregate_last_values(engine, &col).await
+                meta_ops::handle_query_aggregate_last_values(engine, col.as_str()).await
             }))
         }
         MetaOp::QueryLastValue {
@@ -110,7 +110,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let col = collection.clone();
             let sid = *series_id;
             Ok(Box::pin(async move {
-                meta_ops::handle_query_aggregate_last_value(engine, &col, sid).await
+                meta_ops::handle_query_aggregate_last_value(engine, col.as_str(), sid).await
             }))
         }
         MetaOp::TemporalPurgeEdgeStore {
@@ -122,7 +122,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let col = collection.clone();
             let cut = *cutoff_system_ms;
             Ok(Box::pin(async move {
-                meta_ops::handle_temporal_purge_edge_store(engine, tid, &col, cut).await
+                meta_ops::handle_temporal_purge_edge_store(engine, tid, col.as_str(), cut).await
             }))
         }
         MetaOp::TemporalPurgeDocumentStrict {
@@ -134,7 +134,8 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let col = collection.clone();
             let cut = *cutoff_system_ms;
             Ok(Box::pin(async move {
-                meta_ops::handle_temporal_purge_document_strict(engine, tid, &col, cut).await
+                meta_ops::handle_temporal_purge_document_strict(engine, tid, col.as_str(), cut)
+                    .await
             }))
         }
         MetaOp::TemporalPurgeColumnar {
@@ -146,7 +147,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let col = collection.clone();
             let cut = *cutoff_system_ms;
             Ok(Box::pin(async move {
-                meta_ops::handle_temporal_purge_columnar(engine, tid, &col, cut).await
+                meta_ops::handle_temporal_purge_columnar(engine, tid, col.as_str(), cut).await
             }))
         }
         MetaOp::TemporalPurgeCrdt {
@@ -158,7 +159,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let col = collection.clone();
             let cut = *cutoff_system_ms;
             Ok(Box::pin(async move {
-                meta_ops::handle_temporal_purge_crdt(engine, tid, &col, cut).await
+                meta_ops::handle_temporal_purge_crdt(engine, tid, col.as_str(), cut).await
             }))
         }
         MetaOp::TemporalPurgeArray {
@@ -180,7 +181,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let col = collection.clone();
             let age = *max_age_ms;
             Ok(Box::pin(async move {
-                meta_ops::handle_enforce_timeseries_retention(engine, &col, age).await
+                meta_ops::handle_enforce_timeseries_retention(engine, col.as_str(), age).await
             }))
         }
         MetaOp::AlterArray {
@@ -221,7 +222,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let idx = index_name.clone();
             let conc = *concurrent;
             Ok(Box::pin(async move {
-                meta_ops::handle_rebuild_index(engine, &col, idx.as_deref(), conc).await
+                meta_ops::handle_rebuild_index(engine, col.as_str(), idx.as_deref(), conc).await
             }))
         }
         MetaOp::QueryCollectionSize { tenant_id, name } => {

@@ -122,7 +122,7 @@ pub async fn edge_put_batch<S: StorageEngine>(
     {
         let mut map = csr_map.lock().map_err(|_| LiteError::LockPoisoned)?;
         for e in edges {
-            let csr = map.entry(e.collection.clone()).or_default();
+            let csr = map.entry(e.collection.as_str().to_string()).or_default();
             csr.add_edge(&e.src_id, &e.label, &e.dst_id)
                 .map_err(|g| LiteError::Storage {
                     detail: g.to_string(),
@@ -131,20 +131,20 @@ pub async fn edge_put_batch<S: StorageEngine>(
     }
 
     for e in edges {
-        let key = edge_store_key(&e.collection, &e.src_id, &e.label, &e.dst_id);
-        let value = edge_to_value(&e.collection, &e.src_id, &e.label, &e.dst_id, &[])?;
+        let key = edge_store_key(e.collection.as_str(), &e.src_id, &e.label, &e.dst_id);
+        let value = edge_to_value(e.collection.as_str(), &e.src_id, &e.label, &e.dst_id, &[])?;
         write_ops.push(WriteOp::Put {
             ns: Namespace::Graph,
             key,
             value,
         });
         // Collect bitemporal edges.
-        if history::is_bitemporal(storage.as_ref(), &e.collection)
+        if history::is_bitemporal(storage.as_ref(), e.collection.as_str())
             .await
             .unwrap_or(false)
         {
             bitemporal_edges.push((
-                e.collection.clone(),
+                e.collection.as_str().to_string(),
                 format!("{}->{}: {}", e.src_id, e.dst_id, e.label),
             ));
         }
@@ -217,10 +217,10 @@ pub async fn edge_delete_batch<S: StorageEngine>(
     {
         let mut map = csr_map.lock().map_err(|_| LiteError::LockPoisoned)?;
         for e in edges {
-            if let Some(csr) = map.get_mut(&e.collection) {
+            if let Some(csr) = map.get_mut(e.collection.as_str()) {
                 csr.remove_edge(&e.src_id, &e.label, &e.dst_id);
             }
-            let key = edge_store_key(&e.collection, &e.src_id, &e.label, &e.dst_id);
+            let key = edge_store_key(e.collection.as_str(), &e.src_id, &e.label, &e.dst_id);
             write_ops.push(WriteOp::Delete {
                 ns: Namespace::Graph,
                 key,
@@ -231,13 +231,14 @@ pub async fn edge_delete_batch<S: StorageEngine>(
     storage.batch_write(&write_ops).await?;
 
     for e in edges {
-        if history::is_bitemporal(storage.as_ref(), &e.collection)
+        if history::is_bitemporal(storage.as_ref(), e.collection.as_str())
             .await
             .unwrap_or(false)
         {
             let edge_key = format!("{}->{}: {}", e.src_id, e.dst_id, e.label);
             let _ =
-                history::record_edge_delete(storage.as_ref(), &e.collection, &edge_key, ts).await;
+                history::record_edge_delete(storage.as_ref(), e.collection.as_str(), &edge_key, ts)
+                    .await;
         }
     }
 

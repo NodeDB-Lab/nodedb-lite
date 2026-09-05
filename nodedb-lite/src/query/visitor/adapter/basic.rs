@@ -153,7 +153,11 @@ pub(super) fn lower_create_index<'a, S: StorageEngine + 'a>(
 ) -> Result<LiteFut<'a>, LiteError> {
     use nodedb_physical::physical_plan::document::DocumentOp;
     let op = DocumentOp::BackfillIndex {
-        collection: collection.to_string(),
+        // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
+        collection: nodedb_types::QualifiedCollection::new(
+            nodedb_types::DatabaseId::DEFAULT,
+            collection,
+        ),
         path: field.to_string(),
         is_array: false,
         unique,
@@ -175,7 +179,11 @@ pub(super) fn lower_drop_index<'a, S: StorageEngine + 'a>(
 ) -> Result<LiteFut<'a>, LiteError> {
     use nodedb_physical::physical_plan::document::DocumentOp;
     let op = DocumentOp::DropIndex {
-        collection: collection.unwrap_or("").to_string(),
+        // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
+        collection: nodedb_types::QualifiedCollection::new(
+            nodedb_types::DatabaseId::DEFAULT,
+            collection.unwrap_or(""),
+        ),
         field: index_name.to_string(),
     };
     let mut phys = LiteDataPlaneVisitor { engine };
