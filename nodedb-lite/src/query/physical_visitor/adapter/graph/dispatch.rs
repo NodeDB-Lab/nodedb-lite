@@ -87,7 +87,13 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             direction,
             rls_filters,
             ..
-        } => traversal::neighbors(engine, node_id, edge_label.as_deref(), *direction, rls_filters)?,
+        } => traversal::neighbors(
+            engine,
+            node_id,
+            edge_label.as_deref(),
+            *direction,
+            rls_filters,
+        )?,
 
         GraphOp::NeighborsMulti {
             node_ids,
@@ -134,7 +140,14 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             options,
             rls_filters,
             ..
-        } => traversal::subgraph(engine, start_nodes, edge_label.as_deref(), *depth, options, rls_filters)?,
+        } => traversal::subgraph(
+            engine,
+            start_nodes,
+            edge_label.as_deref(),
+            *depth,
+            options,
+            rls_filters,
+        )?,
 
         GraphOp::Algo { algorithm, params } => analytics::algo(engine, *algorithm, params),
 

@@ -315,7 +315,6 @@ pub(super) fn transfer_item<'a, S: StorageEngine + 'a>(
     let ik = item_key.to_vec();
     let dk = dest_key.to_vec();
     Ok(Box::pin(async move {
-        kv_ops::writes::kv_transfer_item(engine, src_col.as_str(), dst_col.as_str(), &ik, &dk)
-            .await
+        kv_ops::writes::kv_transfer_item(engine, src_col.as_str(), dst_col.as_str(), &ik, &dk).await
     }))
 }

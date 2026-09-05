@@ -67,7 +67,15 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             surrogate: _,
             returning,
             rls_filters,
-        } => writes::put(engine, collection, key, value, *ttl_ms, returning, rls_filters),
+        } => writes::put(
+            engine,
+            collection,
+            key,
+            value,
+            *ttl_ms,
+            returning,
+            rls_filters,
+        ),
 
         KvOp::Insert {
             collection,
@@ -77,7 +85,15 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             surrogate: _,
             returning,
             rls_filters,
-        } => writes::insert(engine, collection, key, value, *ttl_ms, returning, rls_filters),
+        } => writes::insert(
+            engine,
+            collection,
+            key,
+            value,
+            *ttl_ms,
+            returning,
+            rls_filters,
+        ),
 
         KvOp::InsertIfAbsent {
             collection,
@@ -87,7 +103,15 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             surrogate: _,
             returning,
             rls_filters,
-        } => writes::insert_if_absent(engine, collection, key, value, *ttl_ms, returning, rls_filters),
+        } => writes::insert_if_absent(
+            engine,
+            collection,
+            key,
+            value,
+            *ttl_ms,
+            returning,
+            rls_filters,
+        ),
 
         KvOp::InsertOnConflictUpdate {
             collection,
@@ -167,7 +191,14 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             new_value,
             surrogate: _,
             rls_write_check,
-        } => writes::cas(engine, collection, key, expected, new_value, rls_write_check),
+        } => writes::cas(
+            engine,
+            collection,
+            key,
+            expected,
+            new_value,
+            rls_write_check,
+        ),
 
         KvOp::GetSet {
             collection,
@@ -176,7 +207,14 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             surrogate: _,
             rls_filters,
             rls_write_check,
-        } => writes::get_set(engine, collection, key, new_value, rls_filters, rls_write_check),
+        } => writes::get_set(
+            engine,
+            collection,
+            key,
+            new_value,
+            rls_filters,
+            rls_write_check,
+        ),
 
         KvOp::FieldSet {
             collection,

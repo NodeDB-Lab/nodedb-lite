@@ -102,8 +102,7 @@ pub(super) fn sorted_index_range<'a, S: StorageEngine + 'a>(
     let smin = score_min.map(<[u8]>::to_vec);
     let smax = score_max.map(<[u8]>::to_vec);
     Ok(Box::pin(async move {
-        kv_ops::sorted::kv_sorted_index_range(engine, &name, smin.as_deref(), smax.as_deref())
-            .await
+        kv_ops::sorted::kv_sorted_index_range(engine, &name, smin.as_deref(), smax.as_deref()).await
     }))
 }
 
