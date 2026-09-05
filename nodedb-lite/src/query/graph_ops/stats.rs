@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use nodedb_mem::ScopedMemory;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
@@ -18,6 +19,7 @@ use super::temporal;
 pub async fn graph_stats<S: StorageEngine>(
     storage: &Arc<S>,
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
+    memory: &ScopedMemory,
     collection: Option<&str>,
     as_of: Option<i64>,
 ) -> Result<QueryResult, LiteError> {
@@ -32,7 +34,7 @@ pub async fn graph_stats<S: StorageEngine>(
 
     let rows = match collection {
         Some(coll) => {
-            let stats = single_collection_stats(storage, csr_map, coll, as_of).await?;
+            let stats = single_collection_stats(storage, csr_map, memory, coll, as_of).await?;
             vec![stats]
         }
         None => {
@@ -42,7 +44,7 @@ pub async fn graph_stats<S: StorageEngine>(
             };
             let mut rows = Vec::with_capacity(colls.len());
             for coll in &colls {
-                let stats = single_collection_stats(storage, csr_map, coll, as_of).await?;
+                let stats = single_collection_stats(storage, csr_map, memory, coll, as_of).await?;
                 rows.push(stats);
             }
             rows
@@ -59,6 +61,7 @@ pub async fn graph_stats<S: StorageEngine>(
 async fn single_collection_stats<S: StorageEngine>(
     storage: &Arc<S>,
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
+    memory: &ScopedMemory,
     collection: &str,
     as_of: Option<i64>,
 ) -> Result<Vec<Value>, LiteError> {
@@ -72,6 +75,7 @@ async fn single_collection_stats<S: StorageEngine>(
         let degree_result = temporal::temporal_algorithm(
             storage,
             csr_map,
+            memory,
             GraphAlgorithm::Degree,
             &params,
             Some(cutoff),

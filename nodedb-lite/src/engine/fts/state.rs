@@ -6,7 +6,9 @@
 //! and `LiteQueryEngine` (PhysicalPlan executor) so the physical visitor
 //! can run text ops without re-architecting the engine boundary.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use nodedb_mem::MemoryGovernor;
 
 use super::manager::FtsCollectionManager;
 
@@ -19,10 +21,10 @@ pub struct FtsState {
 }
 
 impl FtsState {
-    /// Create a new, empty `FtsState`.
-    pub fn new() -> Self {
+    /// Create a new, empty `FtsState` bound to `governor` for memory accounting.
+    pub fn new(governor: Arc<MemoryGovernor>) -> Self {
         Self {
-            manager: Mutex::new(FtsCollectionManager::new()),
+            manager: Mutex::new(FtsCollectionManager::new(governor)),
         }
     }
 
@@ -31,11 +33,5 @@ impl FtsState {
         Self {
             manager: Mutex::new(manager),
         }
-    }
-}
-
-impl Default for FtsState {
-    fn default() -> Self {
-        Self::new()
     }
 }

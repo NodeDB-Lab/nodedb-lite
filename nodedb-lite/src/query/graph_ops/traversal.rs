@@ -229,7 +229,7 @@ mod tests {
     use super::*;
 
     fn make_csr_map_with_graph() -> Arc<Mutex<HashMap<String, CsrIndex>>> {
-        let mut csr = CsrIndex::new();
+        let mut csr = CsrIndex::new(crate::query::graph_ops::test_memory());
         csr.add_edge("a", "KNOWS", "b").unwrap();
         csr.add_edge("b", "KNOWS", "c").unwrap();
         csr.add_edge("a", "WORKS", "d").unwrap();

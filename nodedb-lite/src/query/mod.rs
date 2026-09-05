@@ -21,4 +21,4 @@ pub mod timeseries_ops;
 pub(crate) mod value_utils;
 mod visitor;
 
-pub use engine::LiteQueryEngine;
+pub use engine::{LiteQueryEngine, LiteQueryEngineParams};

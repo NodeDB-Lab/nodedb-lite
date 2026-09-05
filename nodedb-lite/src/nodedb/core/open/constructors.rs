@@ -28,7 +28,7 @@ use crate::engine::fts::FtsState;
 use crate::engine::htap::HtapBridge;
 use crate::engine::sparse_vector::SparseVectorState;
 use crate::engine::strict::StrictEngine;
-use crate::engine::vector::VectorState;
+use crate::engine::vector::{RestoredVectorState, VectorState};
 use crate::nodedb::lock_ext::LockExt;
 use crate::storage::engine::StorageEngine;
 
@@ -98,20 +98,34 @@ impl<S: StorageEngine> NodeDbLite<S> {
             Self::restore_identity_and_crdt(&storage, config.corruption_policy).await?;
 
         // ── Restore FTS indices ──
-        let fts_manager = Self::restore_fts_indices(&storage).await?;
+        let fts_manager = Self::restore_fts_indices(&storage, &governor).await?;
 
         // ── Restore sparse-vector inverted indices ──
         let (sparse_manager, sparse_checkpoint_present) =
             Self::restore_sparse_indices(&storage).await;
 
         // ── Restore per-collection CSR indices ──
-        let csr = Self::restore_csr_indices(&storage).await?;
+        let graph_memory = nodedb_mem::ScopedMemory::new(
+            Arc::clone(&governor),
+            nodedb_types::DatabaseId::DEFAULT,
+            nodedb_types::TenantId::new(0),
+            nodedb_mem::EngineId::Graph,
+        );
+        let csr = Self::restore_csr_indices(&storage, &graph_memory).await?;
 
         // ── Restore HNSW indices and id_map ──
         let (hnsw_map, hnsw_id_map) = Self::restore_hnsw_indices(&storage).await?;
 
         // ── Restore spatial indices ──
-        let spatial = Arc::new(Mutex::new(Self::restore_spatial_indices(&storage).await));
+        let spatial_memory = nodedb_mem::ScopedMemory::new(
+            Arc::clone(&governor),
+            nodedb_types::DatabaseId::DEFAULT,
+            nodedb_types::TenantId::new(0),
+            nodedb_mem::EngineId::Spatial,
+        );
+        let spatial = Arc::new(Mutex::new(
+            Self::restore_spatial_indices(&storage, &spatial_memory).await,
+        ));
 
         // ── Restore strict document engine ──
         let strict = StrictEngine::restore(Arc::clone(&storage))
@@ -119,12 +133,18 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .map_err(NodeDbError::storage)?;
 
         // ── Restore columnar engine ──
+        let columnar_memory = nodedb_mem::ScopedMemory::new(
+            Arc::clone(&governor),
+            nodedb_types::DatabaseId::DEFAULT,
+            nodedb_types::TenantId::new(0),
+            nodedb_mem::EngineId::Columnar,
+        );
         #[cfg(not(target_arch = "wasm32"))]
-        let mut columnar = ColumnarEngine::restore(Arc::clone(&storage))
+        let mut columnar = ColumnarEngine::restore(Arc::clone(&storage), columnar_memory.clone())
             .await
             .map_err(NodeDbError::storage)?;
         #[cfg(target_arch = "wasm32")]
-        let columnar = ColumnarEngine::restore(Arc::clone(&storage))
+        let columnar = ColumnarEngine::restore(Arc::clone(&storage), columnar_memory.clone())
             .await
             .map_err(NodeDbError::storage)?;
 
@@ -151,12 +171,19 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let timeseries = Arc::new(Mutex::new(
             crate::engine::timeseries::engine::TimeseriesEngine::new(),
         ));
-        let vector_state = Arc::new(VectorState::from_restored(
-            Arc::clone(&storage),
-            128,
-            hnsw_map,
-            hnsw_id_map,
-        ));
+        let vector_memory = nodedb_mem::ScopedMemory::new(
+            Arc::clone(&governor),
+            nodedb_types::DatabaseId::DEFAULT,
+            nodedb_types::TenantId::new(0),
+            nodedb_mem::EngineId::Vector,
+        );
+        let vector_state = Arc::new(VectorState::from_restored(RestoredVectorState {
+            storage: Arc::clone(&storage),
+            search_ef: 128,
+            indices: hnsw_map,
+            id_map: hnsw_id_map,
+            memory: vector_memory,
+        }));
         let fts_state = Arc::new(FtsState::from_restored(fts_manager));
         let sparse_state = Arc::new(SparseVectorState::from_restored(sparse_manager));
         let array_engine = crate::engine::array::ArrayEngineState::open(&storage)
@@ -166,20 +193,22 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         let csr_arc = Arc::new(Mutex::new(csr));
         #[allow(unused_mut)]
-        let mut query_engine = crate::query::LiteQueryEngine::new(
-            Arc::clone(&crdt),
-            Arc::clone(&strict),
-            Arc::clone(&columnar),
-            Arc::clone(&htap),
-            Arc::clone(&storage),
-            Arc::clone(&timeseries),
-            Arc::clone(&vector_state),
-            Arc::clone(&array_state),
-            Arc::clone(&fts_state),
-            Arc::clone(&sparse_state),
-            Arc::clone(&spatial),
-            Arc::clone(&csr_arc),
-        );
+        let mut query_engine =
+            crate::query::LiteQueryEngine::new(crate::query::LiteQueryEngineParams {
+                crdt: Arc::clone(&crdt),
+                strict: Arc::clone(&strict),
+                columnar: Arc::clone(&columnar),
+                htap: Arc::clone(&htap),
+                storage: Arc::clone(&storage),
+                timeseries: Arc::clone(&timeseries),
+                vector_state: Arc::clone(&vector_state),
+                array_state: Arc::clone(&array_state),
+                fts_state: Arc::clone(&fts_state),
+                sparse_state: Arc::clone(&sparse_state),
+                spatial: Arc::clone(&spatial),
+                csr: Arc::clone(&csr_arc),
+                governor: Arc::clone(&governor),
+            });
 
         // Wire FTS and spatial outbound queues into the query engine so that
         // SQL-path writes (SpatialOp::Insert, FtsIndexOp) also enqueue for sync.

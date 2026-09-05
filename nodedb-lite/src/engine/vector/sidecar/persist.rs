@@ -95,11 +95,11 @@ pub(crate) async fn try_restore_sidecar<S: StorageEngine>(
         Some(b) => b,
     };
 
-    let sidecar = nodedb_vector::rerank::CodecSidecar::from_bytes(&bytes).map_err(|e| {
-        LiteError::Storage {
-            detail: format!("sidecar restore for '{index_key}': {e}"),
-        }
-    })?;
+    let sidecar =
+        nodedb_vector::rerank::CodecSidecar::from_bytes(&bytes, vector_state.memory.clone())
+            .map_err(|e| LiteError::Storage {
+                detail: format!("sidecar restore for '{index_key}': {e}"),
+            })?;
 
     vector_state
         .codec_sidecars
@@ -199,7 +199,10 @@ mod tests {
     }
 
     fn make_state() -> VectorState<RealMemStore> {
-        VectorState::new(Arc::new(RealMemStore::new()), 50)
+        let governor = crate::query::engine::test_governor();
+        let memory =
+            crate::query::engine::test_scoped_memory(&governor, nodedb_mem::EngineId::Vector);
+        VectorState::new(Arc::new(RealMemStore::new()), 50, memory)
     }
 
     fn populate_index(state: &VectorState<RealMemStore>, index_key: &str, dim: usize, n: usize) {

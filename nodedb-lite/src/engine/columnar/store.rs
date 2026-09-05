@@ -19,6 +19,7 @@ use nodedb_columnar::delete_bitmap::DeleteBitmap;
 use nodedb_columnar::mutation::MutationEngine;
 use nodedb_columnar::reader::SegmentReader;
 use nodedb_columnar::writer::SegmentWriter;
+use nodedb_mem::ScopedMemory;
 use nodedb_types::Namespace;
 use nodedb_types::columnar::{ColumnarProfile, ColumnarSchema};
 use nodedb_types::value::Value;
@@ -148,11 +149,14 @@ pub struct ColumnarEngine<S: StorageEngine> {
     /// instead of `outbound`.
     #[cfg(not(target_arch = "wasm32"))]
     timeseries_outbound: Option<Arc<TimeseriesOutbound<S>>>,
+    /// Governor handle bound to the columnar engine budget. Cloned into every
+    /// `SegmentWriter` this engine creates.
+    memory: ScopedMemory,
 }
 
 impl<S: StorageEngine> ColumnarEngine<S> {
     /// Create a new empty columnar engine.
-    pub fn new(storage: Arc<S>) -> Self {
+    pub fn new(storage: Arc<S>, memory: ScopedMemory) -> Self {
         Self {
             storage,
             collections: RwLock::new(HashMap::new()),
@@ -160,6 +164,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
             outbound: None,
             #[cfg(not(target_arch = "wasm32"))]
             timeseries_outbound: None,
+            memory,
         }
     }
 
@@ -182,8 +187,8 @@ impl<S: StorageEngine> ColumnarEngine<S> {
     }
 
     /// Restore columnar collections from storage on startup.
-    pub async fn restore(storage: Arc<S>) -> Result<Self, LiteError> {
-        let engine = Self::new(Arc::clone(&storage));
+    pub async fn restore(storage: Arc<S>, memory: ScopedMemory) -> Result<Self, LiteError> {
+        let engine = Self::new(Arc::clone(&storage), memory);
 
         let list_bytes = storage
             .get(Namespace::Meta, META_COLUMNAR_COLLECTIONS)
@@ -695,7 +700,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
                 ColumnarProfile::Spatial { .. } => 2,
             };
 
-            let writer = SegmentWriter::new(profile_tag);
+            let writer = SegmentWriter::new(profile_tag, self.memory.clone());
             let segment_bytes = writer
                 .write_segment(&schema, &columns, row_count, None)
                 .map_err(columnar_err_to_lite)?;
@@ -844,7 +849,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
                 bitmap,
                 &snap.schema,
                 snap.profile_tag,
-                None,
+                &self.memory,
                 None,
             )
             .map_err(columnar_err_to_lite)?;

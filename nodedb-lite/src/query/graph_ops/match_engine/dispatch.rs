@@ -98,7 +98,7 @@ mod tests {
     use super::graph_match;
 
     fn make_csr() -> CsrIndex {
-        let mut csr = CsrIndex::new();
+        let mut csr = CsrIndex::new(crate::query::graph_ops::test_memory());
         csr.add_edge("alice", "KNOWS", "bob").unwrap();
         csr.add_edge("bob", "KNOWS", "carol").unwrap();
         csr.add_edge("alice", "LIKES", "carol").unwrap();
@@ -249,7 +249,7 @@ mod tests {
     /// Empty CSR returns empty result, not an error.
     #[tokio::test]
     async fn match_empty_csr_returns_empty() {
-        let csr_map = make_csr_map(CsrIndex::new());
+        let csr_map = make_csr_map(CsrIndex::new(crate::query::graph_ops::test_memory()));
         let query = simple_query(None, Some("KNOWS"), None, None);
         let bytes = make_query_bytes(&query);
 
@@ -263,7 +263,7 @@ mod tests {
     /// NOT EXISTS sub-pattern anti-join.
     #[tokio::test]
     async fn match_not_exists_anti_join() {
-        let mut csr = CsrIndex::new();
+        let mut csr = CsrIndex::new(crate::query::graph_ops::test_memory());
         csr.add_edge("alice", "KNOWS", "bob").unwrap();
         csr.add_edge("bob", "KNOWS", "carol").unwrap();
         csr.add_edge("alice", "BLOCKED", "carol").unwrap();
@@ -356,7 +356,7 @@ mod tests {
 
         // Build a CSR with two Person nodes connected by KNOWS edges so the
         // MATCH clause produces rows for both before the WHERE filters.
-        let mut csr = CsrIndex::new();
+        let mut csr = CsrIndex::new(crate::query::graph_ops::test_memory());
         csr.add_edge("alice", "KNOWS", "charlie").unwrap();
         csr.add_edge("bob", "KNOWS", "charlie").unwrap();
         csr.add_node_label("alice", "Person").unwrap();

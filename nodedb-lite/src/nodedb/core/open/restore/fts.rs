@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use nodedb_mem::MemoryGovernor;
 use nodedb_types::error::NodeDbResult;
 
 use crate::storage::engine::StorageEngine;
@@ -18,9 +19,12 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// back to `rebuild_text_indices` — see `open_inner`.
     pub(in crate::nodedb::core::open) async fn restore_fts_indices(
         storage: &Arc<S>,
+        governor: &Arc<MemoryGovernor>,
     ) -> NodeDbResult<crate::engine::fts::FtsCollectionManager> {
-        let mut mgr = crate::engine::fts::FtsCollectionManager::new();
-        match crate::engine::fts::checkpoint::restore_fts(storage.as_ref()).await {
+        let mut mgr = crate::engine::fts::FtsCollectionManager::new(Arc::clone(governor));
+        match crate::engine::fts::checkpoint::restore_fts(storage.as_ref(), Arc::clone(governor))
+            .await
+        {
             Ok((indices, id_to_surrogate, surrogate_to_id, next_surrogate))
                 if !indices.is_empty() =>
             {

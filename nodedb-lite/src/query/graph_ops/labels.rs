@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use nodedb_mem::ScopedMemory;
 use nodedb_types::result::QueryResult;
 
 use crate::engine::graph::index::CsrIndex;
@@ -13,6 +14,7 @@ use crate::error::LiteError;
 /// Handle `GraphOp::SetNodeLabels`.
 pub fn set_node_labels(
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
+    memory: &ScopedMemory,
     collection: &str,
     node_id: &str,
     labels: &[String],
@@ -20,7 +22,7 @@ pub fn set_node_labels(
     let mut map = csr_map.lock().map_err(|_| LiteError::LockPoisoned)?;
     let csr = map
         .entry(collection.to_string())
-        .or_insert_with(CsrIndex::new);
+        .or_insert_with(|| CsrIndex::new(memory.clone()));
 
     for label in labels {
         csr.add_node_label(node_id, label)
@@ -62,7 +64,7 @@ mod tests {
     use super::*;
 
     fn make_csr_map_with_node() -> Arc<Mutex<HashMap<String, CsrIndex>>> {
-        let mut csr = CsrIndex::new();
+        let mut csr = CsrIndex::new(crate::query::graph_ops::test_memory());
         csr.add_edge("alice", "KNOWS", "bob").unwrap();
         let mut map = HashMap::new();
         map.insert("social".to_string(), csr);
@@ -72,8 +74,9 @@ mod tests {
     #[test]
     fn test_set_node_labels() {
         let m = make_csr_map_with_node();
+        let memory = crate::query::graph_ops::test_memory();
         let labels = vec!["Person".to_string(), "Employee".to_string()];
-        let r = set_node_labels(&m, "social", "alice", &labels).unwrap();
+        let r = set_node_labels(&m, &memory, "social", "alice", &labels).unwrap();
         assert_eq!(r.rows_affected, 2);
 
         // Verify via direct CSR lookup.
@@ -88,10 +91,12 @@ mod tests {
     #[test]
     fn test_remove_node_labels() {
         let m = make_csr_map_with_node();
+        let memory = crate::query::graph_ops::test_memory();
 
         // First set some labels.
         set_node_labels(
             &m,
+            &memory,
             "social",
             "alice",
             &["Person".to_string(), "Admin".to_string()],

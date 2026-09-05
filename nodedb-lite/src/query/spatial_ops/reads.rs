@@ -203,7 +203,11 @@ mod tests {
     #[test]
     fn dwithin_bbox_expansion() {
         // Verify that DWithin expands the bbox correctly via expand_meters.
-        let mut mgr = SpatialIndexManager::new();
+        let governor = crate::query::engine::test_governor();
+        let mut mgr = SpatialIndexManager::new(crate::query::engine::test_scoped_memory(
+            &governor,
+            nodedb_mem::EngineId::Spatial,
+        ));
         // Point at (10.0, 20.0).
         mgr.index_document("col", "geom", "1", &Geometry::point(10.0, 20.0));
         // Point far away at (50.0, 50.0).
@@ -219,7 +223,11 @@ mod tests {
 
     #[test]
     fn intersects_bbox() {
-        let mut mgr = SpatialIndexManager::new();
+        let governor = crate::query::engine::test_governor();
+        let mut mgr = SpatialIndexManager::new(crate::query::engine::test_scoped_memory(
+            &governor,
+            nodedb_mem::EngineId::Spatial,
+        ));
         mgr.index_document("col", "geom", "3", &Geometry::point(5.0, 5.0));
         mgr.index_document("col", "geom", "4", &Geometry::point(90.0, 80.0));
 

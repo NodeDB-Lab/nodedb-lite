@@ -166,7 +166,7 @@ mod tests {
     use crate::engine::htap::HtapBridge;
     use crate::engine::strict::StrictEngine;
     use crate::engine::vector::VectorState;
-    use crate::query::engine::LiteQueryEngine;
+    use crate::query::engine::{LiteQueryEngine, LiteQueryEngineParams};
 
     use super::*;
 
@@ -174,19 +174,29 @@ mod tests {
         let crdt = Arc::new(Mutex::new(
             CrdtEngine::new(1).expect("CrdtEngine::new failed in test"),
         ));
+        let governor = crate::query::engine::test_governor();
         let strict = Arc::new(StrictEngine::new(Arc::clone(&storage)));
-        let columnar = Arc::new(ColumnarEngine::new(Arc::clone(&storage)));
+        let columnar = Arc::new(ColumnarEngine::new(
+            Arc::clone(&storage),
+            crate::query::engine::test_scoped_memory(&governor, nodedb_mem::EngineId::Columnar),
+        ));
         let htap = Arc::new(HtapBridge::new());
         let timeseries = Arc::new(Mutex::new(
             crate::engine::timeseries::engine::TimeseriesEngine::new(),
         ));
-        let vector_state = Arc::new(VectorState::new(Arc::clone(&storage), 50));
-        let array_state = Arc::new(tokio::sync::Mutex::new(ArrayEngineState::new()));
-        let fts_state = Arc::new(FtsState::new());
-        let spatial = Arc::new(Mutex::new(
-            crate::engine::spatial::SpatialIndexManager::new(),
+        let vector_state = Arc::new(VectorState::new(
+            Arc::clone(&storage),
+            50,
+            crate::query::engine::test_scoped_memory(&governor, nodedb_mem::EngineId::Vector),
         ));
-        LiteQueryEngine::new(
+        let array_state = Arc::new(tokio::sync::Mutex::new(ArrayEngineState::new()));
+        let fts_state = Arc::new(FtsState::new(Arc::clone(&governor)));
+        let spatial = Arc::new(Mutex::new(
+            crate::engine::spatial::SpatialIndexManager::new(
+                crate::query::engine::test_scoped_memory(&governor, nodedb_mem::EngineId::Spatial),
+            ),
+        ));
+        LiteQueryEngine::new(LiteQueryEngineParams {
             crdt,
             strict,
             columnar,
@@ -196,10 +206,11 @@ mod tests {
             vector_state,
             array_state,
             fts_state,
-            Arc::new(crate::engine::sparse_vector::SparseVectorState::new()),
+            sparse_state: Arc::new(crate::engine::sparse_vector::SparseVectorState::new()),
             spatial,
-            Arc::new(Mutex::new(std::collections::HashMap::new())),
-        )
+            csr: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            governor,
+        })
     }
 
     #[tokio::test]

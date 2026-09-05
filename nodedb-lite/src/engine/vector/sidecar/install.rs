@@ -196,7 +196,7 @@ pub(crate) fn install_sidecar_for_index<S: StorageEngine>(
                     ),
                 });
             }
-            AnyCodec::Pq(PqRerank::new(dim, 8, 256))
+            AnyCodec::Pq(PqRerank::new(dim, 8, 256, vector_state.memory.clone()))
         }
         CodecName::RaBitQ => AnyCodec::RaBitQ(RaBitQRerank::new(dim, DEFAULT_ROTATION_SEED)),
         CodecName::Bbq => AnyCodec::Bbq(BbqRerank::new(dim, DEFAULT_OVERSAMPLE)),
@@ -329,7 +329,10 @@ mod tests {
     }
 
     fn make_state() -> VectorState<MemStore> {
-        VectorState::new(Arc::new(MemStore), 50)
+        let governor = crate::query::engine::test_governor();
+        let memory =
+            crate::query::engine::test_scoped_memory(&governor, nodedb_mem::EngineId::Vector);
+        VectorState::new(Arc::new(MemStore), 50, memory)
     }
 
     fn populate_index(state: &VectorState<MemStore>, index_key: &str, dim: usize, n: usize) {

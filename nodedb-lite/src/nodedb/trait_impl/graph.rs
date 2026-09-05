@@ -155,10 +155,11 @@ impl<S: StorageEngine> NodeDbLite<S> {
         }
 
         {
+            let memory = self.memory_for(nodedb_mem::EngineId::Graph);
             let mut csr_map = self.csr.lock_or_recover();
             let csr = csr_map
                 .entry(collection.to_string())
-                .or_insert_with(CsrIndex::new);
+                .or_insert_with(|| CsrIndex::new(memory));
             let _ = csr.add_edge(from.as_str(), edge_type, to.as_str());
         }
 

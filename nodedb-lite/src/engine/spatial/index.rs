@@ -14,6 +14,7 @@ type CheckpointData = (
     u64,
 );
 
+use nodedb_mem::ScopedMemory;
 use nodedb_spatial::rtree::{RTree, RTreeEntry};
 use nodedb_types::BoundingBox;
 use nodedb_types::geometry::Geometry;
@@ -33,15 +34,19 @@ pub struct SpatialIndexManager {
     entry_to_doc: HashMap<u64, (String, String)>,
     /// Next entry ID (monotonically increasing).
     next_id: u64,
+    /// Governor handle bound to the spatial engine budget. Cloned into every
+    /// R-tree this manager creates.
+    memory: ScopedMemory,
 }
 
 impl SpatialIndexManager {
-    pub fn new() -> Self {
+    pub fn new(memory: ScopedMemory) -> Self {
         Self {
             indices: HashMap::new(),
             doc_to_entry: HashMap::new(),
             entry_to_doc: HashMap::new(),
             next_id: 1,
+            memory,
         }
     }
 
@@ -76,7 +81,11 @@ impl SpatialIndexManager {
         let entry_id = self.next_id;
         self.next_id += 1;
 
-        let tree = self.indices.entry(key).or_default();
+        let memory = self.memory.clone();
+        let tree = self
+            .indices
+            .entry(key)
+            .or_insert_with(|| RTree::new(memory));
         tree.insert(RTreeEntry { id: entry_id, bbox });
         self.doc_to_entry.insert(doc_key, entry_id);
         self.entry_to_doc
@@ -187,7 +196,7 @@ impl SpatialIndexManager {
         self.doc_to_entry = doc_to_entry;
         self.next_id = next_id;
         for (collection, field, bytes) in checkpoints {
-            match RTree::from_checkpoint(bytes, None) {
+            match RTree::from_checkpoint(bytes, None, self.memory.clone()) {
                 Ok(tree) => {
                     self.indices
                         .insert((collection.clone(), field.clone()), tree);
@@ -210,10 +219,10 @@ impl SpatialIndexManager {
     /// written before this field was introduced). After restoration, upserts
     /// and deletes of already-indexed docs may not evict stale entries; a full
     /// rebuild from documents is the reliable recovery path in that case.
-    pub fn restore_all(checkpoints: &[(String, String, Vec<u8>)]) -> Self {
-        let mut manager = Self::new();
+    pub fn restore_all(checkpoints: &[(String, String, Vec<u8>)], memory: ScopedMemory) -> Self {
+        let mut manager = Self::new(memory);
         for (collection, field, bytes) in checkpoints {
-            match RTree::from_checkpoint(bytes, None) {
+            match RTree::from_checkpoint(bytes, None, manager.memory.clone()) {
                 Ok(tree) => {
                     let max_id = tree.entries().iter().map(|e| e.id).max().unwrap_or(0);
                     if max_id >= manager.next_id {
@@ -262,25 +271,42 @@ impl SpatialIndexManager {
             })
             .collect();
 
-        let tree = RTree::bulk_load(entries);
+        let tree = RTree::bulk_load(entries, self.memory.clone());
         self.indices
             .insert((collection.to_string(), field.to_string()), tree);
     }
 }
 
-impl Default for SpatialIndexManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use nodedb_mem::{EngineId, EngineLimits, GovernorConfig, MemoryGovernor};
+    use nodedb_types::{DatabaseId, TenantId};
+
     use super::*;
+
+    /// Build a real, uncapped governor scoped to the spatial engine for tests.
+    fn test_memory() -> ScopedMemory {
+        let per_engine = usize::MAX / EngineId::ALL.len();
+        let governor = Arc::new(
+            MemoryGovernor::new(GovernorConfig {
+                global_ceiling: per_engine * EngineId::ALL.len(),
+                engine_limits: EngineLimits::uniform(per_engine),
+            })
+            .expect("test governor"),
+        );
+        ScopedMemory::new(
+            governor,
+            DatabaseId::DEFAULT,
+            TenantId::new(0),
+            EngineId::Spatial,
+        )
+    }
 
     #[test]
     fn index_and_search() {
-        let mut mgr = SpatialIndexManager::new();
+        let mut mgr = SpatialIndexManager::new(test_memory());
         mgr.index_document("places", "location", "doc1", &Geometry::point(10.0, 20.0));
         mgr.index_document("places", "location", "doc2", &Geometry::point(11.0, 21.0));
         mgr.index_document("places", "location", "doc3", &Geometry::point(50.0, 50.0));
@@ -295,7 +321,7 @@ mod tests {
 
     #[test]
     fn upsert_replaces_old_entry() {
-        let mut mgr = SpatialIndexManager::new();
+        let mut mgr = SpatialIndexManager::new(test_memory());
         mgr.index_document("places", "loc", "doc1", &Geometry::point(10.0, 20.0));
         mgr.index_document("places", "loc", "doc1", &Geometry::point(50.0, 50.0));
 
@@ -310,7 +336,7 @@ mod tests {
 
     #[test]
     fn remove_document() {
-        let mut mgr = SpatialIndexManager::new();
+        let mut mgr = SpatialIndexManager::new(test_memory());
         mgr.index_document("places", "loc", "doc1", &Geometry::point(10.0, 20.0));
         mgr.remove_document("places", "loc", "doc1");
 
@@ -320,7 +346,7 @@ mod tests {
 
     #[test]
     fn checkpoint_restore_roundtrip() {
-        let mut mgr = SpatialIndexManager::new();
+        let mut mgr = SpatialIndexManager::new(test_memory());
         for i in 0..50 {
             mgr.index_document(
                 "buildings",
@@ -333,7 +359,7 @@ mod tests {
         let checkpoints = mgr.checkpoint_all();
         assert_eq!(checkpoints.len(), 1);
 
-        let restored = SpatialIndexManager::restore_all(&checkpoints);
+        let restored = SpatialIndexManager::restore_all(&checkpoints, test_memory());
         assert_eq!(restored.total_entries(), 50);
 
         let results = restored.search(
@@ -346,7 +372,7 @@ mod tests {
 
     #[test]
     fn nearest_neighbor() {
-        let mut mgr = SpatialIndexManager::new();
+        let mut mgr = SpatialIndexManager::new(test_memory());
         mgr.index_document("pois", "loc", "a", &Geometry::point(0.0, 0.0));
         mgr.index_document("pois", "loc", "b", &Geometry::point(10.0, 10.0));
         mgr.index_document("pois", "loc", "c", &Geometry::point(1.0, 1.0));
@@ -357,7 +383,7 @@ mod tests {
 
     #[test]
     fn rebuild_from_documents() {
-        let mut mgr = SpatialIndexManager::new();
+        let mut mgr = SpatialIndexManager::new(test_memory());
         let docs: Vec<(String, Geometry)> = (0..100)
             .map(|i| {
                 (
@@ -372,7 +398,7 @@ mod tests {
 
     #[test]
     fn multiple_collections() {
-        let mut mgr = SpatialIndexManager::new();
+        let mut mgr = SpatialIndexManager::new(test_memory());
         mgr.index_document("a", "loc", "d1", &Geometry::point(0.0, 0.0));
         mgr.index_document("b", "loc", "d1", &Geometry::point(50.0, 50.0));
 

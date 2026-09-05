@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use nodedb_mem::MemoryGovernor;
 use nodedb_sql::types::*;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
@@ -43,6 +44,8 @@ pub struct LiteQueryEngine<S: StorageEngine> {
     pub(crate) cancellation: CancellationRegistry,
     /// Per-collection CSR graph indices shared with the owning NodeDbLite.
     pub(crate) csr: Arc<Mutex<HashMap<String, CsrIndex>>>,
+    /// Memory budget governor, shared with the owning NodeDbLite.
+    pub(crate) governor: Arc<MemoryGovernor>,
     /// Durable outbound queue for FTS sync — `None` when sync is disabled.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fts_outbound: Option<Arc<crate::sync::FtsOutbound<S>>>,
@@ -51,36 +54,40 @@ pub struct LiteQueryEngine<S: StorageEngine> {
     pub(crate) spatial_outbound: Option<Arc<crate::sync::SpatialOutbound<S>>>,
 }
 
+/// Construction fields for [`LiteQueryEngine::new`].
+pub struct LiteQueryEngineParams<S: StorageEngine> {
+    pub crdt: Arc<Mutex<CrdtEngine>>,
+    pub strict: Arc<StrictEngine<S>>,
+    pub columnar: Arc<ColumnarEngine<S>>,
+    pub htap: Arc<HtapBridge>,
+    pub storage: Arc<S>,
+    pub timeseries: Arc<Mutex<crate::engine::timeseries::engine::TimeseriesEngine>>,
+    pub vector_state: Arc<VectorState<S>>,
+    pub array_state: Arc<tokio::sync::Mutex<crate::engine::array::engine::ArrayEngineState>>,
+    pub fts_state: Arc<FtsState>,
+    pub sparse_state: Arc<SparseVectorState>,
+    pub spatial: Arc<Mutex<SpatialIndexManager>>,
+    pub csr: Arc<Mutex<HashMap<String, CsrIndex>>>,
+    pub governor: Arc<MemoryGovernor>,
+}
+
 impl<S: StorageEngine> LiteQueryEngine<S> {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        crdt: Arc<Mutex<CrdtEngine>>,
-        strict: Arc<StrictEngine<S>>,
-        columnar: Arc<ColumnarEngine<S>>,
-        htap: Arc<HtapBridge>,
-        storage: Arc<S>,
-        timeseries: Arc<Mutex<crate::engine::timeseries::engine::TimeseriesEngine>>,
-        vector_state: Arc<VectorState<S>>,
-        array_state: Arc<tokio::sync::Mutex<crate::engine::array::engine::ArrayEngineState>>,
-        fts_state: Arc<FtsState>,
-        sparse_state: Arc<SparseVectorState>,
-        spatial: Arc<Mutex<SpatialIndexManager>>,
-        csr: Arc<Mutex<HashMap<String, CsrIndex>>>,
-    ) -> Self {
+    pub fn new(params: LiteQueryEngineParams<S>) -> Self {
         Self {
-            crdt,
-            strict,
-            columnar,
-            htap,
-            storage,
-            timeseries,
-            vector_state,
-            array_state,
-            fts_state,
-            sparse_state,
-            spatial,
+            crdt: params.crdt,
+            strict: params.strict,
+            columnar: params.columnar,
+            htap: params.htap,
+            storage: params.storage,
+            timeseries: params.timeseries,
+            vector_state: params.vector_state,
+            array_state: params.array_state,
+            fts_state: params.fts_state,
+            sparse_state: params.sparse_state,
+            spatial: params.spatial,
             cancellation: CancellationRegistry::new(),
-            csr,
+            csr: params.csr,
+            governor: params.governor,
             #[cfg(not(target_arch = "wasm32"))]
             fts_outbound: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -443,4 +450,34 @@ fn loro_value_to_json(v: &loro::LoroValue) -> serde_json::Value {
         }
         _ => serde_json::Value::Null,
     }
+}
+
+/// Build a real governor for tests, with a ceiling covering every engine's limit.
+///
+/// `nodedb_mem` requires `global_ceiling >= sum(engine_limits)`, so the
+/// per-engine limit is `usize::MAX / EngineId::ALL.len()` to avoid overflow.
+#[cfg(test)]
+pub(crate) fn test_governor() -> Arc<nodedb_mem::MemoryGovernor> {
+    let per_engine = usize::MAX / nodedb_mem::EngineId::ALL.len();
+    Arc::new(
+        nodedb_mem::MemoryGovernor::new(nodedb_mem::GovernorConfig {
+            global_ceiling: per_engine * nodedb_mem::EngineId::ALL.len(),
+            engine_limits: nodedb_mem::EngineLimits::uniform(per_engine),
+        })
+        .expect("test governor"),
+    )
+}
+
+/// Build a `ScopedMemory` handle from a test governor for `engine`.
+#[cfg(test)]
+pub(crate) fn test_scoped_memory(
+    governor: &Arc<nodedb_mem::MemoryGovernor>,
+    engine: nodedb_mem::EngineId,
+) -> nodedb_mem::ScopedMemory {
+    nodedb_mem::ScopedMemory::new(
+        Arc::clone(governor),
+        nodedb_types::DatabaseId::DEFAULT,
+        nodedb_types::TenantId::new(0),
+        engine,
+    )
 }

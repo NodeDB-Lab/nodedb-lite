@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use nodedb_mem::ScopedMemory;
 use nodedb_physical::physical_plan::graph::BatchEdge;
 use nodedb_types::Namespace;
 use nodedb_types::result::QueryResult;
@@ -54,22 +55,37 @@ fn edge_to_value(
     })
 }
 
+/// Edge identity fields for `edge_put`, grouped out of the argument list to
+/// stay under clippy's argument-count lint.
+pub struct EdgePutArgs<'a> {
+    pub collection: &'a str,
+    pub src_id: &'a str,
+    pub label: &'a str,
+    pub dst_id: &'a str,
+    pub properties: &'a [u8],
+}
+
 /// Handle `GraphOp::EdgePut`.
 pub async fn edge_put<S: StorageEngine>(
     storage: &Arc<S>,
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
-    collection: &str,
-    src_id: &str,
-    label: &str,
-    dst_id: &str,
-    properties: &[u8],
+    memory: &ScopedMemory,
+    args: EdgePutArgs<'_>,
 ) -> Result<QueryResult, LiteError> {
+    let EdgePutArgs {
+        collection,
+        src_id,
+        label,
+        dst_id,
+        properties,
+    } = args;
+
     // Insert into CSR.
     {
         let mut map = csr_map.lock().map_err(|_| LiteError::LockPoisoned)?;
         let csr = map
             .entry(collection.to_string())
-            .or_insert_with(CsrIndex::new);
+            .or_insert_with(|| CsrIndex::new(memory.clone()));
         csr.add_edge(src_id, label, dst_id)
             .map_err(|e| LiteError::Storage {
                 detail: e.to_string(),
@@ -109,6 +125,7 @@ pub async fn edge_put<S: StorageEngine>(
 pub async fn edge_put_batch<S: StorageEngine>(
     storage: &Arc<S>,
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
+    memory: &ScopedMemory,
     edges: &[BatchEdge],
 ) -> Result<QueryResult, LiteError> {
     if edges.is_empty() {
@@ -122,7 +139,9 @@ pub async fn edge_put_batch<S: StorageEngine>(
     {
         let mut map = csr_map.lock().map_err(|_| LiteError::LockPoisoned)?;
         for e in edges {
-            let csr = map.entry(e.collection.as_str().to_string()).or_default();
+            let csr = map
+                .entry(e.collection.as_str().to_string())
+                .or_insert_with(|| CsrIndex::new(memory.clone()));
             csr.add_edge(&e.src_id, &e.label, &e.dst_id)
                 .map_err(|g| LiteError::Storage {
                     detail: g.to_string(),
@@ -270,9 +289,12 @@ mod tests {
 
     #[test]
     fn csr_map_insert_and_lookup() {
+        let memory = crate::query::graph_ops::test_memory();
         let map = make_csr_map();
         let mut locked = map.lock().unwrap();
-        let csr = locked.entry("g".to_string()).or_default();
+        let csr = locked
+            .entry("g".to_string())
+            .or_insert_with(|| CsrIndex::new(memory.clone()));
         csr.add_edge("a", "E", "b").unwrap();
         assert!(csr.contains_node("a"));
         assert!(csr.contains_node("b"));

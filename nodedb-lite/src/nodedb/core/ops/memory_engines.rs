@@ -14,6 +14,19 @@ use crate::nodedb::lock_ext::LockExt;
 use crate::storage::engine::StorageEngine;
 
 impl<S: StorageEngine> NodeDbLite<S> {
+    /// A scope charging `engine` against Lite's single database and tenant.
+    ///
+    /// Lite runs one database and one tenant, so every scope it builds uses
+    /// [`DatabaseId::DEFAULT`] and tenant zero.
+    pub(crate) fn memory_for(&self, engine: EngineId) -> ScopedMemory {
+        ScopedMemory::new(
+            Arc::clone(&self.governor),
+            DatabaseId::DEFAULT,
+            TenantId::new(0),
+            engine,
+        )
+    }
+
     /// Update memory governor with current engine usage.
     pub fn update_memory_stats(&self) {
         if let Ok(indices) = self.vector_state.hnsw_indices.lock() {

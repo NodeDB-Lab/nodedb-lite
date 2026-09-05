@@ -219,7 +219,12 @@ pub(super) async fn ensure_index_loaded<S: StorageEngine>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::engine::{test_governor, test_scoped_memory};
     use crate::storage::pagedb_storage::PagedbStorageMem;
+
+    fn test_memory() -> nodedb_mem::ScopedMemory {
+        test_scoped_memory(&test_governor(), nodedb_mem::EngineId::Vector)
+    }
 
     /// A collection that cannot be loaded must be attempted ONCE. Before the
     /// negative cache, every search repeated the full load — read the
@@ -229,7 +234,7 @@ mod tests {
     #[tokio::test]
     async fn an_unloadable_collection_is_only_attempted_once() {
         let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
-        let state = Arc::new(VectorState::new(Arc::clone(&storage), 64));
+        let state = Arc::new(VectorState::new(Arc::clone(&storage), 64, test_memory()));
 
         // A checkpoint that exists but is not deserializable: the load path gets
         // far enough to give up, which is exactly what must not be repeated.
@@ -263,7 +268,7 @@ mod tests {
     #[tokio::test]
     async fn a_later_insert_resolves_an_unloadable_collection() {
         let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
-        let state = Arc::new(VectorState::new(Arc::clone(&storage), 64));
+        let state = Arc::new(VectorState::new(Arc::clone(&storage), 64, test_memory()));
         state.unloadable.lock_or_recover().insert("late".into());
 
         {

@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Edge mutation `GraphOp` arms: put/delete, single and batched.
 
+use std::sync::Arc;
+
+use nodedb_mem::{EngineId, ScopedMemory};
 use nodedb_physical::physical_plan::BatchEdge;
-use nodedb_types::{QualifiedCollection, RlsWriteCheck};
+use nodedb_types::{DatabaseId, QualifiedCollection, RlsWriteCheck, TenantId};
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::query::graph_ops::edges;
+use crate::query::graph_ops::edges::{self, EdgePutArgs};
 use crate::storage::engine::StorageEngine;
 
 use super::super::policy::deny_policy;
@@ -22,6 +25,12 @@ pub(super) fn edge_put<'a, S: StorageEngine + 'a>(
 ) -> GraphFut<'a> {
     let storage = engine.storage.clone();
     let csr_map = engine.csr.clone();
+    let memory = ScopedMemory::new(
+        Arc::clone(&engine.governor),
+        DatabaseId::DEFAULT,
+        TenantId::new(0),
+        EngineId::Graph,
+    );
     let collection = collection.clone();
     let src_id = src_id.to_owned();
     let label = label.to_owned();
@@ -31,11 +40,14 @@ pub(super) fn edge_put<'a, S: StorageEngine + 'a>(
         edges::edge_put(
             &storage,
             &csr_map,
-            collection.as_str(),
-            &src_id,
-            &label,
-            &dst_id,
-            &properties,
+            &memory,
+            EdgePutArgs {
+                collection: collection.as_str(),
+                src_id: &src_id,
+                label: &label,
+                dst_id: &dst_id,
+                properties: &properties,
+            },
         )
         .await
     })
@@ -47,8 +59,14 @@ pub(super) fn edge_put_batch<'a, S: StorageEngine + 'a>(
 ) -> GraphFut<'a> {
     let storage = engine.storage.clone();
     let csr_map = engine.csr.clone();
+    let memory = ScopedMemory::new(
+        Arc::clone(&engine.governor),
+        DatabaseId::DEFAULT,
+        TenantId::new(0),
+        EngineId::Graph,
+    );
     let batch_edges = batch_edges.to_vec();
-    Box::pin(async move { edges::edge_put_batch(&storage, &csr_map, &batch_edges).await })
+    Box::pin(async move { edges::edge_put_batch(&storage, &csr_map, &memory, &batch_edges).await })
 }
 
 pub(super) fn edge_delete<'a, S: StorageEngine + 'a>(

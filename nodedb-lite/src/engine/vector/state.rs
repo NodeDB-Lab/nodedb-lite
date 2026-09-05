@@ -10,6 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use nodedb_mem::ScopedMemory;
 use nodedb_types::collection_config::VectorPrimaryConfig;
 use nodedb_types::hnsw::HnswParams;
 use nodedb_types::vector_dtype::VectorStorageDtype;
@@ -47,6 +48,20 @@ pub struct VectorState<S: StorageEngine> {
     /// creates the index through `ensure_hnsw`) resolves the collection normally
     /// without anything here needing to be cleared.
     pub(crate) unloadable: Mutex<HashSet<String>>,
+    /// Memory scope for codec sidecar and rerank allocations owned by this state.
+    pub(crate) memory: ScopedMemory,
+}
+
+/// Restored state for [`VectorState::from_restored`].
+///
+/// Grouped into a struct because the constructor otherwise carries five
+/// unrelated arguments.
+pub struct RestoredVectorState<S: StorageEngine> {
+    pub storage: Arc<S>,
+    pub search_ef: usize,
+    pub indices: HashMap<String, HnswIndex>,
+    pub id_map: HashMap<String, (String, u32)>,
+    pub memory: ScopedMemory,
 }
 
 /// Get or create the HNSW index for `index_key` with the given dimensionality and
@@ -70,7 +85,7 @@ pub(crate) fn ensure_hnsw<'a>(
 }
 
 impl<S: StorageEngine> VectorState<S> {
-    pub fn new(storage: Arc<S>, search_ef: usize) -> Self {
+    pub fn new(storage: Arc<S>, search_ef: usize, memory: ScopedMemory) -> Self {
         Self {
             hnsw_indices: Mutex::new(HashMap::new()),
             vector_id_map: Mutex::new(HashMap::new()),
@@ -79,23 +94,20 @@ impl<S: StorageEngine> VectorState<S> {
             codec_sidecars: Arc::new(Mutex::new(HashMap::new())),
             per_index_config: Arc::new(Mutex::new(HashMap::new())),
             unloadable: Mutex::new(HashSet::new()),
+            memory,
         }
     }
 
-    pub fn from_restored(
-        storage: Arc<S>,
-        search_ef: usize,
-        indices: HashMap<String, HnswIndex>,
-        id_map: HashMap<String, (String, u32)>,
-    ) -> Self {
+    pub fn from_restored(restored: RestoredVectorState<S>) -> Self {
         Self {
-            hnsw_indices: Mutex::new(indices),
-            vector_id_map: Mutex::new(id_map),
-            search_ef,
-            storage,
+            hnsw_indices: Mutex::new(restored.indices),
+            vector_id_map: Mutex::new(restored.id_map),
+            search_ef: restored.search_ef,
+            storage: restored.storage,
             codec_sidecars: Arc::new(Mutex::new(HashMap::new())),
             per_index_config: Arc::new(Mutex::new(HashMap::new())),
             unloadable: Mutex::new(HashSet::new()),
+            memory: restored.memory,
         }
     }
 }
@@ -103,6 +115,7 @@ impl<S: StorageEngine> VectorState<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::engine::{test_governor, test_scoped_memory};
     use crate::storage::pagedb_storage::PagedbStorageMem;
 
     #[tokio::test]
@@ -112,7 +125,8 @@ mod tests {
                 .await
                 .expect("in-memory pagedb"),
         );
-        let state = VectorState::new(storage, 100);
+        let memory = test_scoped_memory(&test_governor(), nodedb_mem::EngineId::Vector);
+        let state = VectorState::new(storage, 100, memory);
         let configs = state.per_index_config.lock().expect("lock");
         assert!(
             configs.is_empty(),

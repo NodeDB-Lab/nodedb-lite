@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Algorithm, label, temporal, and stats `GraphOp` arms.
 
+use std::sync::Arc;
+
 use nodedb_graph::{AlgoParams, Direction, GraphAlgorithm};
-use nodedb_types::SystemTimeScope;
+use nodedb_mem::{EngineId, ScopedMemory};
+use nodedb_types::{DatabaseId, SystemTimeScope, TenantId};
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
@@ -28,12 +31,18 @@ pub(super) fn set_node_labels<'a, S: StorageEngine + 'a>(
     labels: &[String],
 ) -> GraphFut<'a> {
     let csr_map = engine.csr.clone();
+    let memory = ScopedMemory::new(
+        Arc::clone(&engine.governor),
+        DatabaseId::DEFAULT,
+        TenantId::new(0),
+        EngineId::Graph,
+    );
     let node_id = node_id.to_owned();
     let labels = labels.to_vec();
     Box::pin(async move {
         // SetNodeLabels carries no collection field; resolve via node presence.
         let collection = resolve_collection_for_nodes(&csr_map, std::slice::from_ref(&node_id));
-        labels::set_node_labels(&csr_map, &collection, &node_id, &labels)
+        labels::set_node_labels(&csr_map, &memory, &collection, &node_id, &labels)
     })
 }
 
@@ -76,6 +85,12 @@ pub(super) fn temporal_neighbors<'a, S: StorageEngine + 'a>(
     }
     let storage = engine.storage.clone();
     let csr_map = engine.csr.clone();
+    let memory = ScopedMemory::new(
+        Arc::clone(&engine.governor),
+        DatabaseId::DEFAULT,
+        TenantId::new(0),
+        EngineId::Graph,
+    );
     let collection = collection.to_owned();
     let node_id = args.node_id.to_owned();
     let edge_label = args.edge_label.map(str::to_owned);
@@ -92,12 +107,15 @@ pub(super) fn temporal_neighbors<'a, S: StorageEngine + 'a>(
         temporal::temporal_neighbors(
             &storage,
             &csr_map,
-            collection.as_str(),
-            &node_id,
-            edge_label.as_deref(),
-            direction,
-            system_as_of_ms,
-            valid_at_ms,
+            &memory,
+            temporal::TemporalNeighborsParams {
+                collection: collection.as_str(),
+                node_id: &node_id,
+                edge_label: edge_label.as_deref(),
+                direction,
+                system_as_of_ms,
+                valid_at_ms,
+            },
         )
         .await
     }))
@@ -119,6 +137,12 @@ pub(super) fn temporal_algorithm<'a, S: StorageEngine + 'a>(
     }
     let storage = engine.storage.clone();
     let csr_map = engine.csr.clone();
+    let memory = ScopedMemory::new(
+        Arc::clone(&engine.governor),
+        DatabaseId::DEFAULT,
+        TenantId::new(0),
+        EngineId::Graph,
+    );
     let params = params.clone();
     // Only an explicit `AS OF SYSTEM TIME <ts>` narrows the read; every
     // other scope (`Current`, and the all-versions case already rejected
@@ -128,7 +152,15 @@ pub(super) fn temporal_algorithm<'a, S: StorageEngine + 'a>(
         _ => None,
     };
     Ok(Box::pin(async move {
-        temporal::temporal_algorithm(&storage, &csr_map, algorithm, &params, system_as_of_ms).await
+        temporal::temporal_algorithm(
+            &storage,
+            &csr_map,
+            &memory,
+            algorithm,
+            &params,
+            system_as_of_ms,
+        )
+        .await
     }))
 }
 
@@ -139,8 +171,14 @@ pub(super) fn graph_stats<'a, S: StorageEngine + 'a>(
 ) -> GraphFut<'a> {
     let storage = engine.storage.clone();
     let csr_map = engine.csr.clone();
+    let memory = ScopedMemory::new(
+        Arc::clone(&engine.governor),
+        DatabaseId::DEFAULT,
+        TenantId::new(0),
+        EngineId::Graph,
+    );
     let collection = collection.map(str::to_owned);
     Box::pin(async move {
-        stats::graph_stats(&storage, &csr_map, collection.as_deref(), as_of).await
+        stats::graph_stats(&storage, &csr_map, &memory, collection.as_deref(), as_of).await
     })
 }

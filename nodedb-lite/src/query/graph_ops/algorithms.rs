@@ -661,7 +661,7 @@ mod tests {
     use super::*;
 
     fn make_triangle_csr() -> CsrIndex {
-        let mut csr = CsrIndex::new();
+        let mut csr = CsrIndex::new(crate::query::graph_ops::test_memory());
         csr.add_edge("a", "E", "b").unwrap();
         csr.add_edge("b", "E", "c").unwrap();
         csr.add_edge("c", "E", "a").unwrap();

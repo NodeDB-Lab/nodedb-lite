@@ -75,7 +75,10 @@ mod tests {
     use crate::engine::spatial::SpatialIndexManager;
 
     fn make_mgr() -> Arc<Mutex<SpatialIndexManager>> {
-        Arc::new(Mutex::new(SpatialIndexManager::new()))
+        let governor = crate::query::engine::test_governor();
+        Arc::new(Mutex::new(SpatialIndexManager::new(
+            crate::query::engine::test_scoped_memory(&governor, nodedb_mem::EngineId::Spatial),
+        )))
     }
 
     #[test]

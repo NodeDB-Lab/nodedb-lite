@@ -10,6 +10,7 @@
 //! This is the canonical FTS implementation for Lite.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tracing;
 
@@ -17,6 +18,7 @@ use nodedb_fts::FtsIndex;
 use nodedb_fts::FtsSearchParams;
 use nodedb_fts::backend::memory::MemoryBackend;
 use nodedb_fts::posting::QueryMode as FtsQueryMode;
+use nodedb_mem::MemoryGovernor;
 use nodedb_types::Surrogate;
 use nodedb_types::text_search::{QueryMode, TextSearchParams};
 
@@ -77,10 +79,12 @@ pub struct FtsCollectionManager {
     /// Retained for the same reason as `collection_analyzers`: the DDL that
     /// sets it usually runs before any of the collection's indexes exist.
     pub(super) collection_fuzzy_defaults: HashMap<String, bool>,
+    /// Memory governor bound into every `FtsIndex` this manager creates.
+    pub(super) governor: Arc<MemoryGovernor>,
 }
 
 impl FtsCollectionManager {
-    pub fn new() -> Self {
+    pub fn new(governor: Arc<MemoryGovernor>) -> Self {
         Self {
             indices: HashMap::new(),
             id_to_surrogate: HashMap::new(),
@@ -91,6 +95,7 @@ impl FtsCollectionManager {
             origin_surrogate_to_doc_id: HashMap::new(),
             collection_analyzers: HashMap::new(),
             collection_fuzzy_defaults: HashMap::new(),
+            governor,
         }
     }
 
@@ -532,10 +537,19 @@ impl FtsCollectionManager {
     }
 }
 
-impl Default for FtsCollectionManager {
-    fn default() -> Self {
-        Self::new()
-    }
+/// Build a real, uncapped governor for FTS tests across `engine::fts`.
+#[cfg(test)]
+pub(crate) fn test_governor() -> Arc<MemoryGovernor> {
+    use nodedb_mem::{EngineLimits, GovernorConfig};
+
+    let per_engine = usize::MAX / nodedb_mem::EngineId::ALL.len();
+    Arc::new(
+        MemoryGovernor::new(GovernorConfig {
+            global_ceiling: per_engine * nodedb_mem::EngineId::ALL.len(),
+            engine_limits: EngineLimits::uniform(per_engine),
+        })
+        .expect("test governor"),
+    )
 }
 
 #[cfg(test)]
@@ -543,7 +557,7 @@ mod tests {
     use nodedb_types::Surrogate;
     use nodedb_types::text_search::{QueryMode, TextSearchParams};
 
-    use super::FtsCollectionManager;
+    use super::{FtsCollectionManager, test_governor};
 
     fn default_params() -> TextSearchParams {
         TextSearchParams {
@@ -556,7 +570,7 @@ mod tests {
 
     #[test]
     fn clearing_a_document_removes_it_from_the_index() {
-        let mut mgr = FtsCollectionManager::new();
+        let mut mgr = FtsCollectionManager::new(test_governor());
         mgr.index_document("col", "doc1", "the quick brown fox")
             .expect("index update must succeed");
         assert_eq!(mgr.search("col", "quick", 10, &default_params()).len(), 1);
@@ -573,7 +587,7 @@ mod tests {
 
     #[test]
     fn clearing_a_field_removes_it_from_the_field_index() {
-        let mut mgr = FtsCollectionManager::new();
+        let mut mgr = FtsCollectionManager::new(test_governor());
         mgr.index_field("col", "title", "doc1", "the quick brown fox")
             .expect("index update must succeed");
         assert!(
@@ -601,7 +615,7 @@ mod tests {
 
     #[test]
     fn bm25_score_scan_nonmatching_docs_get_zero_score() {
-        let mut mgr = FtsCollectionManager::new();
+        let mut mgr = FtsCollectionManager::new(test_governor());
         mgr.index_document("col", "doc1", "the quick brown fox")
             .expect("index update must succeed");
         mgr.index_document("col", "doc2", "unrelated content about databases")
@@ -631,7 +645,7 @@ mod tests {
 
     #[test]
     fn bm25_score_scan_empty_collection_returns_empty() {
-        let mgr = FtsCollectionManager::new();
+        let mgr = FtsCollectionManager::new(test_governor());
         let scored = mgr.scan_all_with_scores("nonexistent", "query", &default_params());
         assert!(scored.is_empty());
     }
@@ -640,7 +654,7 @@ mod tests {
 
     #[test]
     fn phrase_search_finds_exact_phrase() {
-        let mut mgr = FtsCollectionManager::new();
+        let mut mgr = FtsCollectionManager::new(test_governor());
         mgr.index_document("col", "doc1", "the quick brown fox jumps over")
             .expect("index update must succeed");
         mgr.index_document("col", "doc2", "the brown quick fox")
@@ -664,7 +678,7 @@ mod tests {
 
     #[test]
     fn phrase_search_no_results_for_nonexistent_phrase() {
-        let mut mgr = FtsCollectionManager::new();
+        let mut mgr = FtsCollectionManager::new(test_governor());
         mgr.index_document("col", "doc1", "the quick brown fox")
             .expect("index update must succeed");
 
@@ -680,7 +694,7 @@ mod tests {
 
     #[test]
     fn fts_delete_doc_removes_only_targeted_doc() {
-        let mut mgr = FtsCollectionManager::new();
+        let mut mgr = FtsCollectionManager::new(test_governor());
         mgr.index_document("col", "doc1", "rust programming language")
             .expect("index update must succeed");
         mgr.index_document("col", "doc2", "rust is fast and safe")
@@ -712,7 +726,7 @@ mod tests {
         use nodedb_types::text_search::{QueryMode, TextSearchParams};
         use std::collections::HashSet;
 
-        let mut mgr = FtsCollectionManager::new();
+        let mut mgr = FtsCollectionManager::new(test_governor());
         mgr.index_document("col", "doc-a", "rust programming language memory safe")
             .expect("index update must succeed");
         mgr.index_document("col", "doc-b", "rust is fast and compiled")
@@ -744,7 +758,7 @@ mod tests {
 
     #[test]
     fn fts_delete_doc_unknown_surrogate_returns_false() {
-        let mut mgr = FtsCollectionManager::new();
+        let mut mgr = FtsCollectionManager::new(test_governor());
         mgr.index_document("col", "doc1", "hello world")
             .expect("index update must succeed");
 

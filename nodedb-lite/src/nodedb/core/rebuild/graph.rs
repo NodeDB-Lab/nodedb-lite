@@ -14,9 +14,12 @@
 //!   CRDT-path edges whose CRDT snapshot may not have been flushed before exit).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
+use nodedb_mem::{EngineId, ScopedMemory};
 use nodedb_types::Namespace;
 use nodedb_types::id::EdgeId;
+use nodedb_types::{DatabaseId, TenantId};
 
 use crate::engine::graph::history::SYSTEM_TO_CURRENT;
 use crate::engine::graph::index::CsrIndex;
@@ -40,6 +43,12 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // ── Pass 1: CRDT edge scan ────────────────────────────────────────────
         // Track (collection, src, label, dst) tuples to deduplicate across passes.
         let mut indexed: HashSet<(String, String, String, String)> = HashSet::new();
+        let memory = ScopedMemory::new(
+            Arc::clone(&self.governor),
+            DatabaseId::DEFAULT,
+            TenantId::new(0),
+            EngineId::Graph,
+        );
 
         {
             let crdt = self.crdt.lock_or_recover();
@@ -58,7 +67,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
                 let csr = csr_map
                     .entry(collection.to_string())
-                    .or_insert_with(CsrIndex::new);
+                    .or_insert_with(|| CsrIndex::new(memory.clone()));
 
                 for id in &ids {
                     if let Some(loro_val) = crdt.read(crdt_coll, id) {
@@ -130,7 +139,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 }
                 let csr = csr_map
                     .entry(collection.to_string())
-                    .or_insert_with(CsrIndex::new);
+                    .or_insert_with(|| CsrIndex::new(memory.clone()));
                 let _ = csr.add_edge(src, label, dst);
                 indexed.insert(tuple);
             }
@@ -196,10 +205,11 @@ impl<S: StorageEngine> NodeDbLite<S> {
             // Add live edges (system_to == u64::MAX) whose edge_key uses the
             // EdgeId Display format (CRDT-API path). KV-path edge keys use a
             // different format and are already covered by Pass 2.
+            let memory = self.memory_for(nodedb_mem::EngineId::Graph);
             let mut csr_map = self.csr.lock_or_recover();
             let csr = csr_map
                 .entry(collection.to_string())
-                .or_insert_with(CsrIndex::new);
+                .or_insert_with(|| CsrIndex::new(memory));
 
             for (edge_key, system_to) in &edge_latest_system_to {
                 if *system_to != SYSTEM_TO_CURRENT {

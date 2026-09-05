@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use nodedb_mem::ScopedMemory;
 use nodedb_types::Namespace;
 use nodedb_types::error::NodeDbResult;
 
@@ -22,6 +23,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// is used.
     pub(in crate::nodedb::core::open) async fn restore_csr_indices(
         storage: &Arc<S>,
+        memory: &ScopedMemory,
     ) -> NodeDbResult<HashMap<String, CsrIndex>> {
         let mut csr_map: HashMap<String, CsrIndex> = HashMap::new();
         let Some(collections_bytes) = storage.get(Namespace::Meta, META_CSR_COLLECTIONS).await?
@@ -42,7 +44,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             if let Some(ext) = graph_seg_ext {
                 match ext.open_graph_segment(name).await {
                     Ok(Some(bytes)) => {
-                        match CsrIndex::from_checkpoint(&bytes) {
+                        match CsrIndex::from_checkpoint(&bytes, memory.clone()) {
                             Ok(Some(idx)) => {
                                 csr_map.insert(name.clone(), idx);
                             }
@@ -72,7 +74,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             let key = format!("csr:{name}");
             if let Some(envelope) = storage.get(Namespace::Graph, key.as_bytes()).await? {
                 match crate::storage::checksum::unwrap(&envelope) {
-                    Some(bytes) => match CsrIndex::from_checkpoint(&bytes) {
+                    Some(bytes) => match CsrIndex::from_checkpoint(&bytes, memory.clone()) {
                         Ok(Some(idx)) => {
                             csr_map.insert(name.clone(), idx);
                         }

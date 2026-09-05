@@ -81,7 +81,7 @@ impl FtsCollectionManager {
     /// before the first write is not silently lost for indexes materialized
     /// afterwards.
     pub(crate) fn new_index_for(&self, key: &str) -> LiteFtsIndex {
-        let idx = FtsIndex::new(MemoryBackend::new());
+        let idx = FtsIndex::new(MemoryBackend::new(), std::sync::Arc::clone(&self.governor));
         if let Some(name) = self.analyzer_for_key(key) {
             let _ = idx.set_collection_analyzer(0, 0, key, name);
         }
@@ -95,6 +95,7 @@ impl FtsCollectionManager {
 #[cfg(test)]
 mod tests {
     use super::FtsCollectionManager;
+    use crate::engine::fts::manager::test_governor;
 
     const DOC_KEY: &str = "col:_doc";
 
@@ -114,7 +115,7 @@ mod tests {
 
     #[test]
     fn setting_analyzer_leaves_fuzzy_default_unchanged() {
-        let mut mgr = FtsCollectionManager::new();
+        let mut mgr = FtsCollectionManager::new(test_governor());
         mgr.index_document("col", "doc1", "the quick brown fox")
             .expect("index update must succeed");
 
@@ -132,7 +133,7 @@ mod tests {
 
     #[test]
     fn setting_fuzzy_default_leaves_analyzer_unchanged() {
-        let mut mgr = FtsCollectionManager::new();
+        let mut mgr = FtsCollectionManager::new(test_governor());
         mgr.index_document("col", "doc1", "the quick brown fox")
             .expect("index update must succeed");
 
@@ -151,7 +152,7 @@ mod tests {
 
     #[test]
     fn config_bound_before_any_index_is_inherited_by_later_indexes() {
-        let mut mgr = FtsCollectionManager::new();
+        let mut mgr = FtsCollectionManager::new(test_governor());
         // DDL order: config first, documents afterwards — no index exists yet.
         mgr.set_collection_analyzer("col", "german");
         mgr.set_collection_fuzzy("col", true);
@@ -167,7 +168,7 @@ mod tests {
 
     #[test]
     fn config_bound_before_any_index_is_inherited_by_later_field_indexes() {
-        let mut mgr = FtsCollectionManager::new();
+        let mut mgr = FtsCollectionManager::new(test_governor());
         mgr.set_collection_analyzer("col", "german");
         mgr.set_collection_fuzzy("col", true);
 
@@ -192,7 +193,7 @@ mod tests {
     fn binding_nothing_leaves_the_collection_at_its_defaults() {
         // The `SetTextConfig { analyzer_name: None, fuzzy_default: None }`
         // case: neither setter runs, so nothing is retained or persisted.
-        let mut mgr = FtsCollectionManager::new();
+        let mut mgr = FtsCollectionManager::new(test_governor());
         mgr.index_document("col", "doc1", "the quick brown fox")
             .expect("index update must succeed");
 
@@ -207,7 +208,7 @@ mod tests {
     fn collection_names_containing_colons_split_at_the_last_separator() {
         // Key `"a:b:field"` belongs to collection `"a:b"`, not `"a"` — both
         // lookups split at the last `:` so they agree on the owner.
-        let mut mgr = FtsCollectionManager::new();
+        let mut mgr = FtsCollectionManager::new(test_governor());
         mgr.set_collection_analyzer("a:b", "german");
         mgr.set_collection_fuzzy("a:b", true);
 

@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use nodedb_graph::params::{AlgoParams, GraphAlgorithm};
+use nodedb_mem::ScopedMemory;
 use nodedb_types::Namespace;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
@@ -56,6 +57,7 @@ async fn build_temporal_snapshot<S: StorageEngine>(
     storage: &Arc<S>,
     collection: &str,
     system_as_of_ms: i64,
+    memory: &ScopedMemory,
 ) -> Result<CsrIndex, LiteError> {
     let prefix = {
         let mut p = collection.as_bytes().to_vec();
@@ -67,7 +69,7 @@ async fn build_temporal_snapshot<S: StorageEngine>(
         .scan_prefix(Namespace::GraphHistory, &prefix)
         .await?;
 
-    let mut snapshot = CsrIndex::new();
+    let mut snapshot = CsrIndex::new(memory.clone());
 
     // Group by edge key (strip the collection prefix and trailing 8-byte timestamp).
     // Key layout: `{collection}:{edge_key}:{system_from_8be}`.
@@ -133,25 +135,40 @@ async fn build_temporal_snapshot<S: StorageEngine>(
     Ok(snapshot)
 }
 
+/// Grouped tail fields for `temporal_neighbors`, kept out of the argument
+/// list to stay under clippy's argument-count lint.
+pub struct TemporalNeighborsParams<'a> {
+    pub collection: &'a str,
+    pub node_id: &'a str,
+    pub edge_label: Option<&'a str>,
+    pub direction: nodedb_graph::Direction,
+    pub system_as_of_ms: Option<i64>,
+    pub valid_at_ms: Option<i64>,
+}
+
 /// Handle `GraphOp::TemporalNeighbors`.
-#[allow(clippy::too_many_arguments)]
 pub async fn temporal_neighbors<S: StorageEngine>(
     storage: &Arc<S>,
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
-    collection: &str,
-    node_id: &str,
-    edge_label: Option<&str>,
-    direction: nodedb_graph::Direction,
-    system_as_of_ms: Option<i64>,
-    valid_at_ms: Option<i64>,
+    memory: &ScopedMemory,
+    params: TemporalNeighborsParams<'_>,
 ) -> Result<QueryResult, LiteError> {
+    let TemporalNeighborsParams {
+        collection,
+        node_id,
+        edge_label,
+        direction,
+        system_as_of_ms,
+        valid_at_ms,
+    } = params;
+
     // When no as_of is provided, fall back to current-state neighbors.
     if system_as_of_ms.is_none() {
         return super::traversal::neighbors(csr_map, collection, node_id, edge_label, direction);
     }
 
     let as_of = system_as_of_ms.unwrap();
-    let snapshot = build_temporal_snapshot(storage, collection, as_of).await?;
+    let snapshot = build_temporal_snapshot(storage, collection, as_of, memory).await?;
 
     let nbrs = snapshot.neighbors(node_id, edge_label, direction);
     let columns = vec!["label".to_string(), "neighbor".to_string()];
@@ -175,6 +192,7 @@ pub async fn temporal_neighbors<S: StorageEngine>(
 pub async fn temporal_algorithm<S: StorageEngine>(
     storage: &Arc<S>,
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
+    memory: &ScopedMemory,
     algorithm: GraphAlgorithm,
     params: &AlgoParams,
     system_as_of_ms: Option<i64>,
@@ -185,7 +203,7 @@ pub async fn temporal_algorithm<S: StorageEngine>(
     }
 
     let as_of = system_as_of_ms.unwrap();
-    let snapshot = build_temporal_snapshot(storage, &params.collection, as_of).await?;
+    let snapshot = build_temporal_snapshot(storage, &params.collection, as_of, memory).await?;
 
     // Wrap snapshot in a temporary map so run_algo can borrow it.
     let mut tmp_map = HashMap::new();

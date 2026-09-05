@@ -183,10 +183,36 @@ fn remove_text(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use nodedb_mem::{EngineId, EngineLimits, GovernorConfig, MemoryGovernor};
     use nodedb_types::columnar::ColumnDef;
+    use nodedb_types::{DatabaseId, TenantId};
 
     use super::*;
     use crate::engine::fts::FtsCollectionManager;
+
+    /// Build a real, uncapped governor for these index-integration tests.
+    fn test_governor() -> Arc<MemoryGovernor> {
+        let per_engine = usize::MAX / EngineId::ALL.len();
+        Arc::new(
+            MemoryGovernor::new(GovernorConfig {
+                global_ceiling: per_engine * EngineId::ALL.len(),
+                engine_limits: EngineLimits::uniform(per_engine),
+            })
+            .expect("test governor"),
+        )
+    }
+
+    /// Build a `ScopedMemory` bound to the spatial engine for these tests.
+    fn test_spatial_memory() -> nodedb_mem::ScopedMemory {
+        nodedb_mem::ScopedMemory::new(
+            test_governor(),
+            DatabaseId::DEFAULT,
+            TenantId::new(0),
+            EngineId::Spatial,
+        )
+    }
 
     #[test]
     fn index_row_routes_geometry() {
@@ -202,8 +228,8 @@ mod tests {
         ];
 
         let hnsw = Mutex::new(HashMap::new());
-        let spatial = Mutex::new(SpatialIndexManager::new());
-        let text = Mutex::new(FtsCollectionManager::new());
+        let spatial = Mutex::new(SpatialIndexManager::new(test_spatial_memory()));
+        let text = Mutex::new(FtsCollectionManager::new(test_governor()));
 
         index_row("test", "1", &columns, &values, &hnsw, &spatial, &text)
             .expect("index update must succeed");
@@ -228,8 +254,8 @@ mod tests {
         ];
 
         let hnsw = Mutex::new(HashMap::new());
-        let spatial = Mutex::new(SpatialIndexManager::new());
-        let text = Mutex::new(FtsCollectionManager::new());
+        let spatial = Mutex::new(SpatialIndexManager::new(test_spatial_memory()));
+        let text = Mutex::new(FtsCollectionManager::new(test_governor()));
 
         index_row("test", "1", &columns, &values, &hnsw, &spatial, &text)
             .expect("index update must succeed");
@@ -251,8 +277,8 @@ mod tests {
         ];
 
         let hnsw = Mutex::new(HashMap::new());
-        let spatial = Mutex::new(SpatialIndexManager::new());
-        let text = Mutex::new(FtsCollectionManager::new());
+        let spatial = Mutex::new(SpatialIndexManager::new(test_spatial_memory()));
+        let text = Mutex::new(FtsCollectionManager::new(test_governor()));
 
         index_row("test", "1", &columns, &values, &hnsw, &spatial, &text)
             .expect("index update must succeed");
@@ -273,8 +299,8 @@ mod tests {
         let values = vec![Value::Integer(1), Value::Integer(42)];
 
         let hnsw = Mutex::new(HashMap::new());
-        let spatial = Mutex::new(SpatialIndexManager::new());
-        let text = Mutex::new(FtsCollectionManager::new());
+        let spatial = Mutex::new(SpatialIndexManager::new(test_spatial_memory()));
+        let text = Mutex::new(FtsCollectionManager::new(test_governor()));
 
         index_row("test", "1", &columns, &values, &hnsw, &spatial, &text)
             .expect("index update must succeed");

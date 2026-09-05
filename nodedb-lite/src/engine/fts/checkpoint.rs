@@ -37,11 +37,13 @@
 //! per index key.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use nodedb_fts::FtsIndex;
 use nodedb_fts::backend::FtsBackend;
 use nodedb_fts::backend::memory::MemoryBackend;
 use nodedb_fts::block::CompactPosting;
+use nodedb_mem::MemoryGovernor;
 use nodedb_types::Namespace;
 use nodedb_types::Surrogate;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
@@ -283,10 +285,13 @@ where
 
 /// Restore FTS state from storage on cold open.
 ///
+/// `governor` is bound into every restored [`FtsIndex`] for memory accounting.
+///
 /// Returns `(indices, id_to_surrogate, surrogate_to_id, next_surrogate)`.
 /// Returns an empty state if no checkpoint is found.
 pub(crate) async fn restore_fts<S>(
     storage: &S,
+    governor: Arc<MemoryGovernor>,
 ) -> NodeDbResult<(
     HashMap<String, FtsIndex<MemoryBackend>>,
     HashMap<String, u32>,
@@ -337,7 +342,7 @@ where
 
     for index_key in &index_keys {
         let backend = MemoryBackend::new();
-        let idx = FtsIndex::new(backend);
+        let idx = FtsIndex::new(backend, Arc::clone(&governor));
 
         // ── Posting data: try pagedb segment path first, fall back to KV ─────
         // Flipped only by the native segment path, compiled out on wasm32.

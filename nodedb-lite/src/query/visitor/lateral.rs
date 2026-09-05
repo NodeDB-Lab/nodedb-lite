@@ -174,7 +174,7 @@ mod tests {
     use nodedb_sql::types::query::EngineType;
 
     use crate::PagedbStorageMem;
-    use crate::query::engine::LiteQueryEngine;
+    use crate::query::engine::{LiteQueryEngine, LiteQueryEngineParams};
 
     async fn make_engine() -> LiteQueryEngine<PagedbStorageMem> {
         use std::sync::Mutex;
@@ -186,12 +186,14 @@ mod tests {
         let crdt = Arc::new(Mutex::new(
             crate::engine::crdt::CrdtEngine::new(1).expect("crdt"),
         ));
+        let governor = crate::query::engine::test_governor();
         let strict = Arc::new(crate::engine::strict::StrictEngine::new(Arc::clone(
             &storage,
         )));
-        let columnar = Arc::new(crate::engine::columnar::ColumnarEngine::new(Arc::clone(
-            &storage,
-        )));
+        let columnar = Arc::new(crate::engine::columnar::ColumnarEngine::new(
+            Arc::clone(&storage),
+            crate::query::engine::test_scoped_memory(&governor, nodedb_mem::EngineId::Columnar),
+        ));
         let htap = Arc::new(crate::engine::htap::HtapBridge::new());
         let timeseries = Arc::new(Mutex::new(
             crate::engine::timeseries::engine::TimeseriesEngine::new(),
@@ -199,17 +201,20 @@ mod tests {
         let vector_state = Arc::new(crate::engine::vector::VectorState::new(
             Arc::clone(&storage),
             100,
+            crate::query::engine::test_scoped_memory(&governor, nodedb_mem::EngineId::Vector),
         ));
         let array_state = Arc::new(tokio::sync::Mutex::new(
             crate::engine::array::engine::ArrayEngineState::open(&storage)
                 .await
                 .expect("array"),
         ));
-        let fts_state = Arc::new(crate::engine::fts::FtsState::new());
+        let fts_state = Arc::new(crate::engine::fts::FtsState::new(Arc::clone(&governor)));
         let spatial = Arc::new(Mutex::new(
-            crate::engine::spatial::SpatialIndexManager::new(),
+            crate::engine::spatial::SpatialIndexManager::new(
+                crate::query::engine::test_scoped_memory(&governor, nodedb_mem::EngineId::Spatial),
+            ),
         ));
-        LiteQueryEngine::new(
+        LiteQueryEngine::new(LiteQueryEngineParams {
             crdt,
             strict,
             columnar,
@@ -219,10 +224,11 @@ mod tests {
             vector_state,
             array_state,
             fts_state,
-            Arc::new(crate::engine::sparse_vector::SparseVectorState::new()),
+            sparse_state: Arc::new(crate::engine::sparse_vector::SparseVectorState::new()),
             spatial,
-            Arc::new(Mutex::new(std::collections::HashMap::new())),
-        )
+            csr: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            governor,
+        })
     }
 
     fn scan_plan(collection: &str) -> SqlPlan {
