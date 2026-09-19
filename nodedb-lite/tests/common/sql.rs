@@ -31,10 +31,11 @@ pub struct OriginPgwire {
 }
 
 impl OriginPgwire {
-    /// Connect to Origin pgwire at the default address (127.0.0.1:6432)
-    /// in trust mode (no password required).
+    /// Connect to Origin pgwire at the default address (127.0.0.1:6432), on
+    /// the `default` database (Origin refuses a startup database it cannot
+    /// resolve), in trust mode (no password required).
     pub async fn connect() -> Self {
-        let conn_str = "host=127.0.0.1 port=6432 user=nodedb dbname=nodedb sslmode=disable";
+        let conn_str = "host=127.0.0.1 port=6432 user=nodedb dbname=default sslmode=disable";
         let (client, connection) = tokio_postgres::connect(conn_str, NoTls)
             .await
             .expect("connect to Origin pgwire");

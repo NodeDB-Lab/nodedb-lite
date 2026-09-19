@@ -2,10 +2,12 @@
 //! Lifecycle meta-ops: snapshot, compact, checkpoint, unregister, rename, convert.
 
 use nodedb_types::Namespace;
+use nodedb_types::columnar::{ColumnDef, StrictSchema};
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
 use crate::error::LiteError;
+use crate::query::ddl::default_convert_schema;
 use crate::query::engine::LiteQueryEngine;
 use crate::storage::engine::StorageEngine;
 
@@ -145,25 +147,39 @@ pub async fn handle_rename_collection<S: StorageEngine>(
     })
 }
 
-/// `ConvertCollection` — delegate to the existing DDL convert helpers.
+/// `ConvertCollection` — run the same conversion the DDL path runs.
 ///
-/// `target_type` is one of `"document_schemaless"`, `"document_strict"`, `"kv"`.
+/// `target_type` is one of `"document_schemaless"`, `"document_strict"`,
+/// `"columnar"`. `schema_json` is a JSON `Vec<ColumnDef>`; empty means the
+/// default convert schema.
 pub async fn handle_convert_collection<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     target_type: &str,
-    _schema_json: &str,
+    schema_json: &str,
 ) -> Result<QueryResult, LiteError> {
-    // Build a synthetic SQL string and delegate to the DDL visitor path.
-    let sql = format!("CONVERT COLLECTION {collection} TO {target_type}");
+    let target_schema = if schema_json.is_empty() {
+        default_convert_schema()
+    } else {
+        let columns: Vec<ColumnDef> =
+            sonic_rs::from_str(schema_json).map_err(|e| LiteError::BadRequest {
+                detail: format!("ConvertCollection: schema_json decode: {e}"),
+            })?;
+        StrictSchema {
+            columns,
+            version: 1,
+            dropped_columns: Vec::new(),
+            bitemporal: false,
+        }
+    };
     match target_type {
-        "document_strict" | "strict" => engine.handle_convert_to_strict(&sql).await,
-        "document_schemaless" | "document" => engine.handle_convert_to_document(&sql).await,
-        "columnar" => engine.handle_convert_to_columnar(&sql).await,
+        "document_strict" | "strict" => engine.convert_to_strict(collection, target_schema).await,
+        "document_schemaless" | "document" => engine.convert_to_document(collection).await,
+        "columnar" => engine.convert_to_columnar(collection, target_schema).await,
         other => Err(LiteError::BadRequest {
             detail: format!(
                 "ConvertCollection: unsupported target_type '{other}'; \
-                 accepted values are document_schemaless, document_strict, kv"
+                 accepted values are document_schemaless, document_strict, columnar"
             ),
         }),
     }

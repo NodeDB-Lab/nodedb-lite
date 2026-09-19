@@ -16,7 +16,7 @@ use crate::error::LiteError;
 /// `rls_filters` holds the read-side RLS programs. `write_check` carries the
 /// write gate's decision. `op` names the variant, so the message points at the
 /// statement that produced it.
-pub(super) fn deny_policy(
+pub(in crate::query::physical_visitor) fn deny_policy(
     op: &str,
     returning: Option<&ReturningSpec>,
     rls_filters: &[&[u8]],

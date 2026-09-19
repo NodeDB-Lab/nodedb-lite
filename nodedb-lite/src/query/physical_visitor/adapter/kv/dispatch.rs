@@ -141,7 +141,16 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             collection,
             keys,
             rls_write_check,
-        } => writes::delete(engine, collection, keys, rls_write_check),
+            returning,
+            rls_filters,
+        } => writes::delete(
+            engine,
+            collection,
+            keys,
+            rls_write_check,
+            returning,
+            rls_filters,
+        ),
 
         KvOp::BatchPut {
             collection,
@@ -221,8 +230,22 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             key,
             updates,
             surrogate: _,
+            if_present,
             rls_write_check,
-        } => writes::field_set(engine, collection, key, updates, rls_write_check),
+            returning,
+            rls_filters,
+        } => writes::field_set(
+            engine,
+            writes::FieldSetArgs {
+                collection,
+                key,
+                updates,
+                if_present: *if_present,
+                rls_write_check,
+                returning,
+                rls_filters,
+            },
+        ),
 
         KvOp::Transfer {
             collection,

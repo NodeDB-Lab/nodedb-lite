@@ -87,6 +87,13 @@ impl<S: StorageEngine> NodeDbLite<S> {
         &self.governor
     }
 
+    /// Access the sequence registry that `nextval` / `currval` / `setval`
+    /// in a SELECT list read. Register a `LiteSequenceDef` here before
+    /// querying it.
+    pub fn sequences(&self) -> &Arc<crate::sequence::LiteSequenceRegistry> {
+        self.query_engine.sequences()
+    }
+
     /// Access the strict document engine (for direct Binary Tuple CRUD).
     pub fn strict_engine(&self) -> &Arc<StrictEngine<S>> {
         &self.strict

@@ -242,7 +242,7 @@ fn combine_arms(
 /// `FilterExpr::Comparison` and similar primitives are lowered to the
 /// equivalent `QExpr::BinaryOp` so that `And`/`Or`/`Not` subtrees that mix
 /// primitives and expressions work correctly.
-fn filter_to_qexpr(f: &Filter) -> Result<QExpr, LiteError> {
+pub(crate) fn filter_to_qexpr(f: &Filter) -> Result<QExpr, LiteError> {
     use nodedb_query::expr::types::BinaryOp;
     match &f.expr {
         FilterExpr::Comparison { field, op, value } => {

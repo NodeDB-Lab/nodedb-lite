@@ -780,7 +780,7 @@ mod tests {
         // one appearing in only one source — purely testing RRF math.
         use nodedb_query::fusion::{RankedResult, reciprocal_rank_fusion_weighted};
 
-        let vector_ranked = vec![
+        let vector_ranked: Vec<RankedResult<String>> = vec![
             RankedResult {
                 document_id: "A".into(),
                 rank: 0,
@@ -794,13 +794,13 @@ mod tests {
                 source: "vector",
             },
         ];
-        let text_ranked = vec![RankedResult {
+        let text_ranked: Vec<RankedResult<String>> = vec![RankedResult {
             document_id: "A".into(),
             rank: 0,
             score: 0.8,
             source: "text",
         }];
-        let graph_ranked = vec![RankedResult {
+        let graph_ranked: Vec<RankedResult<String>> = vec![RankedResult {
             document_id: "A".into(),
             rank: 0,
             score: 0.0,

@@ -69,7 +69,8 @@ pub(crate) async fn execute_lateral_loop_sql<S: StorageEngine>(
                 field: inner_field.clone(),
                 op: FilterOp::Eq,
                 value: val,
-                ..Default::default()
+                clauses: Vec::new(),
+                expr: None,
             });
         }
         let inner_rows = apply_filters(inner_all, &corr_filters)?;
@@ -137,7 +138,8 @@ pub async fn execute_lateral_loop<S: StorageEngine>(
                 field: inner_field.clone(),
                 op: FilterOp::Eq,
                 value: val,
-                ..Default::default()
+                clauses: Vec::new(),
+                expr: None,
             });
         }
 
@@ -203,7 +205,8 @@ mod tests {
                 field: "cust_id".to_string(),
                 op: FilterOp::Eq,
                 value: cust_val,
-                ..Default::default()
+                clauses: Vec::new(),
+                expr: None,
             }];
             let inner_rows =
                 apply_filters(orders.clone(), &filters).expect("filter evaluation failed");

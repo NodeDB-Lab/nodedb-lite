@@ -122,12 +122,13 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                     timeseries_ops::writes::ingest(engine, col.as_str(), &pay, &fmt, lsn, &surr)?;
                 #[cfg(not(target_arch = "wasm32"))]
                 if !samples.is_empty() {
-                    let col_names: Option<Vec<String>> = engine
-                        .columnar
-                        .schema(col.as_str())
-                        .map(|s| s.columns.into_iter().map(|c| c.name).collect());
-                    if let Some(col_names) = col_names {
-                        let rows = timeseries_ops::writes::samples_to_rows(&samples, &col_names);
+                    let time_key = timeseries_ops::writes::declared_time_key(engine, col.as_str());
+                    if let Some(schema) = engine.columnar.schema(col.as_str()) {
+                        let rows = timeseries_ops::writes::samples_to_rows(
+                            &samples,
+                            &schema.columns,
+                            time_key.as_deref(),
+                        )?;
                         if !rows.is_empty() {
                             crate::sync::reconcile_outbound_enqueue(
                                 engine.columnar.enqueue_outbound(col.as_str(), &rows).await,

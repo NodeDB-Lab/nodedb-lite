@@ -471,7 +471,8 @@ mod tests {
             field: "total".into(),
             op: nodedb_query::scan_filter::FilterOp::Gt,
             value: Value::Float(10.0),
-            ..Default::default()
+            clauses: Vec::new(),
+            expr: None,
         };
         let having_bytes = zerompk::to_msgpack_vec(&vec![having_filter]).unwrap();
 

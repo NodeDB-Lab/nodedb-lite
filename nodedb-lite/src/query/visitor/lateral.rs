@@ -3,7 +3,6 @@
 //! LateralTopK, LateralLoop.
 
 use nodedb_physical::physical_plan::SortKeySpec;
-use nodedb_physical::physical_plan::query::JoinProjection;
 use nodedb_sql::types::SqlPlan;
 use nodedb_sql::types::filter::Filter;
 use nodedb_sql::types::query::{Projection, SortKey};
@@ -15,6 +14,7 @@ use crate::query::filter_convert::sql_filters_to_metadata;
 use crate::storage::engine::StorageEngine;
 
 use super::adapter::LiteFut;
+use super::projection::join_projections;
 
 fn encode_filters(filters: &[Filter]) -> Result<Vec<u8>, LiteError> {
     if filters.is_empty() {
@@ -52,23 +52,6 @@ fn sort_key_to_spec(k: &SortKey) -> SortKeySpec {
     }
 }
 
-fn build_join_projections(projection: &[Projection]) -> Vec<JoinProjection> {
-    projection
-        .iter()
-        .filter_map(|p| match p {
-            Projection::Column(name) => Some(JoinProjection {
-                source: name.clone(),
-                output: name.clone(),
-            }),
-            Projection::Computed { alias, .. } => Some(JoinProjection {
-                source: alias.clone(),
-                output: alias.clone(),
-            }),
-            _ => None,
-        })
-        .collect()
-}
-
 // ── LateralTopK ───────────────────────────────────────────────────────────────
 
 /// Lower `SqlPlan::LateralTopK` to `QueryOp::LateralTopK`.
@@ -103,7 +86,7 @@ pub(super) fn lower_lateral_top_k<'a, S: StorageEngine + 'a>(
     let inner_lim = inner_limit;
     let corr_keys = correlation_keys.to_vec();
     let lat_alias = lateral_alias.to_string();
-    let proj = build_join_projections(projection);
+    let proj = join_projections(projection, "LATERAL")?;
     let lj = left_join;
 
     Ok(Box::pin(async move {
@@ -145,7 +128,7 @@ pub(super) fn lower_lateral_loop<'a, S: StorageEngine + 'a>(
     let inner_sql = inner.clone();
     let corr_preds = correlation_predicates.to_vec();
     let lat_alias = lateral_alias.to_string();
-    let proj = build_join_projections(projection);
+    let proj = join_projections(projection, "LATERAL")?;
     let cap = outer_row_cap;
     let lj = left_join;
 

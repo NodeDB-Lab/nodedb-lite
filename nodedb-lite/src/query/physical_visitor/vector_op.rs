@@ -1,28 +1,35 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Dispatch logic for all 18 `VectorOp` variants on the Lite executor.
+//! Dispatch logic for all 25 `VectorOp` variants on the Lite executor.
 //!
-//! Variants that Lite can serve are wired to helpers in `vector_write`;
-//! variants that require Origin-only infrastructure return
-//! `LiteError::BadRequest` with a precise architectural-mismatch message.
-//! No `_ =>` catchall — match is exhaustive over all 18 variants.
+//! Variants that Lite can serve are wired to helpers in `vector_write`,
+//! `vector_direct`, and `vector_sparse`; variants that require Origin-only
+//! infrastructure return `LiteError::BadRequest` with a precise
+//! architectural-mismatch message.
+//! No `_ =>` catchall — match is exhaustive over every variant.
 
 use std::sync::Arc;
 
-use nodedb_physical::physical_plan::VectorOp;
-use nodedb_types::SparseVector;
+use nodedb_physical::physical_plan::{VectorDirectWriteIntent, VectorOp};
+use nodedb_types::RlsWriteCheck;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
 use crate::engine::vector::search::run_vector_search;
 use crate::error::LiteError;
-use crate::nodedb::lock_ext::LockExt;
 use crate::query::engine::LiteQueryEngine;
+use crate::query::payload_filter::{and_metadata, payload_atoms_to_metadata};
 use crate::storage::engine::StorageEngine;
 
 use super::adapter::LitePhysicalFut;
+use super::adapter::policy::deny_policy;
+use super::vector_direct::{
+    DirectUpdateArgs, DirectWriteArgs, vector_direct_delete, vector_direct_update,
+    vector_direct_write,
+};
+use super::vector_sparse::{sparse_delete, sparse_insert, sparse_search};
 use super::vector_write::{
-    vector_delete_by_id, vector_delete_by_surrogate, vector_direct_upsert, vector_drop_index,
-    vector_insert, vector_query_stats, vector_set_params,
+    vector_delete_by_id, vector_delete_by_surrogate, vector_drop_index, vector_insert,
+    vector_query_stats, vector_set_params,
 };
 
 /// Entry point called by `LiteDataPlaneVisitor::vector()`.
@@ -44,6 +51,7 @@ where
             rls_filters,
             metric,
             skip_payload_fetch,
+            payload_filters,
             ..
         } => {
             let index_key = if field_name.is_empty() {
@@ -57,16 +65,20 @@ where
             let ef = *ef_search;
             let metric = *metric;
             let skip_payload_fetch = *skip_payload_fetch;
-            let metadata_filter: Option<nodedb_types::filter::MetadataFilter> =
-                if rls_filters.is_empty() {
-                    None
-                } else {
-                    Some(zerompk::from_msgpack(rls_filters).map_err(|e| {
-                        LiteError::Serialization {
-                            detail: format!("decode MetadataFilter: {e}"),
-                        }
-                    })?)
-                };
+            let rls_filter: Option<nodedb_types::filter::MetadataFilter> = if rls_filters.is_empty()
+            {
+                None
+            } else {
+                Some(
+                    zerompk::from_msgpack(rls_filters).map_err(|e| LiteError::Serialization {
+                        detail: format!("decode MetadataFilter: {e}"),
+                    })?,
+                )
+            };
+            // Lite has no payload bitmap index: the atoms are evaluated
+            // against each candidate's stored payload row instead.
+            let metadata_filter =
+                and_metadata(rls_filter, payload_atoms_to_metadata(payload_filters)?);
             let vector_state = Arc::clone(&engine.vector_state);
             let crdt = Arc::clone(&engine.crdt);
             Ok(Box::pin(async move {
@@ -179,27 +191,184 @@ where
             vector_drop_index(engine, index_key)
         }
 
-        // ── C. DirectUpsert ───────────────────────────────────────────────────
-
-        // payload and payload_indexes: Lite has no bitmap index implementation;
-        // payload bytes are not decoded or stored here.
+        // ── C. Vector-primary direct writes ───────────────────────────────────
         VectorOp::DirectUpsert {
             collection,
             field,
             surrogate,
+            pk_bytes,
             vector,
+            payload,
             quantization,
             storage_dtype,
-            ..
-        } => Ok(vector_direct_upsert(
-            engine,
-            collection.as_str().to_string(),
-            field.clone(),
-            surrogate.to_string(),
-            vector.clone(),
-            *quantization,
-            *storage_dtype,
-        )),
+            payload_indexes: _,
+            returning,
+            rls_filters,
+            on_conflict_updates,
+            rls_write_check,
+        } => {
+            deny_policy(
+                "VectorOp::DirectUpsert",
+                returning.as_ref(),
+                &[rls_filters.as_slice()],
+                rls_write_check,
+            )?;
+            vector_direct_write(
+                engine,
+                DirectWriteArgs {
+                    collection: collection.as_str().to_string(),
+                    field: field.clone(),
+                    surrogate: *surrogate,
+                    pk_bytes: pk_bytes.clone(),
+                    vector: vector.clone(),
+                    payload: payload.clone(),
+                    quantization: *quantization,
+                    storage_dtype: *storage_dtype,
+                    intent: VectorDirectWriteIntent::Upsert,
+                    on_conflict_updates: on_conflict_updates.clone(),
+                },
+            )
+        }
+
+        VectorOp::DirectInsert {
+            collection,
+            field,
+            surrogate,
+            pk_bytes,
+            vector,
+            payload,
+            quantization,
+            storage_dtype,
+            payload_indexes: _,
+            returning,
+            rls_filters,
+        } => {
+            deny_policy(
+                "VectorOp::DirectInsert",
+                returning.as_ref(),
+                &[rls_filters.as_slice()],
+                &RlsWriteCheck::NoPolicyApplies,
+            )?;
+            vector_direct_write(
+                engine,
+                DirectWriteArgs {
+                    collection: collection.as_str().to_string(),
+                    field: field.clone(),
+                    surrogate: *surrogate,
+                    pk_bytes: pk_bytes.clone(),
+                    vector: vector.clone(),
+                    payload: payload.clone(),
+                    quantization: *quantization,
+                    storage_dtype: *storage_dtype,
+                    intent: VectorDirectWriteIntent::Insert,
+                    on_conflict_updates: Vec::new(),
+                },
+            )
+        }
+
+        VectorOp::DirectInsertIfAbsent {
+            collection,
+            field,
+            surrogate,
+            pk_bytes,
+            vector,
+            payload,
+            quantization,
+            storage_dtype,
+            payload_indexes: _,
+            returning,
+            rls_filters,
+        } => {
+            deny_policy(
+                "VectorOp::DirectInsertIfAbsent",
+                returning.as_ref(),
+                &[rls_filters.as_slice()],
+                &RlsWriteCheck::NoPolicyApplies,
+            )?;
+            vector_direct_write(
+                engine,
+                DirectWriteArgs {
+                    collection: collection.as_str().to_string(),
+                    field: field.clone(),
+                    surrogate: *surrogate,
+                    pk_bytes: pk_bytes.clone(),
+                    vector: vector.clone(),
+                    payload: payload.clone(),
+                    quantization: *quantization,
+                    storage_dtype: *storage_dtype,
+                    intent: VectorDirectWriteIntent::InsertIfAbsent,
+                    on_conflict_updates: Vec::new(),
+                },
+            )
+        }
+
+        VectorOp::DirectDelete {
+            collection,
+            field,
+            targets,
+            returning,
+            rls_filters,
+            rls_write_check,
+        } => {
+            deny_policy(
+                "VectorOp::DirectDelete",
+                returning.as_ref(),
+                &[rls_filters.as_slice()],
+                rls_write_check,
+            )?;
+            Ok(vector_direct_delete(
+                engine,
+                collection.as_str().to_string(),
+                field.clone(),
+                targets.clone(),
+            ))
+        }
+
+        VectorOp::DirectUpdate {
+            collection,
+            field,
+            targets,
+            new_vector,
+            payload_patch,
+            quantization: _,
+            storage_dtype: _,
+            payload_indexes: _,
+            returning,
+            rls_filters,
+            rls_write_check,
+        } => {
+            deny_policy(
+                "VectorOp::DirectUpdate",
+                returning.as_ref(),
+                &[rls_filters.as_slice()],
+                rls_write_check,
+            )?;
+            vector_direct_update(
+                engine,
+                DirectUpdateArgs {
+                    collection: collection.as_str().to_string(),
+                    field: field.clone(),
+                    targets: targets.clone(),
+                    new_vector: new_vector.clone(),
+                    payload_patch: payload_patch.clone(),
+                },
+            )
+        }
+
+        // Resolve-before-propose splits a governed write into a read-only
+        // resolution and a Raft-replicated apply. Lite has no Raft and no
+        // write policy; it applies the direct ops above in one step.
+        VectorOp::ResolveDirectWrite(_) => Err(LiteError::BadRequest {
+            detail: "ResolveDirectWrite: a Raft resolve-before-propose stage; Lite applies \
+                     DirectDelete / DirectUpdate / DirectUpsert directly."
+                .to_string(),
+        }),
+
+        VectorOp::ResolvedDirectWrite { .. } => Err(LiteError::BadRequest {
+            detail: "ResolvedDirectWrite: a Raft resolve-before-propose stage; Lite applies \
+                     DirectDelete / DirectUpdate / DirectUpsert directly."
+                .to_string(),
+        }),
 
         VectorOp::QueryStats {
             collection,
@@ -252,86 +421,37 @@ where
             field_name,
             doc_id,
             entries,
-        } => {
-            let vector =
-                SparseVector::from_entries(entries.clone()).map_err(|e| LiteError::BadRequest {
-                    detail: format!("SparseInsert: {e}"),
-                })?;
-            let sparse_state = Arc::clone(&engine.sparse_state);
-            let collection = collection.clone();
-            let field_name = field_name.clone();
-            let doc_id = doc_id.clone();
-            Ok(Box::pin(async move {
-                sparse_state.manager.lock_or_recover().index_document(
-                    collection.as_str(),
-                    &field_name,
-                    &doc_id,
-                    &vector,
-                );
-                Ok(QueryResult {
-                    columns: Vec::new(),
-                    rows: Vec::new(),
-                    rows_affected: 1,
-                })
-            }))
-        }
+        } => sparse_insert(
+            engine,
+            collection.as_str().to_string(),
+            field_name.clone(),
+            doc_id.clone(),
+            entries.clone(),
+        ),
 
         VectorOp::SparseSearch {
             collection,
             field_name,
             query_entries,
             top_k,
-        } => {
-            let query = SparseVector::from_entries(query_entries.clone()).map_err(|e| {
-                LiteError::BadRequest {
-                    detail: format!("SparseSearch: {e}"),
-                }
-            })?;
-            let sparse_state = Arc::clone(&engine.sparse_state);
-            let collection = collection.clone();
-            let field_name = field_name.clone();
-            let k = *top_k;
-            Ok(Box::pin(async move {
-                let hits = sparse_state.manager.lock_or_recover().search(
-                    collection.as_str(),
-                    &field_name,
-                    &query,
-                    k,
-                );
-                let rows: Vec<Vec<Value>> = hits
-                    .into_iter()
-                    .map(|h| vec![Value::String(h.doc_id), Value::Float(h.score as f64)])
-                    .collect();
-                Ok(QueryResult {
-                    columns: vec!["id".to_string(), "score".to_string()],
-                    rows,
-                    rows_affected: 0,
-                })
-            }))
-        }
+        } => sparse_search(
+            engine,
+            collection.as_str().to_string(),
+            field_name.clone(),
+            query_entries.clone(),
+            *top_k,
+        ),
 
         VectorOp::SparseDelete {
             collection,
             field_name,
             doc_id,
-        } => {
-            let sparse_state = Arc::clone(&engine.sparse_state);
-            let collection = collection.clone();
-            let field_name = field_name.clone();
-            let doc_id = doc_id.clone();
-            Ok(Box::pin(async move {
-                let removed = sparse_state.manager.lock_or_recover().remove_document(
-                    collection.as_str(),
-                    &field_name,
-                    &doc_id,
-                );
-                Ok(QueryResult {
-                    columns: Vec::new(),
-                    rows: Vec::new(),
-                    rows_affected: u64::from(removed),
-                })
-            }))
-        }
+        } => Ok(sparse_delete(
+            engine,
+            collection.as_str().to_string(),
+            field_name.clone(),
+            doc_id.clone(),
+        )),
 
         VectorOp::MultiVectorInsert { .. } => Err(LiteError::BadRequest {
             detail: "MultiVectorInsert: Lite has no multi-vector (ColBERT-style) HNSW; \

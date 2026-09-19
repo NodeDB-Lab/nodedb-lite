@@ -16,6 +16,17 @@ use crate::query::filter_convert::sql_value_to_value;
 /// `LiteError::BadRequest` naming the unsupported variant.
 pub(crate) fn convert_sql_expr(expr: &SExpr) -> Result<QExpr, LiteError> {
     match expr {
+        // `EXCLUDED.col` (`INSERT ... ON CONFLICT DO UPDATE`) resolves
+        // against the incoming row via `eval_with_excluded`, mirroring
+        // Origin's `sql_expr_to_bridge_expr`. Any other table qualifier
+        // is dropped: this crate evaluates single-collection expressions.
+        SExpr::Column { table, name }
+            if table
+                .as_deref()
+                .is_some_and(|t| t.eq_ignore_ascii_case("excluded")) =>
+        {
+            Ok(QExpr::ExcludedColumn(name.clone()))
+        }
         SExpr::Column { name, .. } => Ok(QExpr::Column(name.clone())),
 
         SExpr::Literal(v) => {

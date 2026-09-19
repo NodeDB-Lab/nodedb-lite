@@ -64,7 +64,8 @@ pub(crate) async fn execute_lateral_top_k_sql<S: StorageEngine>(
                 field: inner_col.clone(),
                 op: FilterOp::Eq,
                 value: val,
-                ..Default::default()
+                clauses: Vec::new(),
+                expr: None,
             });
         }
         let inner_rows = scan_collection(engine, inner_collection).await?;
@@ -127,7 +128,8 @@ pub async fn execute_lateral_top_k<S: StorageEngine>(
                 field: inner_col.clone(),
                 op: FilterOp::Eq,
                 value: val,
-                ..Default::default()
+                clauses: Vec::new(),
+                expr: None,
             });
         }
 
@@ -273,7 +275,8 @@ mod tests {
                 field: "dept_id".to_string(),
                 op: FilterOp::Eq,
                 value: dept_val,
-                ..Default::default()
+                clauses: Vec::new(),
+                expr: None,
             }];
             let mut inner_rows =
                 apply_filters(employees.clone(), &filters).expect("filter evaluation failed");

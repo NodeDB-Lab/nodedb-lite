@@ -272,10 +272,8 @@ async fn document_select_constant_parity() {
         nodedb_types::value::Value::Integer(i) => *i,
         other => panic!("expected Integer, got {other:?}"),
     };
-    // Origin returns the constant as a text-encoded value via pgwire.
-    let origin_val_str: &str = origin_rows[0].get::<_, &str>(0);
-    let origin_val: i64 = origin_val_str.parse().unwrap_or_else(|e| {
-        panic!("failed to parse origin column 0 as i64: {e} (raw: {origin_val_str:?})")
-    });
+    // Origin types an integer constant as int8 in the row description, so
+    // the extended-protocol read decodes it as i64.
+    let origin_val: i64 = origin_rows[0].get::<_, i64>(0);
     assert_eq!(lite_val, origin_val, "SELECT 42 value must match");
 }

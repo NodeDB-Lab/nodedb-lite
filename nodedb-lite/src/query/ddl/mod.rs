@@ -15,4 +15,5 @@ pub mod strict;
 mod tests;
 pub mod timeseries;
 
+pub(in crate::query) use convert::default_convert_schema;
 pub(crate) use parser::describe_strict_collection;

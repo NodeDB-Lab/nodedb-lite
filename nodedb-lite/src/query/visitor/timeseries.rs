@@ -18,6 +18,7 @@ use crate::query::visitor::scan_post::sort_rows;
 use crate::storage::engine::StorageEngine;
 
 use super::adapter::LiteFut;
+use super::projection::projection_names;
 
 fn encode_filters(filters: &[Filter]) -> Result<Vec<u8>, LiteError> {
     if filters.is_empty() {
@@ -31,18 +32,6 @@ fn encode_filters(filters: &[Filter]) -> Result<Vec<u8>, LiteError> {
             detail: format!("encode timeseries filters: {e}"),
         }),
     }
-}
-
-/// Extract column-name projections from a `Projection` slice.
-fn extract_projection_cols(projection: &[Projection]) -> Vec<String> {
-    projection
-        .iter()
-        .filter_map(|p| match p {
-            Projection::Column(name) => Some(name.clone()),
-            Projection::Computed { alias, .. } => Some(alias.clone()),
-            _ => None,
-        })
-        .collect()
 }
 
 /// Convert SQL `AggregateExpr` list to `(op, field)` pairs expected by `TimeseriesOp::Scan`.
@@ -84,7 +73,7 @@ pub(super) fn lower_timeseries_scan<'a, S: StorageEngine + 'a>(
     sort_keys: &[SortKey],
 ) -> Result<LiteFut<'a>, LiteError> {
     let filter_bytes = encode_filters(filters)?;
-    let proj_cols = extract_projection_cols(projection);
+    let proj_cols = projection_names(projection, "timeseries scan")?;
     let agg_pairs = convert_aggregates(aggregates);
 
     let (system_time, valid_at_ms) = extract_temporal(temporal);

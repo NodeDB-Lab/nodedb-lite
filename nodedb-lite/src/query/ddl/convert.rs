@@ -27,17 +27,27 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         sql: &str,
     ) -> Result<QueryResult, LiteError> {
         let (source_name, target_schema) = parse_convert_sql(sql, "strict")?;
+        self.convert_to_strict(&source_name, target_schema).await
+    }
 
+    /// Convert the schemaless collection `source_name` to strict under
+    /// `target_schema`. Rows come from the CRDT store, the only schemaless
+    /// store Lite keeps, so the source format needs no plan-level hint.
+    pub(in crate::query) async fn convert_to_strict(
+        &self,
+        source_name: &str,
+        target_schema: StrictSchema,
+    ) -> Result<QueryResult, LiteError> {
         // Read all documents from the source (CRDT/schemaless).
         let docs = {
             let crdt = match self.crdt.lock() {
                 Ok(c) => c,
                 Err(p) => p.into_inner(),
             };
-            let ids = crdt.list_ids(&source_name);
+            let ids = crdt.list_ids(source_name);
             let mut docs = Vec::with_capacity(ids.len());
             for id in &ids {
-                if let Some(loro_val) = crdt.read(&source_name, id) {
+                if let Some(loro_val) = crdt.read(source_name, id) {
                     let doc = crate::nodedb::convert::loro_value_to_document(id, &loro_val);
                     docs.push(doc);
                 }
@@ -53,14 +63,14 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
 
         // Create the strict collection.
         self.strict
-            .create_collection(&source_name, target_schema.clone())
+            .create_collection(source_name, target_schema.clone())
             .await?;
 
         // Convert each document to a row and insert.
         let mut converted = 0u64;
         for doc in &docs {
             let values = document_to_row(&doc.fields, &target_schema.columns);
-            match self.strict.insert(&source_name, &values).await {
+            match self.strict.insert(source_name, &values).await {
                 Ok(()) => converted += 1,
                 Err(e) => {
                     tracing::warn!(doc_id = %doc.id, error = %e, "conversion insert failed")
@@ -75,11 +85,11 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 Err(p) => p.into_inner(),
             };
             for doc in &docs {
-                let _ = crdt.delete(&source_name, &doc.id);
+                let _ = crdt.delete(source_name, &doc.id);
             }
         }
 
-        self.register_strict_collection(&source_name);
+        self.register_strict_collection(source_name);
 
         Ok(QueryResult {
             columns: vec!["result".into()],
@@ -96,28 +106,39 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         sql: &str,
     ) -> Result<QueryResult, LiteError> {
         let (source_name, target_schema) = parse_convert_sql(sql, "columnar")?;
+        self.convert_to_columnar(&source_name, target_schema).await
+    }
+
+    /// Convert `source_name` (CRDT or strict) to a plain columnar collection
+    /// under `target_schema`. The source store is detected by probing the
+    /// CRDT store first, then the strict store.
+    pub(in crate::query) async fn convert_to_columnar(
+        &self,
+        source_name: &str,
+        target_schema: StrictSchema,
+    ) -> Result<QueryResult, LiteError> {
         let columnar_schema = ColumnarSchema::new(target_schema.columns)
             .map_err(|e| LiteError::Query(e.to_string()))?;
 
         // Read from CRDT or strict.
         let rows = self
-            .read_source_rows(&source_name, &columnar_schema.columns)
+            .read_source_rows(source_name, &columnar_schema.columns)
             .await?;
 
         // Create columnar collection.
         self.columnar
-            .create_collection(&source_name, columnar_schema, ColumnarProfile::Plain, false)
+            .create_collection(source_name, columnar_schema, ColumnarProfile::Plain, false)
             .await?;
 
         // Insert rows.
         let mut converted = 0u64;
         for row in &rows {
-            if self.columnar.insert(&source_name, row).is_ok() {
+            if self.columnar.insert(source_name, row).is_ok() {
                 converted += 1;
             }
         }
 
-        self.register_columnar_collection(&source_name);
+        self.register_columnar_collection(source_name);
 
         Ok(QueryResult {
             columns: vec!["result".into()],
@@ -140,12 +161,21 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             .get(2)
             .ok_or(LiteError::Query("expected collection name".into()))?
             .to_lowercase();
+        self.convert_to_document(&source_name).await
+    }
 
+    /// Convert the strict collection `source_name` to schemaless documents.
+    /// The strict store's own schema drives tuple decoding, so the source
+    /// format needs no plan-level hint.
+    pub(in crate::query) async fn convert_to_document(
+        &self,
+        source_name: &str,
+    ) -> Result<QueryResult, LiteError> {
         // Read from strict or columnar.
         let mut converted = 0u64;
 
-        if let Some(schema) = self.strict.schema(&source_name) {
-            let raw = self.strict.scan_raw(&source_name).await?;
+        if let Some(schema) = self.strict.schema(source_name) {
+            let raw = self.strict.scan_raw(source_name).await?;
 
             let decoder = nodedb_strict::TupleDecoder::new(&schema);
             {
@@ -163,7 +193,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                             .zip(values.iter())
                             .map(|(col, val)| (col.name.as_str(), value_to_loro(val)))
                             .collect();
-                        if crdt.upsert(&source_name, &doc_id, &fields).is_ok() {
+                        if crdt.upsert(source_name, &doc_id, &fields).is_ok() {
                             converted += 1;
                         }
                     }
@@ -171,10 +201,10 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             }
 
             // Drop the strict collection.
-            self.strict.drop_collection(&source_name).await?;
+            self.strict.drop_collection(source_name).await?;
         }
 
-        self.register_collection(&source_name);
+        self.register_collection(source_name);
 
         Ok(QueryResult {
             columns: vec!["result".into()],
@@ -252,19 +282,21 @@ fn parse_convert_sql(sql: &str, target_mode: &str) -> Result<(String, StrictSche
         let (_, schema) = parse_strict_create_sql(sql)?;
         Ok((source_name, schema))
     } else {
-        // No schema specified — infer from source. Use a minimal default.
-        Ok((
-            source_name,
-            StrictSchema {
-                columns: vec![
-                    ColumnDef::required("id", ColumnType::String).with_primary_key(),
-                    ColumnDef::nullable("data", ColumnType::String),
-                ],
-                version: 1,
-                dropped_columns: Vec::new(),
-                bitemporal: false,
-            },
-        ))
+        Ok((source_name, default_convert_schema()))
+    }
+}
+
+/// Target schema when a CONVERT names no columns: a text `id` key plus a
+/// text `data` column.
+pub(in crate::query) fn default_convert_schema() -> StrictSchema {
+    StrictSchema {
+        columns: vec![
+            ColumnDef::required("id", ColumnType::String).with_primary_key(),
+            ColumnDef::nullable("data", ColumnType::String),
+        ],
+        version: 1,
+        dropped_columns: Vec::new(),
+        bitemporal: false,
     }
 }
 

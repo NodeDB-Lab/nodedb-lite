@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Post-processing for scan results: WHERE, DISTINCT, ORDER BY, window functions, OFFSET, LIMIT.
+//! Post-processing for scan results: WHERE, ORDER BY, window functions,
+//! projection, DISTINCT, OFFSET, LIMIT.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -10,74 +11,113 @@ use nodedb_query::metadata_filter::matches_metadata_filter;
 use nodedb_query::value_ops::compare_values;
 use nodedb_query::window::WindowFuncSpec;
 use nodedb_sql::types::filter::Filter;
-use nodedb_sql::types::query::{SortKey, WindowSpec};
+use nodedb_sql::types::query::{Projection, SortKey, WindowSpec};
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::expr_convert::convert_sql_expr;
 use crate::query::filter_convert::{LiteFilter, sql_filters_to_metadata};
+use crate::query::visitor::projection::project_scan_result;
+use crate::sequence::LiteSequenceRegistry;
 
-/// Apply WHERE / DISTINCT / ORDER BY / window functions / OFFSET / LIMIT to a raw scan result.
+/// Apply WHERE / ORDER BY / window functions / projection / DISTINCT /
+/// OFFSET / LIMIT to a raw scan result.
 ///
 /// Steps follow SQL semantics for a flat scan (no grouping or aggregation):
 /// 1. WHERE filtering
-/// 2. DISTINCT deduplication
-/// 3. ORDER BY sorting
-/// 4. Window function evaluation
-/// 5. OFFSET skip
-/// 6. LIMIT take
+/// 2. ORDER BY sorting
+/// 3. Window function evaluation
+/// 4. Target-list projection (computed and sequence expressions)
+/// 5. DISTINCT deduplication over the projected shape
+/// 6. OFFSET skip
+/// 7. LIMIT take
+///
+/// Sorting runs before projection so an ORDER BY key outside the SELECT
+/// list still resolves against the scan columns.
 pub(crate) fn apply_scan_post_processing(
     mut result: QueryResult,
-    filters: &[Filter],
-    sort_keys: &[SortKey],
-    window_specs: &[WindowSpec],
-    limit: Option<usize>,
-    offset: usize,
-    distinct: bool,
+    args: ScanPostArgs<'_>,
 ) -> Result<QueryResult, LiteError> {
+    let ScanPostArgs {
+        filters,
+        sort_keys,
+        window_specs,
+        projection,
+        sequences,
+        limit,
+        offset,
+        distinct,
+    } = args;
+
     // 1. WHERE — apply both primitive MetadataFilter and complex QExpr predicates.
     filter_rows(&mut result, filters)?;
 
-    // 2. DISTINCT — over the full row; a scan has no separate target list here.
+    // 2. ORDER BY
+    sort_rows(&mut result, sort_keys)?;
+
+    // 3. Window functions
+    apply_window_functions(&mut result, window_specs)?;
+
+    // 4. Projection
+    project_scan_result(&mut result, projection, sequences)?;
+
+    // 5. DISTINCT — over the projected row.
     if distinct {
         distinct_rows(&mut result, &[]);
     }
 
-    // 3. ORDER BY
-    sort_rows(&mut result, sort_keys)?;
-
-    // 4. Window functions
-    if !window_specs.is_empty() {
-        let converted = convert_window_specs(window_specs)?;
-        let column_index: HashMap<String, usize> = result
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (c.clone(), i))
-            .collect();
-        let new_cols = nodedb_query::window::evaluate_window_functions_value(
-            &mut result.rows,
-            &column_index,
-            &converted,
-        )
-        .map_err(|e| LiteError::BadRequest {
-            detail: format!("window function evaluation failed: {e}"),
-        })?;
-        result.columns.extend(new_cols);
-    }
-
-    // 5. OFFSET
+    // 6. OFFSET
     if offset > 0 {
         result.rows = result.rows.into_iter().skip(offset).collect();
     }
 
-    // 6. LIMIT
+    // 7. LIMIT
     if let Some(n) = limit {
         result.rows.truncate(n);
     }
 
     Ok(result)
+}
+
+/// Inputs of [`apply_scan_post_processing`].
+pub(crate) struct ScanPostArgs<'a> {
+    pub filters: &'a [Filter],
+    pub sort_keys: &'a [SortKey],
+    pub window_specs: &'a [WindowSpec],
+    pub projection: &'a [Projection],
+    pub sequences: &'a LiteSequenceRegistry,
+    pub limit: Option<usize>,
+    pub offset: usize,
+    pub distinct: bool,
+}
+
+/// Evaluate `window_specs` over the whole result and append one column per
+/// spec. A no-op when `window_specs` is empty.
+pub(crate) fn apply_window_functions(
+    result: &mut QueryResult,
+    window_specs: &[WindowSpec],
+) -> Result<(), LiteError> {
+    if window_specs.is_empty() {
+        return Ok(());
+    }
+    let converted = convert_window_specs(window_specs)?;
+    let column_index: HashMap<String, usize> = result
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.clone(), i))
+        .collect();
+    let new_cols = nodedb_query::window::evaluate_window_functions_value(
+        &mut result.rows,
+        &column_index,
+        &converted,
+    )
+    .map_err(|e| LiteError::BadRequest {
+        detail: format!("window function evaluation failed: {e}"),
+    })?;
+    result.columns.extend(new_cols);
+    Ok(())
 }
 
 /// Retain only the rows satisfying `filters`, applying both the primitive
@@ -340,6 +380,14 @@ fn row_to_json(columns: &[String], row: &[Value]) -> serde_json::Value {
             }
             continue;
         }
+        // An indexed fetch returns the payload as one "data" MessagePack
+        // column; inline it the same way.
+        if let Some(fields) = msgpack_payload_fields(col, val) {
+            for (k, v) in fields {
+                map.entry(k).or_insert_with(|| value_to_json(&v));
+            }
+            continue;
+        }
         map.insert(col.clone(), value_to_json(val));
     }
     serde_json::Value::Object(map)
@@ -372,7 +420,7 @@ fn value_to_json(v: &Value) -> serde_json::Value {
     }
 }
 
-fn row_to_typed_value(columns: &[String], row: &[Value]) -> Value {
+pub(super) fn row_to_typed_value(columns: &[String], row: &[Value]) -> Value {
     let mut map = std::collections::HashMap::new();
     for (col, val) in columns.iter().zip(row.iter()) {
         // For schemaless document rows the physical scan serialises the whole
@@ -388,9 +436,30 @@ fn row_to_typed_value(columns: &[String], row: &[Value]) -> Value {
             }
             continue;
         }
+        if let Some(fields) = msgpack_payload_fields(col, val) {
+            for (k, v) in fields {
+                map.entry(k).or_insert(v);
+            }
+            continue;
+        }
         map.insert(col.clone(), val.clone());
     }
     Value::Object(map)
+}
+
+/// The fields of a `data` column holding a MessagePack-encoded document,
+/// or `None` for any other column.
+fn msgpack_payload_fields(col: &str, val: &Value) -> Option<HashMap<String, Value>> {
+    if col != "data" {
+        return None;
+    }
+    let Value::Bytes(bytes) = val else {
+        return None;
+    };
+    match nodedb_types::json_msgpack::value_from_msgpack(bytes) {
+        Ok(Value::Object(fields)) => Some(fields),
+        _ => None,
+    }
 }
 
 fn json_value_to_value(v: &serde_json::Value) -> Value {

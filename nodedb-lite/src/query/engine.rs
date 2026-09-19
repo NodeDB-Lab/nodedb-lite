@@ -21,6 +21,7 @@ use crate::engine::spatial::SpatialIndexManager;
 use crate::engine::strict::StrictEngine;
 use crate::engine::vector::VectorState;
 use crate::error::LiteError;
+use crate::sequence::LiteSequenceRegistry;
 use crate::storage::engine::StorageEngine;
 
 use super::catalog::LiteCatalog;
@@ -46,6 +47,10 @@ pub struct LiteQueryEngine<S: StorageEngine> {
     pub(crate) csr: Arc<Mutex<HashMap<String, CsrIndex>>>,
     /// Memory budget governor, shared with the owning NodeDbLite.
     pub(crate) governor: Arc<MemoryGovernor>,
+    /// Sequence registry backing `nextval` / `currval` / `setval` in a
+    /// SELECT list. Definitions are registered through
+    /// `LiteQueryEngine::sequences`; counters live in memory.
+    pub(crate) sequences: Arc<LiteSequenceRegistry>,
     /// Durable outbound queue for FTS sync — `None` when sync is disabled.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fts_outbound: Option<Arc<crate::sync::FtsOutbound<S>>>,
@@ -88,6 +93,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             cancellation: CancellationRegistry::new(),
             csr: params.csr,
             governor: params.governor,
+            sequences: Arc::new(LiteSequenceRegistry::new()),
             #[cfg(not(target_arch = "wasm32"))]
             fts_outbound: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -105,6 +111,11 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_spatial_outbound(&mut self, q: Arc<crate::sync::SpatialOutbound<S>>) {
         self.spatial_outbound = Some(q);
+    }
+
+    /// The sequence registry SELECT-list accessors read and advance.
+    pub fn sequences(&self) -> &Arc<LiteSequenceRegistry> {
+        &self.sequences
     }
 
     /// No-op — collections are auto-discovered via catalog.
@@ -480,4 +491,56 @@ pub(crate) fn test_scoped_memory(
         nodedb_types::TenantId::new(0),
         engine,
     )
+}
+
+/// Build an in-memory `LiteQueryEngine` with every engine state wired up.
+#[cfg(test)]
+pub(crate) async fn test_engine() -> LiteQueryEngine<crate::PagedbStorageMem> {
+    use crate::engine::array::engine::ArrayEngineState;
+    use crate::engine::spatial::SpatialIndexManager;
+
+    let storage = Arc::new(
+        crate::PagedbStorageMem::open_in_memory()
+            .await
+            .expect("in-memory pagedb"),
+    );
+    let crdt = Arc::new(Mutex::new(CrdtEngine::new(1).expect("crdt")));
+    let governor = test_governor();
+    let strict = Arc::new(StrictEngine::new(Arc::clone(&storage)));
+    let columnar = Arc::new(ColumnarEngine::new(
+        Arc::clone(&storage),
+        test_scoped_memory(&governor, nodedb_mem::EngineId::Columnar),
+    ));
+    let htap = Arc::new(HtapBridge::new());
+    let timeseries = Arc::new(Mutex::new(
+        crate::engine::timeseries::engine::TimeseriesEngine::new(),
+    ));
+    let vector_state = Arc::new(VectorState::new(
+        Arc::clone(&storage),
+        100,
+        test_scoped_memory(&governor, nodedb_mem::EngineId::Vector),
+    ));
+    let array_state = Arc::new(tokio::sync::Mutex::new(
+        ArrayEngineState::open(&storage).await.expect("array"),
+    ));
+    let fts_state = Arc::new(FtsState::new(Arc::clone(&governor)));
+    let spatial = Arc::new(Mutex::new(SpatialIndexManager::new(test_scoped_memory(
+        &governor,
+        nodedb_mem::EngineId::Spatial,
+    ))));
+    LiteQueryEngine::new(LiteQueryEngineParams {
+        crdt,
+        strict,
+        columnar,
+        htap,
+        storage,
+        timeseries,
+        vector_state,
+        array_state,
+        fts_state,
+        sparse_state: Arc::new(SparseVectorState::new()),
+        spatial,
+        csr: Arc::new(Mutex::new(HashMap::new())),
+        governor,
+    })
 }

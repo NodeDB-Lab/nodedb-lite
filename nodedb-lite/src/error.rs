@@ -21,6 +21,16 @@ pub enum LiteError {
     #[error("bad request: {detail}")]
     BadRequest { detail: String },
 
+    /// A write that would duplicate a declared unique key. Maps to SQLSTATE
+    /// `23505` at the SQL boundary.
+    #[error("duplicate key value violates unique constraint on '{collection}': {detail}")]
+    UniqueViolation { collection: String, detail: String },
+
+    /// A write that would store NULL in a NOT NULL column. Maps to SQLSTATE
+    /// `23502` at the SQL boundary.
+    #[error("null value in column '{column}' of '{collection}' violates not-null constraint")]
+    NotNullViolation { collection: String, column: String },
+
     #[error("sync error: {detail}")]
     Sync { detail: String },
 

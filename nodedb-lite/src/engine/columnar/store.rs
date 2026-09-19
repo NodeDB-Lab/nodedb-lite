@@ -1185,7 +1185,6 @@ fn decoded_column_value(col: &nodedb_columnar::reader::DecodedColumn, row_idx: u
                 Value::Null
             }
         }
-        _ => Value::Null,
     }
 }
 

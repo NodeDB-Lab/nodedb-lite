@@ -6,16 +6,15 @@
 //! `LiteDataPlaneVisitor` without intermediate planning helpers.
 
 use nodedb_physical::PhysicalTaskVisitor;
-use nodedb_sql::temporal::TemporalScope;
-use nodedb_sql::types::SqlValue;
-use nodedb_sql::types::filter::Filter;
-use nodedb_sql::types::query::{EngineType, SortKey, WindowSpec};
+use nodedb_sql::ScanVisitArgs;
+use nodedb_sql::types::query::EngineType;
+use nodedb_sql::types::{SqlValue, WriteRoute};
 use nodedb_sql::types_expr::SqlExpr;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
-use crate::query::visitor::scan_post::apply_scan_post_processing;
+use crate::query::visitor::scan_post::{ScanPostArgs, apply_scan_post_processing};
 use crate::storage::engine::StorageEngine;
 
 use super::visitor::LiteFut;
@@ -32,33 +31,33 @@ pub(super) fn lower_constant_result<'a, S: StorageEngine + 'a>(
     }))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn lower_scan<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
-    collection: &str,
-    engine_type: EngineType,
-    filters: &[Filter],
-    sort_keys: &[SortKey],
-    limit: Option<usize>,
-    offset: usize,
-    distinct: bool,
-    window_functions: &[WindowSpec],
-    _temporal: &TemporalScope,
+    args: &ScanVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
-    let collection = collection.to_string();
-    let filters = filters.to_vec();
-    let sort_keys = sort_keys.to_vec();
-    let window_functions = window_functions.to_vec();
+    let collection = args.collection.to_string();
+    let engine_type = args.engine;
+    let filters = args.filters.to_vec();
+    let sort_keys = args.sort_keys.to_vec();
+    let window_functions = args.window_functions.to_vec();
+    let projection = args.projection.to_vec();
+    let limit = args.limit;
+    let offset = args.offset;
+    let distinct = args.distinct;
     Ok(Box::pin(async move {
         let raw = engine.execute_scan(&collection, &engine_type).await?;
         apply_scan_post_processing(
             raw,
-            &filters,
-            &sort_keys,
-            &window_functions,
-            limit,
-            offset,
-            distinct,
+            ScanPostArgs {
+                filters: &filters,
+                sort_keys: &sort_keys,
+                window_specs: &window_functions,
+                projection: &projection,
+                sequences: engine.sequences(),
+                limit,
+                offset,
+                distinct,
+            },
         )
     }))
 }
@@ -82,6 +81,7 @@ pub(super) fn lower_insert<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
     engine_type: EngineType,
+    route: WriteRoute,
     rows: &[Vec<(String, SqlValue)>],
     if_absent: bool,
     primary_key: Option<&str>,
@@ -94,6 +94,7 @@ pub(super) fn lower_insert<'a, S: StorageEngine + 'a>(
             .execute_insert(
                 &collection,
                 &engine_type,
+                route,
                 &rows,
                 if_absent,
                 primary_key.as_deref(),

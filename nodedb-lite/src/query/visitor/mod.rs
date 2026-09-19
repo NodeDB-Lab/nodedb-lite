@@ -5,6 +5,7 @@ mod dml;
 mod having_eval;
 mod kv;
 mod lateral;
+mod projection;
 mod queries;
 mod recursive;
 pub(super) mod scan_post;

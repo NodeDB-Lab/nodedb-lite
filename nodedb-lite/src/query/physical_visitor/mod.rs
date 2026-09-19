@@ -2,7 +2,9 @@
 mod adapter;
 mod text_config;
 mod text_op;
+mod vector_direct;
 mod vector_op;
+mod vector_sparse;
 mod vector_write;
 
 pub(crate) use adapter::LiteDataPlaneVisitor;

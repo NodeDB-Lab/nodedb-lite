@@ -17,6 +17,7 @@ use crate::query::physical_visitor::LiteDataPlaneVisitor;
 use crate::storage::engine::StorageEngine;
 
 use super::adapter::LiteFut;
+use super::projection::projection_names;
 
 fn encode_attribute_filters(filters: &[Filter]) -> Result<Vec<u8>, LiteError> {
     if filters.is_empty() {
@@ -200,14 +201,7 @@ pub(super) fn lower_spatial_scan<'a, S: StorageEngine + 'a>(
     projection: &[Projection],
 ) -> Result<LiteFut<'a>, LiteError> {
     let attr_bytes = encode_attribute_filters(attribute_filters)?;
-    let proj_cols: Vec<String> = projection
-        .iter()
-        .filter_map(|p| match p {
-            Projection::Column(name) => Some(name.clone()),
-            Projection::Computed { alias, .. } => Some(alias.clone()),
-            _ => None,
-        })
-        .collect();
+    let proj_cols = projection_names(projection, "spatial scan")?;
 
     let op = SpatialOp::Scan {
         // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.

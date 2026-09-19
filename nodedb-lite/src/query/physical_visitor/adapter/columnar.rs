@@ -112,7 +112,8 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                         surrogates: &surr,
                         schema_bytes: &sb,
                     },
-                )?;
+                )
+                .await?;
                 #[cfg(not(target_arch = "wasm32"))]
                 if !inserted_rows.is_empty() {
                     crate::sync::reconcile_outbound_enqueue(
@@ -140,7 +141,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let filt = filters.clone();
             let upd = updates.clone();
             Ok(Box::pin(async move {
-                columnar_ops::writes::update(engine, col.as_str(), &filt, &upd)
+                columnar_ops::writes::update(engine, col.as_str(), &filt, &upd).await
             }))
         }
 
@@ -153,7 +154,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let col = collection.clone();
             let filt = filters.clone();
             Ok(Box::pin(async move {
-                columnar_ops::writes::delete(engine, col.as_str(), &filt)
+                columnar_ops::writes::delete(engine, col.as_str(), &filt).await
             }))
         }
 

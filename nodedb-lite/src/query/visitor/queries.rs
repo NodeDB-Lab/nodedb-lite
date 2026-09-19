@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use nodedb_physical::PhysicalTaskVisitor;
 use nodedb_physical::physical_plan::SortKeySpec;
 use nodedb_physical::physical_plan::document::DocumentOp;
-use nodedb_physical::physical_plan::query::{AggregateSpec, JoinProjection};
+use nodedb_physical::physical_plan::query::AggregateSpec;
 use nodedb_query::expr::GroupKeySpec;
 use nodedb_sql::SubqueryVisitArgs;
 use nodedb_sql::temporal::TemporalScope;
@@ -30,8 +30,10 @@ use crate::storage::engine::StorageEngine;
 
 use super::adapter::LiteFut;
 use super::having_eval::{apply_having_result, make_agg_alias_map};
+use super::projection::join_projections;
 use super::scan_post::{
-    apply_scan_post_processing, distinct_rows, filter_rows, project_rows, sort_rows,
+    ScanPostArgs, apply_scan_post_processing, apply_window_functions, distinct_rows, filter_rows,
+    project_rows, sort_rows,
 };
 
 /// Convert a `nodedb_sql` `AggregateExpr` to a physical `AggregateSpec`.
@@ -216,20 +218,7 @@ pub(super) fn lower_join<'a, S: StorageEngine + 'a>(
     let limit = limit.unwrap_or(usize::MAX);
     // JoinType debug output: Inner, Left, Right, Full — lower to string for hash join.
     let join_type_str = format!("{join_type:?}").to_lowercase();
-    let proj: Vec<JoinProjection> = projection
-        .iter()
-        .filter_map(|p| match p {
-            Projection::Column(name) => Some(JoinProjection {
-                source: name.clone(),
-                output: name.clone(),
-            }),
-            Projection::Computed { alias, .. } => Some(JoinProjection {
-                source: alias.clone(),
-                output: alias.clone(),
-            }),
-            _ => None,
-        })
-        .collect();
+    let proj = join_projections(projection, "JOIN")?;
     let post_filters_bytes = encode_filters(filters)?;
 
     Ok(Box::pin(async move {
@@ -283,29 +272,22 @@ pub(super) fn lower_document_index_lookup<'a, S: StorageEngine + 'a>(
     // Encode remaining filters.
     let filter_bytes = encode_filters(filters)?;
 
-    // Extract column-name projections (Star = all columns → empty Vec).
-    let proj_cols: Vec<String> = projection
-        .iter()
-        .filter_map(|p| match p {
-            Projection::Column(name) => Some(name.clone()),
-            Projection::Computed { alias, .. } => Some(alias.clone()),
-            _ => None,
-        })
-        .collect();
-
-    let raw_limit = limit.unwrap_or(0);
     let filters = filters.to_vec();
     let sort_keys = sort_keys.to_vec();
     let window_functions = window_functions.to_vec();
+    let projection = projection.to_vec();
 
+    // The fetch returns every indexed match in full: residual filters,
+    // ORDER BY, projection, OFFSET and LIMIT all run in post-processing,
+    // so the op carries no window of its own.
     let op = DocumentOp::IndexedFetch {
         collection: col,
         path,
         value: val_str,
         filters: filter_bytes,
-        projection: proj_cols,
-        limit: raw_limit,
-        offset,
+        projection: Vec::new(),
+        limit: usize::MAX,
+        offset: 0,
     };
 
     let mut phys = LiteDataPlaneVisitor { engine };
@@ -315,12 +297,16 @@ pub(super) fn lower_document_index_lookup<'a, S: StorageEngine + 'a>(
         let raw = fut.await?;
         apply_scan_post_processing(
             raw,
-            &filters,
-            &sort_keys,
-            &window_functions,
-            limit,
-            offset,
-            distinct,
+            ScanPostArgs {
+                filters: &filters,
+                sort_keys: &sort_keys,
+                window_specs: &window_functions,
+                projection: &projection,
+                sequences: engine.sequences(),
+                limit,
+                offset,
+                distinct,
+            },
         )
     }))
 }
@@ -399,9 +385,9 @@ pub(super) fn lower_cte<'a, S: StorageEngine + 'a>(
 ///
 /// The body is materialized by executing `input`, then the outer constraints
 /// the body's leaf could not absorb are applied in the same order the
-/// distributed engine's `ProviderScan` tail uses — filter → offset → sort →
-/// distinct → project → limit — so both engines answer an `ORDER BY` /
-/// `OFFSET` / `DISTINCT` over a subquery identically. Lite has no shards, so
+/// distributed engine's `ProviderScan` tail uses — filter → window functions
+/// → offset → sort → distinct → project → limit — so both engines answer an
+/// `ORDER BY` / `OFFSET` / `DISTINCT` over a subquery identically. Lite has no shards, so
 /// there is no gather step: the body already produces the full row stream.
 pub(super) fn lower_subquery<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
@@ -411,6 +397,7 @@ pub(super) fn lower_subquery<'a, S: StorageEngine + 'a>(
         input,
         filters,
         projection,
+        window_functions,
         sort_keys,
         offset,
         distinct,
@@ -419,12 +406,15 @@ pub(super) fn lower_subquery<'a, S: StorageEngine + 'a>(
     let input = input.clone();
     let filters = filters.to_vec();
     let projection = subquery_projection_columns(projection)?;
+    let window_functions = window_functions.to_vec();
     let sort_keys = sort_keys.to_vec();
 
     Ok(Box::pin(async move {
         let mut result = engine.execute_plan(&input).await?;
 
         filter_rows(&mut result, &filters)?;
+
+        apply_window_functions(&mut result, &window_functions)?;
 
         if offset > 0 {
             result.rows = result.rows.into_iter().skip(offset).collect();
@@ -460,7 +450,7 @@ fn subquery_projection_columns(projection: &[Projection]) -> Result<Vec<String>,
                 names.push(qname.rsplit('.').next().unwrap_or(qname).to_string());
             }
             Projection::Star | Projection::QualifiedStar(_) => return Ok(Vec::new()),
-            Projection::Computed { .. } => {
+            Projection::Computed { .. } | Projection::CpComputed { .. } => {
                 return Err(LiteError::BadRequest {
                     detail: "a computed projection over an ORDER BY / OFFSET / DISTINCT subquery \
                              is not supported; select the base columns in the subquery and \

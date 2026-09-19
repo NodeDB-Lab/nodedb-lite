@@ -122,6 +122,7 @@ impl<S: StorageEngine> LiteCatalog<S> {
             primary: desc.primary,
             vector_primary: desc.vector_primary.clone(),
             partition_strategy: desc.partition_strategy.clone(),
+            open_schema: CollectionInfo::open_schema_for(engine),
         }
     }
 
@@ -181,6 +182,7 @@ impl<S: StorageEngine> LiteCatalog<S> {
             primary: nodedb_types::PrimaryEngine::Document,
             vector_primary: None,
             partition_strategy: nodedb_types::PartitionStrategy::default(),
+            open_schema: CollectionInfo::open_schema_for(engine),
         }
     }
 }
@@ -213,6 +215,7 @@ impl<S: StorageEngine> SqlCatalog for LiteCatalog<S> {
                 primary: nodedb_types::PrimaryEngine::Document,
                 vector_primary: None,
                 partition_strategy: nodedb_types::PartitionStrategy::default(),
+                open_schema: CollectionInfo::open_schema_for(EngineType::DocumentStrict),
             }));
         }
 
@@ -234,6 +237,7 @@ impl<S: StorageEngine> SqlCatalog for LiteCatalog<S> {
                 primary: nodedb_types::PrimaryEngine::Document,
                 vector_primary: None,
                 partition_strategy: nodedb_types::PartitionStrategy::default(),
+                open_schema: CollectionInfo::open_schema_for(EngineType::Columnar),
             }));
         }
 
@@ -262,6 +266,7 @@ impl<S: StorageEngine> SqlCatalog for LiteCatalog<S> {
                 primary: nodedb_types::PrimaryEngine::Document,
                 vector_primary: None,
                 partition_strategy: nodedb_types::PartitionStrategy::default(),
+                open_schema: CollectionInfo::open_schema_for(EngineType::DocumentSchemaless),
             }));
         }
 

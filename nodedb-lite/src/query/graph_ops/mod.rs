@@ -5,9 +5,9 @@ pub mod fusion;
 pub mod labels;
 pub mod match_engine;
 pub mod stats;
+pub mod temporal;
 #[cfg(test)]
 mod test_support;
-pub mod temporal;
 pub mod traversal;
 
 #[cfg(test)]

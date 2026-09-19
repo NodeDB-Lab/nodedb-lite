@@ -4,6 +4,8 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
 
+use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarProfile};
+use nodedb_types::datetime::NdbDateTime;
 use nodedb_types::result::QueryResult;
 use nodedb_types::timeseries::MetricSample;
 use nodedb_types::value::Value;
@@ -55,7 +57,8 @@ pub fn ingest<S: StorageEngine>(
         seen.insert(key);
     }
 
-    let samples = decode_payload(payload, format)?;
+    let time_key = declared_time_key(engine, collection);
+    let samples = decode_payload(payload, format, time_key.as_deref())?;
     let count = samples.len() as u64;
 
     let _ = surrogates; // Lite TS engine assigns internal series IDs; surrogate
@@ -86,29 +89,135 @@ pub fn ingest<S: StorageEngine>(
     ))
 }
 
-/// Convert decoded `ParsedSample`s to column-ordered rows using the given
-/// column names. Columns named `"time"` or `"timestamp"` receive the
-/// millisecond timestamp; columns named `"value"` receive the numeric value;
-/// all other columns receive `Value::Null`.
+/// The `TIME_KEY` a timeseries-profile collection declares. `None` for a
+/// collection without a columnar schema or with a non-timeseries profile.
+pub fn declared_time_key<S: StorageEngine>(
+    engine: &LiteQueryEngine<S>,
+    collection: &str,
+) -> Option<String> {
+    match engine.columnar.profile(collection)? {
+        ColumnarProfile::Timeseries { time_key, .. } => Some(time_key),
+        ColumnarProfile::Plain | ColumnarProfile::Spatial { .. } => None,
+    }
+}
+
+/// Is `column` the time column of the row being ingested? Matches only the
+/// declared `TIME_KEY` when DDL exists; falls back to conventional names
+/// (`ts`/`timestamp`/`time`/`timestamp_ms`) for a collection with no DDL
+/// behind it.
+fn is_time_column(column: &str, declared: Option<&str>) -> bool {
+    match declared {
+        Some(time_key) => column.eq_ignore_ascii_case(time_key),
+        None => {
+            column.eq_ignore_ascii_case("ts")
+                || column.eq_ignore_ascii_case("timestamp")
+                || column.eq_ignore_ascii_case("time")
+                || column.eq_ignore_ascii_case("timestamp_ms")
+        }
+    }
+}
+
+/// The millisecond timestamp a time-column cell denotes: `None` when the cell
+/// is NULL (the ingest clock stamps the row), an error naming the column when
+/// the cell holds a value no timestamp can be read from.
+///
+/// Accepts the shapes Origin's Data Plane accepts: a typed instant of either
+/// kind, an integer or float millisecond count, and ISO-8601 / RFC 3339 text.
+fn time_cell_millis(cell: &Value, column: &str) -> Result<Option<i64>, LiteError> {
+    let refused = |literal: String| LiteError::BadRequest {
+        detail: format!("timeseries ingest: {column}={literal} is not a timestamp"),
+    };
+    match cell {
+        Value::Null => Ok(None),
+        Value::Integer(ms) => Ok(Some(*ms)),
+        Value::Float(f) => {
+            let whole = f.trunc();
+            if !whole.is_finite() || whole < i64::MIN as f64 || whole >= i64::MAX as f64 {
+                return Err(refused(f.to_string()));
+            }
+            Ok(Some(whole as i64))
+        }
+        Value::NaiveDateTime(at) | Value::DateTime(at) => Ok(Some(at.unix_millis())),
+        Value::String(s) => NdbDateTime::parse(s)
+            .map(|at| Some(at.unix_millis()))
+            .ok_or_else(|| refused(format!("\"{s}\""))),
+        Value::Bool(b) => Err(refused(b.to_string())),
+        Value::Decimal(d) => Err(refused(d.to_string())),
+        Value::Uuid(id) | Value::Ulid(id) => Err(refused(id.clone())),
+        Value::Bytes(_) => Err(refused("a byte string".into())),
+        Value::Array(_) | Value::Set(_) => Err(refused("an array".into())),
+        Value::Object(_) => Err(refused("an object".into())),
+        Value::Geometry(_) => Err(refused("a geometry".into())),
+        Value::Duration(_) => Err(refused("a duration".into())),
+        Value::Regex(_) => Err(refused("a regex".into())),
+        Value::Range { .. } => Err(refused("a range".into())),
+        Value::Record { .. } => Err(refused("a record reference".into())),
+        Value::ArrayCell(_) => Err(refused("an array cell".into())),
+        Value::Vector(_) => Err(refused("a vector".into())),
+        other => Err(refused(format!("{other:?}"))),
+    }
+}
+
+/// Convert decoded `ParsedSample`s to schema-ordered rows.
+///
+/// The declared time column (`time_key`, else a conventional name) receives
+/// the sample timestamp typed by its column kind: a `TIMESTAMP` column holds
+/// `Value::NaiveDateTime`, a `TIMESTAMPTZ` column `Value::DateTime`, any
+/// other kind the millisecond count. Columns named `value`/`val`/`v` receive
+/// the numeric value. Every other column is `Value::Null`.
 pub fn samples_to_rows(
     samples: &[ParsedSample],
-    col_names: &[String],
-) -> Vec<Vec<nodedb_types::value::Value>> {
+    columns: &[ColumnDef],
+    time_key: Option<&str>,
+) -> Result<Vec<Vec<Value>>, LiteError> {
     samples
         .iter()
         .map(|(_, _, sample)| {
-            col_names
+            columns
                 .iter()
-                .map(|name| match name.to_ascii_lowercase().as_str() {
-                    "time" | "timestamp" | "ts" | "timestamp_ms" => {
-                        nodedb_types::value::Value::Integer(sample.timestamp_ms)
+                .map(|col| {
+                    if is_time_column(&col.name, time_key) {
+                        return typed_time_value(sample.timestamp_ms, &col.column_type);
                     }
-                    "value" | "val" | "v" => nodedb_types::value::Value::Float(sample.value),
-                    _ => nodedb_types::value::Value::Null,
+                    Ok(match col.name.to_ascii_lowercase().as_str() {
+                        "value" | "val" | "v" => Value::Float(sample.value),
+                        _ => Value::Null,
+                    })
                 })
                 .collect()
         })
         .collect()
+}
+
+/// The stored form of a millisecond timestamp under a column of `col_type`.
+fn typed_time_value(timestamp_ms: i64, col_type: &ColumnType) -> Result<Value, LiteError> {
+    let instant = || {
+        NdbDateTime::from_millis(timestamp_ms).map_err(|e| LiteError::BadRequest {
+            detail: format!("timeseries ingest: {e}"),
+        })
+    };
+    match col_type {
+        ColumnType::Timestamp => instant().map(Value::NaiveDateTime),
+        ColumnType::Timestamptz => instant().map(Value::DateTime),
+        ColumnType::Int64
+        | ColumnType::Float64
+        | ColumnType::String
+        | ColumnType::Bool
+        | ColumnType::Bytes
+        | ColumnType::SystemTimestamp
+        | ColumnType::Decimal { .. }
+        | ColumnType::Geometry
+        | ColumnType::Vector(_)
+        | ColumnType::SparseVector
+        | ColumnType::Uuid
+        | ColumnType::Json
+        | ColumnType::Ulid
+        | ColumnType::Duration
+        | ColumnType::Array => Ok(Value::Integer(timestamp_ms)),
+        other => Err(LiteError::Unsupported {
+            detail: format!("column type {other} has no timeseries time-key form in Lite"),
+        }),
+    }
 }
 
 // ── Payload decoders ──────────────────────────────────────────────────────────
@@ -116,11 +225,15 @@ pub fn samples_to_rows(
 /// Decoded sample ready for `ingest_metric`.
 pub type ParsedSample = (String, Vec<(String, String)>, MetricSample);
 
-fn decode_payload(payload: &[u8], format: &str) -> Result<Vec<ParsedSample>, LiteError> {
+fn decode_payload(
+    payload: &[u8],
+    format: &str,
+    time_key: Option<&str>,
+) -> Result<Vec<ParsedSample>, LiteError> {
     match format {
         "ilp" => parse_ilp(payload),
-        "msgpack" => parse_msgpack(payload),
-        "samples" | "structured" => parse_structured(payload),
+        "msgpack" => parse_msgpack(payload, time_key),
+        "samples" | "structured" => parse_structured(payload, time_key),
         other => Err(LiteError::BadRequest {
             detail: format!(
                 "unknown timeseries ingest format '{other}'; expected ilp/msgpack/samples"
@@ -243,23 +356,28 @@ fn parse_numeric(v: &str) -> Option<f64> {
 
 /// Decode a msgpack-encoded array of sample objects.
 ///
-/// Expected shape: `[{metric, value, timestamp_ms?, tags?}, ...]`
-/// or a single object `{metric, value, timestamp_ms?, tags?}`.
-fn parse_msgpack(payload: &[u8]) -> Result<Vec<ParsedSample>, LiteError> {
+/// Expected shape: `[{metric, value, <time column>?, tags?}, ...]`
+/// or a single object `{metric, value, <time column>?, tags?}`. The time
+/// column is the declared `time_key`, else a conventional name; its cell
+/// takes any shape `time_cell_millis` reads.
+fn parse_msgpack(payload: &[u8], time_key: Option<&str>) -> Result<Vec<ParsedSample>, LiteError> {
     let top: Value = zerompk::from_msgpack(payload).map_err(|e| LiteError::Serialization {
         detail: format!("msgpack timeseries payload: {e}"),
     })?;
 
     match top {
-        Value::Array(items) => items.into_iter().map(decode_msgpack_sample).collect(),
-        obj @ Value::Object(_) => decode_msgpack_sample(obj).map(|s| vec![s]),
+        Value::Array(items) => items
+            .into_iter()
+            .map(|item| decode_msgpack_sample(item, time_key))
+            .collect(),
+        obj @ Value::Object(_) => decode_msgpack_sample(obj, time_key).map(|s| vec![s]),
         _ => Err(LiteError::Serialization {
             detail: "msgpack timeseries payload must be an object or array of objects".into(),
         }),
     }
 }
 
-fn decode_msgpack_sample(v: Value) -> Result<ParsedSample, LiteError> {
+fn decode_msgpack_sample(v: Value, time_key: Option<&str>) -> Result<ParsedSample, LiteError> {
     let Value::Object(map) = v else {
         return Err(LiteError::Serialization {
             detail: "each msgpack timeseries sample must be an object".into(),
@@ -277,11 +395,14 @@ fn decode_msgpack_sample(v: Value) -> Result<ParsedSample, LiteError> {
         _ => 0.0,
     };
 
-    let timestamp_ms = match map.get("timestamp_ms").or_else(|| map.get("ts")) {
-        Some(Value::Integer(i)) => *i,
-        Some(Value::Float(f)) => *f as i64,
-        _ => crate::runtime::now_millis_i64(),
-    };
+    let mut timestamp_ms: Option<i64> = None;
+    for (key, cell) in &map {
+        if is_time_column(key, time_key) {
+            timestamp_ms = time_cell_millis(cell, key)?;
+            break;
+        }
+    }
+    let timestamp_ms = timestamp_ms.unwrap_or_else(crate::runtime::now_millis_i64);
 
     let tags = match map.get("tags") {
         Some(Value::Object(t)) => t
@@ -315,7 +436,10 @@ fn decode_msgpack_sample(v: Value) -> Result<ParsedSample, LiteError> {
 ///
 /// This is the format produced by the CP when it can enumerate rows at
 /// planning time (SQL VALUES path). It falls back to msgpack object decode.
-fn parse_structured(payload: &[u8]) -> Result<Vec<ParsedSample>, LiteError> {
+fn parse_structured(
+    payload: &[u8],
+    time_key: Option<&str>,
+) -> Result<Vec<ParsedSample>, LiteError> {
     // Try as flat JSON array of MetricSample objects (CP-produced path with
     // surrogate pre-assignment). MetricSample is serde-only (not zerompk),
     // so try JSON decode first before falling back to msgpack object decode.
@@ -327,7 +451,7 @@ fn parse_structured(payload: &[u8]) -> Result<Vec<ParsedSample>, LiteError> {
     }
 
     // Fall back to object/array decode.
-    parse_msgpack(payload)
+    parse_msgpack(payload, time_key)
 }
 
 #[cfg(test)]
@@ -369,7 +493,7 @@ mod tests {
         obj.insert("value".into(), Value::Float(22.5));
         obj.insert("timestamp_ms".into(), Value::Integer(1_700_000_000_000));
         let bytes = zerompk::to_msgpack_vec(&Value::Object(obj)).expect("encode");
-        let samples = parse_msgpack(&bytes).expect("parse msgpack");
+        let samples = parse_msgpack(&bytes, None).expect("parse msgpack");
         assert_eq!(samples.len(), 1);
         let (metric, _, sample) = &samples[0];
         assert_eq!(metric, "temperature");
@@ -391,10 +515,113 @@ mod tests {
         ];
         // structured format falls back to JSON decode of Vec<MetricSample>.
         let bytes = sonic_rs::to_vec(&samples).expect("encode");
-        let parsed = parse_structured(&bytes).expect("parse structured");
+        let parsed = parse_structured(&bytes, None).expect("parse structured");
         assert_eq!(parsed.len(), 2);
         assert!((parsed[0].2.value - 1.0).abs() < 1e-9);
         assert!((parsed[1].2.value - 2.0).abs() < 1e-9);
+    }
+
+    /// `2024-01-01T00:00:00Z` in epoch milliseconds.
+    const NEW_YEAR_MS: i64 = 1_704_067_200_000;
+
+    fn sample_row(time_col: &str, cell: Value) -> Vec<u8> {
+        use std::collections::HashMap;
+        let mut obj: HashMap<String, Value> = HashMap::new();
+        obj.insert(time_col.into(), cell);
+        obj.insert("value".into(), Value::Float(1.0));
+        zerompk::to_msgpack_vec(&Value::Object(obj)).expect("encode")
+    }
+
+    /// A typed instant, an integer, or ISO-8601 text under the declared time
+    /// key all give the same millisecond timestamp.
+    #[test]
+    fn declared_time_key_reads_every_instant_shape() {
+        let at = NdbDateTime::from_millis(NEW_YEAR_MS).expect("instant");
+        for cell in [
+            Value::NaiveDateTime(at),
+            Value::DateTime(at),
+            Value::Integer(NEW_YEAR_MS),
+            Value::Float(NEW_YEAR_MS as f64 + 0.5),
+            Value::String("2024-01-01 00:00:00".into()),
+            Value::String("2024-01-01T00:00:00Z".into()),
+        ] {
+            let samples = parse_msgpack(&sample_row("time", cell.clone()), Some("time"))
+                .expect("parse msgpack");
+            assert_eq!(samples[0].2.timestamp_ms, NEW_YEAR_MS, "cell {cell:?}");
+        }
+    }
+
+    /// With DDL, only the declared time key is the time column: a `ts` cell
+    /// under a `captured_at` key is a plain field and the clock stamps the row.
+    #[test]
+    fn declared_time_key_overrides_conventional_names() {
+        let before = crate::runtime::now_millis_i64();
+        let samples = parse_msgpack(
+            &sample_row("ts", Value::Integer(NEW_YEAR_MS)),
+            Some("captured_at"),
+        )
+        .expect("parse msgpack");
+        assert!(samples[0].2.timestamp_ms >= before);
+    }
+
+    /// Without DDL the conventional names resolve, case-insensitively.
+    #[test]
+    fn conventional_time_names_resolve_without_ddl() {
+        for name in ["time", "Timestamp", "TS", "timestamp_ms"] {
+            let samples = parse_msgpack(&sample_row(name, Value::Integer(NEW_YEAR_MS)), None)
+                .expect("parse msgpack");
+            assert_eq!(samples[0].2.timestamp_ms, NEW_YEAR_MS, "name {name}");
+        }
+    }
+
+    /// A time cell no timestamp can be read from is an error naming the
+    /// column, never a row stamped with the clock.
+    #[test]
+    fn unreadable_time_cell_is_refused() {
+        for cell in [Value::String("not a date".into()), Value::Bool(true)] {
+            let err = parse_msgpack(&sample_row("time", cell), Some("time")).expect_err("refused");
+            assert!(
+                matches!(&err, LiteError::BadRequest { detail } if detail.contains("time=")),
+                "{err:?}"
+            );
+        }
+    }
+
+    /// Rows for outbound sync carry the timestamp typed by the time column's
+    /// declared kind.
+    #[test]
+    fn samples_to_rows_types_the_time_column() {
+        let samples = vec![(
+            "value".to_string(),
+            Vec::new(),
+            MetricSample {
+                timestamp_ms: NEW_YEAR_MS,
+                value: 2.5,
+            },
+        )];
+        let at = NdbDateTime::from_millis(NEW_YEAR_MS).expect("instant");
+        let columns = vec![
+            ColumnDef::required("time", ColumnType::Timestamp),
+            ColumnDef::nullable("host", ColumnType::String),
+            ColumnDef::nullable("value", ColumnType::Float64),
+        ];
+        let rows = samples_to_rows(&samples, &columns, Some("time")).expect("rows");
+        assert_eq!(
+            rows,
+            vec![vec![
+                Value::NaiveDateTime(at),
+                Value::Null,
+                Value::Float(2.5)
+            ]]
+        );
+
+        let tz_columns = vec![ColumnDef::required("at", ColumnType::Timestamptz)];
+        let rows = samples_to_rows(&samples, &tz_columns, Some("at")).expect("rows");
+        assert_eq!(rows, vec![vec![Value::DateTime(at)]]);
+
+        let int_columns = vec![ColumnDef::required("ts", ColumnType::Int64)];
+        let rows = samples_to_rows(&samples, &int_columns, None).expect("rows");
+        assert_eq!(rows, vec![vec![Value::Integer(NEW_YEAR_MS)]]);
     }
 
     #[test]

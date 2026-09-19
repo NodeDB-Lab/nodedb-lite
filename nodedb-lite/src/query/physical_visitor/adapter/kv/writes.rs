@@ -125,8 +125,15 @@ pub(super) fn delete<'a, S: StorageEngine + 'a>(
     collection: &QualifiedCollection,
     keys: &[Vec<u8>],
     rls_write_check: &RlsWriteCheck,
+    returning: &Option<ReturningSpec>,
+    rls_filters: &[u8],
 ) -> Result<LitePhysicalFut<'a>, LiteError> {
-    deny_policy("KvOp::Delete", None, &[], rls_write_check)?;
+    deny_policy(
+        "KvOp::Delete",
+        returning.as_ref(),
+        &[rls_filters],
+        rls_write_check,
+    )?;
     let col = collection.clone();
     let ks = keys.to_vec();
     Ok(Box::pin(async move {
@@ -262,19 +269,43 @@ pub(super) fn get_set<'a, S: StorageEngine + 'a>(
     }))
 }
 
+/// One `KvOp::FieldSet`: the fields to write and the policy slots the plan
+/// carries for them.
+pub(super) struct FieldSetArgs<'a> {
+    pub collection: &'a QualifiedCollection,
+    pub key: &'a [u8],
+    pub updates: &'a [(String, Vec<u8>)],
+    /// SQL `UPDATE` semantics: an absent key writes nothing and counts 0.
+    pub if_present: bool,
+    pub rls_write_check: &'a RlsWriteCheck,
+    pub returning: &'a Option<ReturningSpec>,
+    pub rls_filters: &'a [u8],
+}
+
 pub(super) fn field_set<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
-    collection: &QualifiedCollection,
-    key: &[u8],
-    updates: &[(String, Vec<u8>)],
-    rls_write_check: &RlsWriteCheck,
+    args: FieldSetArgs<'_>,
 ) -> Result<LitePhysicalFut<'a>, LiteError> {
-    deny_policy("KvOp::FieldSet", None, &[], rls_write_check)?;
+    let FieldSetArgs {
+        collection,
+        key,
+        updates,
+        if_present,
+        rls_write_check,
+        returning,
+        rls_filters,
+    } = args;
+    deny_policy(
+        "KvOp::FieldSet",
+        returning.as_ref(),
+        &[rls_filters],
+        rls_write_check,
+    )?;
     let col = collection.clone();
     let k = key.to_vec();
     let upd = updates.to_vec();
     Ok(Box::pin(async move {
-        kv_ops::writes::kv_field_set(engine, col.as_str(), &k, &upd).await
+        kv_ops::writes::kv_field_set(engine, col.as_str(), &k, &upd, if_present).await
     }))
 }
 

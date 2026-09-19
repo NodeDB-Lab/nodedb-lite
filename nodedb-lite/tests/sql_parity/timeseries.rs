@@ -7,11 +7,11 @@
 //! Parity contract for timeseries:
 //!   CREATE/DROP — both sides execute without error
 //!   INSERT      — acknowledged on both sides
-//!   SELECT      — Origin returns rows; Lite returns empty result (known gap)
+//!   SELECT      — both sides return the inserted rows
 //!
-//! The timeseries engine in Lite uses the columnar engine under the hood with
-//! a Timeseries profile. DML routing to the timeseries engine is not yet wired
-//! in execute_plan for 0.1.0. Documented in docs/lite-support-matrix.md.
+//! The timeseries engine in Lite is the columnar engine with a Timeseries
+//! profile: SQL INSERT routes through the columnar write path and the
+//! declared time column takes the planner's typed instant.
 
 use nodedb_client::NodeDb;
 

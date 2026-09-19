@@ -2,7 +2,7 @@
 //! TRUNCATE). Split out of `engine.rs` as a second inherent `impl` block to
 //! keep that file under the size limit; behavior is unchanged.
 
-use nodedb_sql::types::{EngineType, SqlValue};
+use nodedb_sql::types::{EngineType, SqlValue, WriteRoute};
 use nodedb_types::result::QueryResult;
 
 use super::engine::{LiteQueryEngine, sql_value_to_loro, sql_value_to_string};
@@ -10,33 +10,41 @@ use crate::error::LiteError;
 use crate::storage::engine::StorageEngine;
 
 impl<S: StorageEngine> LiteQueryEngine<S> {
+    /// `route` is the planner's `EngineRules` decision and picks the store
+    /// family: `ColumnarFamily` writes one columnar batch, `Document` writes
+    /// per row. Within `Document`, `engine` picks the strict store or the
+    /// CRDT store because Lite keeps those as separate engines.
     pub(super) async fn execute_insert(
         &self,
         collection: &str,
         engine: &EngineType,
+        route: WriteRoute,
         rows: &[Vec<(String, SqlValue)>],
         if_absent: bool,
         primary_key: Option<&str>,
     ) -> Result<QueryResult, LiteError> {
+        match route {
+            WriteRoute::ColumnarFamily => {
+                // `written` feeds outbound sync, which is compiled out on wasm32.
+                #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+                let (result, written) =
+                    super::columnar_dml::insert_columnar(&self.columnar, collection, rows)?;
+                // Durable outbound enqueue must run here (async) — the sync insert
+                // path cannot await. Covers the SQL-INSERT route to Origin sync.
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::sync::reconcile_outbound_enqueue(
+                    self.columnar.enqueue_outbound(collection, &written).await,
+                    "columnar insert (sql)",
+                    collection,
+                    "",
+                )?;
+                return Ok(result);
+            }
+            WriteRoute::Document => {}
+        }
         if *engine == EngineType::DocumentStrict {
             return super::strict_dml::insert_strict(&self.strict, collection, rows, if_absent)
                 .await;
-        }
-        if *engine == EngineType::Columnar {
-            // `written` feeds outbound sync, which is compiled out on wasm32.
-            #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
-            let (result, written) =
-                super::columnar_dml::insert_columnar(&self.columnar, collection, rows)?;
-            // Durable outbound enqueue must run here (async) — the sync insert
-            // path cannot await. Covers the SQL-INSERT route to Origin sync.
-            #[cfg(not(target_arch = "wasm32"))]
-            crate::sync::reconcile_outbound_enqueue(
-                self.columnar.enqueue_outbound(collection, &written).await,
-                "columnar insert (sql)",
-                collection,
-                "",
-            )?;
-            return Ok(result);
         }
         // CRDT / schemaless path.
         let mut crdt = self.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;

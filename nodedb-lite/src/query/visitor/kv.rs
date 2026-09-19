@@ -3,12 +3,15 @@
 
 use nodedb_physical::PhysicalTaskVisitor;
 use nodedb_physical::physical_plan::KvOp;
+use nodedb_physical::physical_plan::document::UpdateValue;
 use nodedb_sql::types::KvInsertIntent;
-use nodedb_sql::types_expr::SqlValue;
+use nodedb_sql::types_expr::{SqlExpr, SqlValue};
 use nodedb_types::Surrogate;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
+use crate::query::expr_convert::convert_sql_expr;
+use crate::query::filter_convert::sql_value_to_value;
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
 use crate::storage::engine::StorageEngine;
 
@@ -49,6 +52,27 @@ fn encode_kv_value(value_cols: &[(String, SqlValue)]) -> Result<Vec<u8>, LiteErr
     })
 }
 
+/// Convert one `ON CONFLICT DO UPDATE SET col = <expr>` assignment.
+///
+/// Mirrors Origin's `assignments_to_update_values`: a literal RHS
+/// pre-encodes to msgpack (`UpdateValue::Literal`); anything else (a
+/// column reference, arithmetic, `EXCLUDED.col`, a function call, ...)
+/// converts to a query-side expression (`UpdateValue::Expr`) that
+/// `kv_ops::writes::basic::kv_insert_on_conflict_update` evaluates via
+/// `query::on_conflict::apply_patch`.
+fn assignment_to_update_value(expr: &SqlExpr) -> Result<UpdateValue, LiteError> {
+    match expr {
+        SqlExpr::Literal(v) => {
+            let value = sql_value_to_value(v)?;
+            let bytes = zerompk::to_msgpack_vec(&value).map_err(|e| LiteError::Serialization {
+                detail: format!("encode ON CONFLICT literal: {e}"),
+            })?;
+            Ok(UpdateValue::Literal(bytes))
+        }
+        other => Ok(UpdateValue::Expr(convert_sql_expr(other)?)),
+    }
+}
+
 // ── KvInsert ─────────────────────────────────────────────────────────────────
 
 /// Lower `SqlPlan::KvInsert` → `KvOp::{Insert, InsertIfAbsent, Put, InsertOnConflictUpdate}`.
@@ -58,7 +82,7 @@ pub(super) fn lower_kv_insert<'a, S: StorageEngine + 'a>(
     entries: &[(SqlValue, Vec<(String, SqlValue)>)],
     ttl_secs: u64,
     intent: KvInsertIntent,
-    on_conflict_updates: &[(String, nodedb_sql::types_expr::SqlExpr)],
+    on_conflict_updates: &[(String, SqlExpr)],
 ) -> Result<LiteFut<'a>, LiteError> {
     if entries.is_empty() {
         return Ok(Box::pin(async move {
@@ -75,41 +99,23 @@ pub(super) fn lower_kv_insert<'a, S: StorageEngine + 'a>(
     let collection =
         nodedb_types::QualifiedCollection::new(nodedb_types::DatabaseId::DEFAULT, collection);
 
+    // Convert `ON CONFLICT DO UPDATE SET` assignments once for the whole
+    // statement, mirroring Origin's `assignments_to_update_values`: a
+    // literal RHS pre-encodes to msgpack, anything else carries the
+    // expression for `kv_insert_on_conflict_update` to evaluate against
+    // the existing row (`col`) and the incoming row (`EXCLUDED.col`).
+    let updates: Vec<(String, UpdateValue)> = on_conflict_updates
+        .iter()
+        .map(|(col, expr)| Ok((col.clone(), assignment_to_update_value(expr)?)))
+        .collect::<Result<Vec<_>, LiteError>>()?;
+
     // Pre-encode all entries so errors surface before the future is spawned.
     let mut ops: Vec<KvOp> = Vec::with_capacity(entries.len());
 
     for (key_val, value_cols) in entries {
         let key = sql_value_to_bytes(key_val);
         let value = encode_kv_value(value_cols)?;
-
-        // Build per-entry update values for `ON CONFLICT DO UPDATE`.
-        let updates: Vec<(
-            String,
-            nodedb_physical::physical_plan::document::UpdateValue,
-        )> = if !on_conflict_updates.is_empty() {
-            on_conflict_updates
-                .iter()
-                .map(|(col, _expr)| {
-                    // For Lite, expressions on conflict updates are evaluated
-                    // as the new value column for the same column name when
-                    // available, or treated as a constant null otherwise.
-                    // This mirrors the simple-update path in the physical visitor.
-                    let new_val_bytes = value_cols
-                        .iter()
-                        .find(|(c, _)| c == col)
-                        .map(|(_, sv)| sql_value_to_bytes(sv))
-                        .unwrap_or_default();
-                    (
-                        col.clone(),
-                        nodedb_physical::physical_plan::document::UpdateValue::Literal(
-                            new_val_bytes,
-                        ),
-                    )
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let updates = updates.clone();
 
         let op = match intent {
             KvInsertIntent::Insert => KvOp::Insert {
@@ -310,5 +316,62 @@ mod tests {
             .expect("lower");
         let r = fut.await.expect("execute");
         assert_eq!(r.rows_affected, 1);
+    }
+
+    /// `ON CONFLICT DO UPDATE SET n = n + 1` evaluates against the existing
+    /// row, not the incoming one. End-to-end through
+    /// `lower_kv_insert` → `KvOp::InsertOnConflictUpdate` → the KV engine.
+    #[tokio::test]
+    async fn test_kv_insert_on_conflict_expr_evaluates_against_existing_row() {
+        use nodedb_sql::types_expr::{BinaryOp, SqlExpr};
+
+        let engine = make_engine().await;
+        let seed = vec![(
+            SqlValue::String("k".to_string()),
+            vec![("n".to_string(), SqlValue::Int(1))],
+        )];
+        super::lower_kv_insert(&engine, "mykv5", &seed, 0, KvInsertIntent::Put, &[])
+            .expect("lower seed")
+            .await
+            .expect("seed");
+
+        let entries = vec![(
+            SqlValue::String("k".to_string()),
+            vec![("n".to_string(), SqlValue::Int(99))],
+        )];
+        let on_conflict = vec![(
+            "n".to_string(),
+            SqlExpr::BinaryOp {
+                left: Box::new(SqlExpr::Column {
+                    table: None,
+                    name: "n".to_string(),
+                }),
+                op: BinaryOp::Add,
+                right: Box::new(SqlExpr::Literal(SqlValue::Int(1))),
+            },
+        )];
+        let r = super::lower_kv_insert(
+            &engine,
+            "mykv5",
+            &entries,
+            0,
+            KvInsertIntent::Put,
+            &on_conflict,
+        )
+        .expect("lower")
+        .await
+        .expect("execute");
+        assert_eq!(r.rows_affected, 1);
+
+        let stored = crate::query::kv_ops::reads::kv_get(&engine, "mykv5", b"k", None)
+            .await
+            .expect("get");
+        let nodedb_types::value::Value::Bytes(bytes) = &stored.rows[0][1] else {
+            panic!("value column is not bytes");
+        };
+        let map: std::collections::HashMap<String, nodedb_types::value::Value> =
+            zerompk::from_msgpack(bytes).expect("decode row");
+        // `n + 1` against the existing row (1), not the incoming row (99).
+        assert_eq!(map.get("n"), Some(&nodedb_types::value::Value::Integer(2)));
     }
 }

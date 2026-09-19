@@ -6,12 +6,12 @@
 
 use std::sync::Arc;
 
+use nodedb_types::Surrogate;
 use nodedb_types::collection_config::VectorPrimaryConfig;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 use nodedb_types::vector_distance::DistanceMetric;
 use nodedb_types::vector_dtype::VectorStorageDtype;
-use nodedb_types::{Surrogate, VectorQuantization};
 
 use crate::engine::vector::state::ensure_hnsw;
 use crate::error::LiteError;
@@ -20,6 +20,7 @@ use crate::query::engine::LiteQueryEngine;
 use crate::storage::engine::StorageEngine;
 
 use super::adapter::LitePhysicalFut;
+use super::vector_direct::remove_live_node;
 
 /// Resolve a string metric name (from `SetParams::metric`) to `DistanceMetric`.
 pub(super) fn parse_metric(s: &str) -> Result<DistanceMetric, LiteError> {
@@ -183,7 +184,8 @@ where
     })
 }
 
-/// Delete a vector by surrogate string (idempotent — no-op if not found in HNSW).
+/// Delete a vector by surrogate: tombstone its live node and remove its
+/// payload row. Reports 1 when a row or node existed, else 0.
 pub(super) fn vector_delete_by_surrogate<'a, S>(
     engine: &'a LiteQueryEngine<S>,
     collection: String,
@@ -202,140 +204,23 @@ where
         } else {
             format!("{collection}:{field_name}")
         };
-        let internal_id = {
-            let id_map = vector_state.vector_id_map.lock_or_recover();
-            id_map
-                .iter()
-                .find(|(_, (did, _))| did == &doc_id)
-                .map(|(_, (_, iid))| *iid)
-        };
-        if let Some(iid) = internal_id {
-            let mut indices = vector_state.hnsw_indices.lock_or_recover();
-            if let Some(index) = indices.get_mut(&index_key) {
-                index.delete(iid);
-            }
-        }
-        {
+        let had_node = remove_live_node(&vector_state, &index_key, &doc_id);
+        let had_row = {
             let mut crdt = crdt.lock_or_recover();
-            crdt.delete(&collection, &doc_id)
-                .map_err(|e| LiteError::Storage {
-                    detail: format!("DeleteBySurrogate: CRDT delete failed: {e}"),
-                })?;
-        }
+            if crdt.exists(&collection, &doc_id) {
+                crdt.delete(&collection, &doc_id)
+                    .map_err(|e| LiteError::Storage {
+                        detail: format!("DeleteBySurrogate: CRDT delete failed: {e}"),
+                    })?;
+                true
+            } else {
+                false
+            }
+        };
         Ok(QueryResult {
             columns: vec![],
             rows: vec![],
-            rows_affected: 1,
-        })
-    })
-}
-
-/// Write first-insert config then insert into HNSW + CRDT (DirectUpsert path).
-/// `payload_indexes` have no Lite bitmap index path; they are intentionally ignored.
-pub(super) fn vector_direct_upsert<'a, S>(
-    engine: &'a LiteQueryEngine<S>,
-    collection: String,
-    field: String,
-    doc_id: String,
-    embedding: Vec<f32>,
-    quantization: VectorQuantization,
-    storage_dtype: VectorStorageDtype,
-) -> LitePhysicalFut<'a>
-where
-    S: StorageEngine + 'a,
-{
-    let vector_state = Arc::clone(&engine.vector_state);
-    let crdt = Arc::clone(&engine.crdt);
-    Box::pin(async move {
-        let index_key = if field.is_empty() {
-            collection.clone()
-        } else {
-            format!("{collection}:{field}")
-        };
-        let dim = embedding.len();
-        // Write first-insert config (quantization + storage_dtype) if absent.
-        {
-            let mut configs = vector_state.per_index_config.lock_or_recover();
-            configs
-                .entry(index_key.clone())
-                .or_insert_with(|| VectorPrimaryConfig {
-                    vector_field: field.clone(),
-                    dim: dim as u32,
-                    quantization,
-                    storage_dtype,
-                    ..VectorPrimaryConfig::default()
-                });
-        }
-        // Durable row first — see `vector_insert` above.
-        if !embedding.is_empty() {
-            let op = crate::engine::vector::durable::put_op(&index_key, &doc_id, &embedding);
-            vector_state
-                .storage
-                .batch_write(std::slice::from_ref(&op))
-                .await
-                .map_err(|e| LiteError::Storage {
-                    detail: format!("DirectUpsert: durable vector write failed: {e}"),
-                })?;
-        }
-        let internal_id = {
-            let dtype = {
-                let configs = vector_state.per_index_config.lock_or_recover();
-                configs
-                    .get(&index_key)
-                    .map(|c| c.storage_dtype)
-                    .unwrap_or(VectorStorageDtype::F32)
-            };
-            let mut indices = vector_state.hnsw_indices.lock_or_recover();
-            let index = ensure_hnsw(&mut indices, &index_key, dim, dtype);
-            let id_before = index.len() as u32;
-            index
-                .insert(embedding.clone())
-                .map_err(|e| LiteError::BadRequest {
-                    detail: format!("DirectUpsert: HNSW insert failed: {e}"),
-                })?;
-            id_before
-        };
-        {
-            let mut id_map = vector_state.vector_id_map.lock_or_recover();
-            id_map.insert(
-                format!("{index_key}:{internal_id}"),
-                (doc_id.clone(), internal_id),
-            );
-        }
-        match crate::engine::vector::sidecar::ensure_sidecar(&vector_state, &index_key) {
-            Ok(true) => {
-                let mut sidecars = vector_state.codec_sidecars.lock_or_recover();
-                if let Some(sidecar) = sidecars.get_mut(&index_key)
-                    && let Err(e) = sidecar.encode_and_insert(internal_id, &embedding)
-                {
-                    tracing::warn!(
-                        index_key = %index_key, id = internal_id, error = %e,
-                        "DirectUpsert: sidecar encode failed; row falls back to FP32"
-                    );
-                }
-            }
-            Ok(false) => {}
-            Err(e) => {
-                return Err(LiteError::BadRequest {
-                    detail: format!("DirectUpsert: sidecar install failed: {e}"),
-                });
-            }
-        }
-        {
-            let mut crdt = crdt.lock_or_recover();
-            crdt.upsert(
-                &collection,
-                &doc_id,
-                &[("embedding_dim", loro::LoroValue::I64(dim as i64))],
-            )
-            .map_err(|e| LiteError::Storage {
-                detail: format!("DirectUpsert: CRDT upsert failed: {e}"),
-            })?;
-        }
-        Ok(QueryResult {
-            columns: vec![],
-            rows: vec![],
-            rows_affected: 1,
+            rows_affected: u64::from(had_node || had_row),
         })
     })
 }

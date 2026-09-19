@@ -108,20 +108,17 @@ pub async fn update_strict<S: StorageEngine>(
         })?;
 
     // Convert assignments to a HashMap<col_name, Value>.
-    let updates: HashMap<String, Value> = assignments
-        .iter()
-        .filter_map(|(field, expr)| {
-            if let SqlExpr::Literal(val) = expr {
-                let col = schema.columns.iter().find(|c| c.name == *field);
-                let typed = col
-                    .map(|c| coerce_sql_value(val, &c.column_type))
-                    .unwrap_or_else(|| sql_value_to_value(val));
-                Some((field.clone(), typed))
-            } else {
-                None
-            }
-        })
-        .collect();
+    let mut updates: HashMap<String, Value> = HashMap::with_capacity(assignments.len());
+    for (field, expr) in assignments {
+        let SqlExpr::Literal(val) = expr else {
+            continue;
+        };
+        let typed = match schema.columns.iter().find(|c| c.name == *field) {
+            Some(c) => coerce_sql_value(val, &c.column_type)?,
+            None => sql_value_to_value(val)?,
+        };
+        updates.insert(field.clone(), typed);
+    }
 
     let mut affected: u64 = 0;
     for key in target_keys {

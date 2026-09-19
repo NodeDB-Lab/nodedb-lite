@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! QueryOp dispatch for the Lite physical visitor.
 //!
-//! Routes all 15 QueryOp variants. The distributed-only variants (`Exchange`,
+//! Routes all 16 QueryOp variants. The distributed-only variants (`Exchange`,
 //! `ProviderScan`, `PartialAggregateState`, `ShuffleJoinConsume`,
-//! `ShuffleAggregateConsume`) have no single-node equivalent and can never be
+//! `ShuffleAggregateConsume`, `PostProcess`, `SetOp`) have no single-node equivalent and can never be
 //! produced by Lite's own planner, so they return `LiteError::Unsupported`
 //! defensively if one ever reaches this dispatcher.
 
@@ -155,6 +155,14 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
         // the materialized body.
         QueryOp::PostProcess { .. } => Err(LiteError::Unsupported {
             detail: "PostProcess is a coordinator-resolved subquery tail; unsupported on the single-node Lite engine".into(),
+        }),
+
+        // Origin lowers a derived-table set operation to this op so the
+        // coordinator can gather sharded children. Lite executes
+        // `SqlPlan::{Union, Intersect, Except}` in the SQL visitor
+        // (`visitor/set_ops.rs`) and never builds one.
+        QueryOp::SetOp { .. } => Err(LiteError::Unsupported {
+            detail: "SetOp is a coordinator-resolved derived-table set operation; unsupported on the single-node Lite engine".into(),
         }),
 
         QueryOp::ShuffleJoinConsume { .. } => Err(LiteError::Unsupported {

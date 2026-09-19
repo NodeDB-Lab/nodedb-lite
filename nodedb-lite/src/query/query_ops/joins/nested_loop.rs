@@ -132,7 +132,8 @@ mod tests {
             field: "price".into(),
             op: FilterOp::Gt,
             value: Value::Integer(3),
-            ..Default::default()
+            clauses: Vec::new(),
+            expr: None,
         };
 
         let doc = Value::Object(merged);

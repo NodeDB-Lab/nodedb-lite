@@ -61,10 +61,14 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                 meta_ops::handle_rename_collection(engine, tid, old.as_str(), new.as_str()).await
             }))
         }
+        // Lite's convert probes its own per-engine stores (CRDT, strict) and
+        // decodes each with that store's schema, so the plan-level source
+        // mode carries nothing Lite acts on.
         MetaOp::ConvertCollection {
             collection,
             target_type,
             schema_json,
+            source_storage_mode: _source_storage_mode,
         } => {
             let col = collection.clone();
             let tt = target_type.clone();
