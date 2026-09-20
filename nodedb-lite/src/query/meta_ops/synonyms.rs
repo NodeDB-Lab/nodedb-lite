@@ -33,6 +33,7 @@ pub async fn handle_put_synonym_group<S: StorageEngine>(
         columns: vec!["name".into()],
         rows: vec![vec![Value::String(name)]],
         rows_affected: 1,
+        command: None,
     })
 }
 
@@ -51,6 +52,7 @@ pub async fn handle_delete_synonym_group<S: StorageEngine>(
         columns: vec!["name".into()],
         rows: vec![vec![Value::String(name.to_owned())]],
         rows_affected: 1,
+        command: None,
     })
 }
 

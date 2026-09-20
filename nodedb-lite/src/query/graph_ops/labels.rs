@@ -35,6 +35,7 @@ pub fn set_node_labels(
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: labels.len() as u64,
+        command: Some("UPDATE".into()),
     })
 }
 
@@ -56,6 +57,7 @@ pub fn remove_node_labels(
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: labels.len() as u64,
+        command: Some("UPDATE".into()),
     })
 }
 

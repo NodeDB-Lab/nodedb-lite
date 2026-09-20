@@ -6,7 +6,7 @@
 //!   (all method bodies delegate; adding a new SqlPlan variant is a hard
 //!   compile error here).
 //! - `basic`          — direct engine CRUD lowerings (scan, point_get, insert,
-//!   upsert, update, delete, truncate, constant_result, create_index,
+//!   upsert, update, delete, constant_result, create_index,
 //!   drop_index).
 //! - `vector_search`  — `vector_search` lowering + array prefilter resolution.
 //! - `text_search`    — `text_search` lowering (FtsQuery → TextOp dispatch).

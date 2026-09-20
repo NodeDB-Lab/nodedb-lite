@@ -56,6 +56,7 @@ pub async fn kv_field_set<S: StorageEngine>(
                 columns: vec![],
                 rows: vec![],
                 rows_affected: 0,
+                command: Some("UPDATE".into()),
             });
         }
         None => (0u64, std::collections::HashMap::new()),
@@ -85,6 +86,7 @@ pub async fn kv_field_set<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: 1,
+        command: Some("UPDATE".into()),
     })
 }
 
@@ -204,6 +206,7 @@ pub async fn kv_transfer<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: 2,
+        command: None,
     })
 }
 
@@ -266,6 +269,7 @@ pub async fn kv_transfer_item<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: 1,
+        command: None,
     })
 }
 

@@ -37,6 +37,7 @@ pub async fn kv_sorted_index_score<S: StorageEngine>(
             columns: vec!["score".into()],
             rows: vec![vec![Value::Null]],
             rows_affected: 0,
+            command: None,
         }),
         Some(bytes) => {
             if bytes.len() < 8 {
@@ -52,6 +53,7 @@ pub async fn kv_sorted_index_score<S: StorageEngine>(
                 columns: vec!["score".into()],
                 rows: vec![vec![Value::Float(score)]],
                 rows_affected: 0,
+                command: None,
             })
         }
     }
@@ -80,6 +82,7 @@ pub async fn kv_sorted_index_rank<S: StorageEngine>(
                 columns: vec!["rank".into()],
                 rows: vec![vec![Value::Null]],
                 rows_affected: 0,
+                command: None,
             });
         }
         Some(ref bytes) if bytes.len() >= 8 => {
@@ -128,6 +131,7 @@ pub async fn kv_sorted_index_rank<S: StorageEngine>(
         columns: vec!["rank".into()],
         rows: vec![vec![Value::Integer(rank as i64)]],
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -176,6 +180,7 @@ pub async fn kv_sorted_index_top_k<S: StorageEngine>(
         columns: vec!["primary_key".into(), "score".into()],
         rows,
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -261,6 +266,7 @@ pub async fn kv_sorted_index_range<S: StorageEngine>(
         columns: vec!["primary_key".into(), "score".into()],
         rows,
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -290,6 +296,7 @@ pub async fn kv_sorted_index_count<S: StorageEngine>(
         columns: vec!["count".into()],
         rows: vec![vec![Value::Integer(count)]],
         rows_affected: 0,
+        command: None,
     })
 }
 

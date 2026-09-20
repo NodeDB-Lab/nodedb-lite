@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! SQL-visitor lowering for the vector-primary SqlPlan variants:
-//! `VectorPrimaryInsert`, `VectorPrimaryDelete`, `VectorPrimaryUpdate`.
+//! `VectorPrimaryInsert`, `VectorPrimaryDelete`, `VectorPrimaryUpdate`,
+//! `VectorPrimaryTruncate`.
 //!
 //! Lite binds no surrogate to a primary key, so a row's identity is the
 //! text of its declared key: the insert carries it as `pk_bytes`, and a
@@ -66,11 +67,12 @@ fn row_identity(row: &VectorPrimaryRow, key_column: &str) -> Result<(Vec<u8>, Ve
     Ok((doc_id.into_bytes(), encode_payload(&fields)?))
 }
 
-fn rows_affected(n: u64) -> QueryResult {
+fn rows_affected(n: u64, command: &'static str) -> QueryResult {
     QueryResult {
         columns: vec!["rows_affected".to_string()],
         rows: vec![vec![Value::Integer(n as i64)]],
         rows_affected: n,
+        command: Some(command.into()),
     }
 }
 
@@ -154,13 +156,35 @@ pub(super) fn lower_vector_primary_insert<'a, S: StorageEngine + 'a>(
 
     Ok(Box::pin(async move {
         let mut affected = 0u64;
+        let mut verb: Option<&'static str> = None;
         for op in ops {
             let mut phys = LiteDataPlaneVisitor { engine };
             let result = phys.vector(&op)?.await?;
             affected += result.rows_affected;
+            // `UPSERT` (no ON CONFLICT UPDATE arm) is the same verb on every
+            // row; `INSERT`/`UPDATE` (per-row ON CONFLICT outcome) fold to
+            // `INSERT` on a mix, matching Postgres's `INSERT 0 n` tag.
+            if let Some(op_verb) = result.command.as_deref() {
+                verb = Some(match (verb, op_verb) {
+                    (None, v) => static_verb(v),
+                    (Some("INSERT"), "UPDATE") | (Some("UPDATE"), "INSERT") => "INSERT",
+                    (Some(prev), _) => prev,
+                });
+            }
         }
-        Ok(rows_affected(affected))
+        Ok(rows_affected(affected, verb.unwrap_or("INSERT")))
     }))
+}
+
+/// `result.command` is a heap `String`; the fold only ever compares it
+/// against a handful of static verb literals, so this maps to a `'static`
+/// copy instead of cloning the string each row.
+fn static_verb(v: &str) -> &'static str {
+    match v {
+        "UPSERT" => "UPSERT",
+        "UPDATE" => "UPDATE",
+        _ => "INSERT",
+    }
 }
 
 // ── VectorPrimaryDelete / VectorPrimaryUpdate ─────────────────────────────────
@@ -212,7 +236,30 @@ pub(super) fn lower_vector_primary_delete<'a, S: StorageEngine + 'a>(
     Ok(Box::pin(async move {
         let mut phys = LiteDataPlaneVisitor { engine };
         let result = phys.vector(&op)?.await?;
-        Ok(rows_affected(result.rows_affected))
+        Ok(rows_affected(result.rows_affected, "DELETE"))
+    }))
+}
+
+/// Lower `SqlPlan::VectorPrimaryTruncate` to `VectorOp::DirectTruncate`.
+/// The physical op answers with the bare `TRUNCATE` tag and applies
+/// `RESTART IDENTITY` itself.
+pub(super) fn lower_vector_primary_truncate<'a, S: StorageEngine + 'a>(
+    engine: &'a LiteQueryEngine<S>,
+    collection: &str,
+    field: &str,
+    restart_identity: bool,
+) -> Result<LiteFut<'a>, LiteError> {
+    let op = VectorOp::DirectTruncate {
+        collection: nodedb_types::QualifiedCollection::new(
+            nodedb_types::DatabaseId::DEFAULT,
+            collection,
+        ),
+        field: field.to_string(),
+        restart_identity,
+    };
+    Ok(Box::pin(async move {
+        let mut phys = LiteDataPlaneVisitor { engine };
+        phys.vector(&op)?.await
     }))
 }
 
@@ -259,7 +306,7 @@ pub(super) fn lower_vector_primary_update<'a, S: StorageEngine + 'a>(
     Ok(Box::pin(async move {
         let mut phys = LiteDataPlaneVisitor { engine };
         let result = phys.vector(&op)?.await?;
-        Ok(rows_affected(result.rows_affected))
+        Ok(rows_affected(result.rows_affected, "UPDATE"))
     }))
 }
 
@@ -545,6 +592,55 @@ mod tests {
         assert!(stored_field(&engine, "b", "id").is_none());
         assert!(stored_field(&engine, "a", "id").is_some());
         assert_eq!(live_nodes(&engine), 1);
+    }
+
+    #[tokio::test]
+    async fn truncate_empties_the_collection_and_restarts_its_sequences() {
+        use crate::sequence::LiteSequenceDef;
+        let engine = test_engine().await;
+        engine.sequences.register(LiteSequenceDef {
+            name: format!("{COLLECTION}_id_seq"),
+            start_value: 1,
+            increment: 1,
+            min_value: 1,
+            max_value: i64::MAX,
+            cycle: false,
+        });
+        engine
+            .sequences
+            .nextval(&format!("{COLLECTION}_id_seq"))
+            .expect("nextval");
+        let rows: Vec<VectorPrimaryRow> = (1..=3)
+            .map(|i| row(&format!("r{i}"), vec![i as f32 * 0.1, i as f32 * 0.2], &[]))
+            .collect();
+        insert(&engine, &rows, VectorPrimaryInsertIntent::Insert, &[])
+            .await
+            .expect("insert");
+
+        let qr = lower_vector_primary_truncate(&engine, COLLECTION, FIELD, true)
+            .expect("lower")
+            .await
+            .expect("truncate");
+        assert_eq!(qr.rows_affected, 0);
+        assert_eq!(qr.command.as_deref(), Some("TRUNCATE"));
+        assert!(qr.columns.is_empty() && qr.rows.is_empty());
+        assert_eq!(live_nodes(&engine), 0);
+        assert!(stored_field(&engine, "r1", "id").is_none());
+        assert_eq!(
+            engine
+                .sequences
+                .nextval(&format!("{COLLECTION}_id_seq"))
+                .expect("nextval"),
+            1,
+            "RESTART IDENTITY makes the start value the next value"
+        );
+
+        let again = vec![row("z", vec![0.5, 0.5], &[])];
+        insert(&engine, &again, VectorPrimaryInsertIntent::Insert, &[])
+            .await
+            .expect("insert after truncate");
+        assert_eq!(live_nodes(&engine), 1);
+        assert!(stored_field(&engine, "z", "id").is_some());
     }
 
     #[tokio::test]

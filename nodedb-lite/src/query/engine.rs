@@ -21,6 +21,7 @@ use crate::engine::spatial::SpatialIndexManager;
 use crate::engine::strict::StrictEngine;
 use crate::engine::vector::VectorState;
 use crate::error::LiteError;
+use crate::nodedb::KvLocalState;
 use crate::sequence::LiteSequenceRegistry;
 use crate::storage::engine::StorageEngine;
 
@@ -51,6 +52,9 @@ pub struct LiteQueryEngine<S: StorageEngine> {
     /// SELECT list. Definitions are registered through
     /// `LiteQueryEngine::sequences`; counters live in memory.
     pub(crate) sequences: Arc<LiteSequenceRegistry>,
+    /// The public KV API's write buffer and read cache. A SQL-path `TRUNCATE`
+    /// forgets what they hold for the cleared collection.
+    pub(in crate::query) kv_local: Arc<KvLocalState>,
     /// Durable outbound queue for FTS sync — `None` when sync is disabled.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fts_outbound: Option<Arc<crate::sync::FtsOutbound<S>>>,
@@ -74,6 +78,7 @@ pub struct LiteQueryEngineParams<S: StorageEngine> {
     pub spatial: Arc<Mutex<SpatialIndexManager>>,
     pub csr: Arc<Mutex<HashMap<String, CsrIndex>>>,
     pub governor: Arc<MemoryGovernor>,
+    pub kv_local: Arc<KvLocalState>,
 }
 
 impl<S: StorageEngine> LiteQueryEngine<S> {
@@ -94,6 +99,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             csr: params.csr,
             governor: params.governor,
             sequences: Arc::new(LiteSequenceRegistry::new()),
+            kv_local: params.kv_local,
             #[cfg(not(target_arch = "wasm32"))]
             fts_outbound: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -151,12 +157,21 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             crate::nodedb::collection::ddl::load_persisted_collection_metas(self.storage.as_ref())
                 .await
                 .unwrap_or_default();
+        let array_names: Vec<String> = self
+            .array_state
+            .lock()
+            .await
+            .arrays
+            .keys()
+            .cloned()
+            .collect();
         let catalog = LiteCatalog::new(
             Arc::clone(&self.crdt),
             Arc::clone(&self.strict),
             Arc::clone(&self.columnar),
             metas,
-        );
+        )
+        .with_arrays(array_names);
 
         let sql_params: Vec<nodedb_sql::ParamValue> = params.iter().map(value_to_param).collect();
 
@@ -167,11 +182,13 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         }
         .map_err(|e| LiteError::Query(format!("SQL plan: {e}")))?;
 
-        if plans.is_empty() {
-            return Ok(QueryResult::empty());
+        // One statement can plan to several units: `TRUNCATE a, b` yields one
+        // plan per collection. Every unit runs; the last result is the answer.
+        let mut result = QueryResult::empty();
+        for plan in &plans {
+            result = self.execute_plan(plan).await?;
         }
-
-        self.execute_plan(&plans[0]).await
+        Ok(result)
     }
 
     pub(in crate::query) async fn execute_plan(
@@ -192,6 +209,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             columns: columns.to_vec(),
             rows: vec![row],
             rows_affected: 0,
+            command: None,
         })
     }
 
@@ -245,6 +263,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                         columns: vec!["id".into(), "document".into()],
                         rows,
                         rows_affected: 0,
+                        command: None,
                     });
                 }
 
@@ -262,6 +281,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                     columns: vec!["id".into(), "document".into()],
                     rows,
                     rows_affected: 0,
+                    command: None,
                 })
             }
             EngineType::DocumentStrict => {
@@ -277,6 +297,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                     columns,
                     rows,
                     rows_affected: 0,
+                    command: None,
                 })
             }
             EngineType::Columnar => {
@@ -292,6 +313,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                     columns,
                     rows,
                     rows_affected: 0,
+                    command: None,
                 })
             }
             _ => Ok(QueryResult::empty()),
@@ -316,6 +338,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                             columns: vec!["id".into(), "document".into()],
                             rows: vec![vec![Value::String(key_str), Value::String(doc_str)]],
                             rows_affected: 0,
+                            command: None,
                         })
                     }
                     None => Ok(QueryResult::empty()),
@@ -345,11 +368,13 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                         columns,
                         rows: vec![values],
                         rows_affected: 0,
+                        command: None,
                     }),
                     None => Ok(QueryResult {
                         columns,
                         rows: Vec::new(),
                         rows_affected: 0,
+                        command: None,
                     }),
                 }
             }
@@ -542,5 +567,14 @@ pub(crate) async fn test_engine() -> LiteQueryEngine<crate::PagedbStorageMem> {
         spatial,
         csr: Arc::new(Mutex::new(HashMap::new())),
         governor,
+        kv_local: test_kv_local(),
     })
+}
+
+/// A KV write buffer and cache for engines built outside `NodeDbLite`.
+#[cfg(test)]
+pub(crate) fn test_kv_local() -> Arc<KvLocalState> {
+    Arc::new(KvLocalState::new(
+        std::num::NonZeroUsize::new(64).expect("non-zero"),
+    ))
 }

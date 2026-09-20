@@ -43,6 +43,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                     "column added to strict collection '{table_name}'"
                 ))]],
                 rows_affected: 0,
+                command: None,
             });
         }
 
@@ -54,6 +55,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                     "column added to columnar collection '{table_name}'"
                 ))]],
                 rows_affected: 0,
+                command: None,
             });
         }
 

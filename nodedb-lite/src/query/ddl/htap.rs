@@ -46,6 +46,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 "materialized view '{target}' created from '{source}'"
             ))]],
             rows_affected: 0,
+            command: None,
         })
     }
 
@@ -72,6 +73,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 "materialized view '{target}' dropped"
             ))]],
             rows_affected: 0,
+            command: None,
         })
     }
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Dispatch logic for all 25 `VectorOp` variants on the Lite executor.
+//! Dispatch logic for every `VectorOp` variant on the Lite executor.
 //!
 //! Variants that Lite can serve are wired to helpers in `vector_write`,
 //! `vector_direct`, and `vector_sparse`; variants that require Origin-only
@@ -23,8 +23,8 @@ use crate::storage::engine::StorageEngine;
 use super::adapter::LitePhysicalFut;
 use super::adapter::policy::deny_policy;
 use super::vector_direct::{
-    DirectUpdateArgs, DirectWriteArgs, vector_direct_delete, vector_direct_update,
-    vector_direct_write,
+    DirectUpdateArgs, DirectWriteArgs, vector_direct_delete, vector_direct_truncate,
+    vector_direct_update, vector_direct_write,
 };
 use super::vector_sparse::{sparse_delete, sparse_insert, sparse_search};
 use super::vector_write::{
@@ -109,6 +109,7 @@ where
                     columns,
                     rows,
                     rows_affected: 0,
+                    command: None,
                 })
             }))
         }
@@ -355,6 +356,21 @@ where
             )
         }
 
+        VectorOp::DirectTruncate {
+            collection,
+            field,
+            restart_identity,
+        } => {
+            let col = collection.as_str().to_string();
+            let restart = *restart_identity;
+            let fut = vector_direct_truncate(engine, col.clone(), field.clone());
+            Ok(Box::pin(async move {
+                let result = fut.await?;
+                crate::query::truncate::restart_identity(engine, &col, restart);
+                Ok(result)
+            }))
+        }
+
         // Resolve-before-propose splits a governed write into a read-only
         // resolution and a Raft-replicated apply. Lite has no Raft and no
         // write policy; it applies the direct ops above in one step.
@@ -546,6 +562,7 @@ mod tests {
             spatial,
             csr: Arc::new(Mutex::new(std::collections::HashMap::new())),
             governor,
+            kv_local: crate::query::engine::test_kv_local(),
         })
     }
 

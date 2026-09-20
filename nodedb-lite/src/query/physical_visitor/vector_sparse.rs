@@ -39,6 +39,7 @@ where
             columns: Vec::new(),
             rows: Vec::new(),
             rows_affected: 1,
+            command: None,
         })
     }))
 }
@@ -71,6 +72,7 @@ where
             columns: vec!["id".to_string(), "score".to_string()],
             rows,
             rows_affected: 0,
+            command: None,
         })
     }))
 }
@@ -95,6 +97,7 @@ where
             columns: Vec::new(),
             rows: Vec::new(),
             rows_affected: u64::from(removed),
+            command: None,
         })
     })
 }

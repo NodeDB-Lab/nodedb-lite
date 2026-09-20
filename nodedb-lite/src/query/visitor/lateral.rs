@@ -211,6 +211,7 @@ mod tests {
             spatial,
             csr: Arc::new(Mutex::new(std::collections::HashMap::new())),
             governor,
+            kv_local: crate::query::engine::test_kv_local(),
         })
     }
 

@@ -54,6 +54,7 @@ impl NodeDbLiteWasm {
             "columns": result.columns,
             "rows": result.rows,
             "rows_affected": result.rows_affected,
+            "command": result.command,
         });
 
         serde_wasm_bindgen::to_value(&json).map_err(|e| JsError::new(&e.to_string()))

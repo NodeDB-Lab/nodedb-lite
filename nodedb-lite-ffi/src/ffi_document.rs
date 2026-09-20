@@ -222,6 +222,7 @@ pub unsafe extern "C" fn nodedb_execute_sql(
                     "columns": result.columns,
                     "rows": result.rows,
                     "rows_affected": result.rows_affected,
+                    "command": result.command,
                 });
                 let json_str = serde_json::to_string(&json).unwrap_or_else(|_| "{}".into());
                 unsafe { write_c_string(out_json, json_str) }

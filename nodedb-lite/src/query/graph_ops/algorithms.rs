@@ -51,6 +51,7 @@ pub fn run_algo(
         columns,
         rows,
         rows_affected: 0,
+        command: None,
     })
 }
 

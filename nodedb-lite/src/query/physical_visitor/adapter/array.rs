@@ -69,6 +69,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                     columns: vec![],
                     rows: vec![],
                     rows_affected: 1,
+                    command: None,
                 })
             }))
         }
@@ -107,6 +108,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                     columns: vec![],
                     rows: vec![],
                     rows_affected,
+                    command: Some("INSERT".into()),
                 })
             }))
         }
@@ -135,6 +137,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                     columns: vec![],
                     rows: vec![],
                     rows_affected,
+                    command: Some("DELETE".into()),
                 })
             }))
         }
@@ -193,6 +196,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                     columns,
                     rows,
                     rows_affected: 0,
+                    command: None,
                 })
             }))
         }
@@ -208,6 +212,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                     columns: vec![],
                     rows: vec![],
                     rows_affected: 0,
+                    command: None,
                 })
             }))
         }
@@ -223,6 +228,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                     columns: vec![],
                     rows: vec![],
                     rows_affected: 1,
+                    command: None,
                 })
             }))
         }
@@ -352,6 +358,7 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                     columns: vec!["bitmap".to_string()],
                     rows: vec![vec![nodedb_types::value::Value::Bytes(bitmap_bytes)]],
                     rows_affected: 0,
+                    command: None,
                 })
             }))
         }

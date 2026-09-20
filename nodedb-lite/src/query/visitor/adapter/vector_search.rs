@@ -178,6 +178,7 @@ pub(super) fn lower_vector_search<'a, S: StorageEngine + 'a>(
             columns,
             rows,
             rows_affected: 0,
+            command: None,
         })
     }))
 }

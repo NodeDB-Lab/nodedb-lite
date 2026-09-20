@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Lowerings for direct-to-engine CRUD ops: `Scan`, `PointGet`, `Insert`,
-//! `Upsert`, `Update`, `Delete`, `Truncate`, `ConstantResult`, `CreateIndex`,
+//! `Upsert`, `Update`, `Delete`, `ConstantResult`, `CreateIndex`,
 //! `DropIndex`. These dispatch straight to `LiteQueryEngine` methods or the
 //! `LiteDataPlaneVisitor` without intermediate planning helpers.
 
@@ -132,16 +132,6 @@ pub(super) fn lower_delete<'a, S: StorageEngine + 'a>(
         engine
             .execute_delete(&collection, &engine_type, &target_keys)
             .await
-    }))
-}
-
-pub(super) fn lower_truncate<'a, S: StorageEngine + 'a>(
-    engine: &'a LiteQueryEngine<S>,
-    collection: &str,
-) -> Result<LiteFut<'a>, LiteError> {
-    let collection = collection.to_string();
-    Ok(Box::pin(async move {
-        engine.execute_truncate(&collection).await
     }))
 }
 

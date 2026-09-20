@@ -50,6 +50,7 @@ pub fn insert_columnar<S: StorageEngine>(
             columns: Vec::new(),
             rows: Vec::new(),
             rows_affected: affected,
+            command: Some("INSERT".into()),
         },
         written,
     ))

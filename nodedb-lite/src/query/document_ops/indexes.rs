@@ -38,6 +38,7 @@ pub async fn register<S: StorageEngine>(
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -78,6 +79,7 @@ pub async fn drop_index<S: StorageEngine>(
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: count,
+        command: None,
     })
 }
 
@@ -147,6 +149,7 @@ pub async fn backfill_index<S: StorageEngine>(
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: indexed,
+        command: None,
     })
 }
 

@@ -56,6 +56,7 @@ pub(super) fn lower_union<'a, S: StorageEngine + 'a>(
             columns,
             rows: all_rows,
             rows_affected: 0,
+            command: None,
         })
     }))
 }
@@ -99,6 +100,7 @@ pub(super) fn lower_intersect<'a, S: StorageEngine + 'a>(
                 columns,
                 rows: output,
                 rows_affected: 0,
+                command: None,
             })
         } else {
             // INTERSECT DISTINCT
@@ -115,6 +117,7 @@ pub(super) fn lower_intersect<'a, S: StorageEngine + 'a>(
                 columns,
                 rows: output,
                 rows_affected: 0,
+                command: None,
             })
         }
     }))
@@ -158,6 +161,7 @@ pub(super) fn lower_except<'a, S: StorageEngine + 'a>(
                 columns,
                 rows: output,
                 rows_affected: 0,
+                command: None,
             })
         } else {
             // EXCEPT DISTINCT
@@ -174,6 +178,7 @@ pub(super) fn lower_except<'a, S: StorageEngine + 'a>(
                 columns,
                 rows: output,
                 rows_affected: 0,
+                command: None,
             })
         }
     }))

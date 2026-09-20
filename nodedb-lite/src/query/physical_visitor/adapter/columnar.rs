@@ -158,6 +158,19 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             }))
         }
 
+        ColumnarOp::Truncate {
+            collection,
+            restart_identity,
+        } => {
+            let col = collection.clone();
+            let restart = *restart_identity;
+            Ok(Box::pin(async move {
+                let result = columnar_ops::writes::truncate(engine, col.as_str()).await?;
+                crate::query::truncate::restart_identity(engine, col.as_str(), restart);
+                Ok(result)
+            }))
+        }
+
         ColumnarOp::MaterializeScan {
             collection,
             cursor,

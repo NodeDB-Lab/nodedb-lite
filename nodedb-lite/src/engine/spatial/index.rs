@@ -105,6 +105,40 @@ impl SpatialIndexManager {
         }
     }
 
+    /// Remove every entry of every R-tree `collection` owns. Each tree stays
+    /// registered under its `(collection, field)` key, so the next checkpoint
+    /// writes it out empty instead of leaving a stale blob behind. Returns
+    /// the `(field, doc_id)` of every entry removed.
+    pub fn truncate_collection(&mut self, collection: &str) -> Vec<(String, String)> {
+        let fields: Vec<String> = self
+            .indices
+            .keys()
+            .filter(|(coll, _)| coll == collection)
+            .map(|(_, field)| field.clone())
+            .collect();
+        let mut removed = Vec::new();
+        for field in fields {
+            let key = (collection.to_string(), field.clone());
+            let Some(tree) = self.indices.get_mut(&key) else {
+                continue;
+            };
+            for entry in tree.entries() {
+                if let Some((_, doc_id)) = self.entry_to_doc.get(&entry.id) {
+                    removed.push((field.clone(), doc_id.clone()));
+                }
+            }
+            *tree = RTree::new(self.memory.clone());
+        }
+        self.doc_to_entry.retain(|(coll, _), entry_id| {
+            let owned = coll == collection;
+            if owned {
+                self.entry_to_doc.remove(entry_id);
+            }
+            !owned
+        });
+        removed
+    }
+
     /// Range search: find all document entry IDs whose bbox intersects the query.
     pub fn search(&self, collection: &str, field: &str, query: &BoundingBox) -> Vec<&RTreeEntry> {
         let key = (collection.to_string(), field.to_string());
@@ -317,6 +351,36 @@ mod tests {
             &BoundingBox::new(9.0, 19.0, 12.0, 22.0),
         );
         assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn truncate_collection_empties_only_that_collection() {
+        let mut mgr = SpatialIndexManager::new(test_memory());
+        mgr.index_document("places", "loc", "doc1", &Geometry::point(10.0, 20.0));
+        mgr.index_document("places", "loc", "doc2", &Geometry::point(11.0, 21.0));
+        mgr.index_document("other", "loc", "doc9", &Geometry::point(10.0, 20.0));
+
+        let mut removed = mgr.truncate_collection("places");
+        removed.sort();
+        assert_eq!(
+            removed,
+            vec![
+                ("loc".to_string(), "doc1".to_string()),
+                ("loc".to_string(), "doc2".to_string())
+            ]
+        );
+        let bbox = BoundingBox::new(9.0, 19.0, 12.0, 22.0);
+        assert!(mgr.search("places", "loc", &bbox).is_empty());
+        assert_eq!(mgr.search("other", "loc", &bbox).len(), 1);
+        assert_eq!(
+            mgr.collection_count(),
+            2,
+            "the emptied tree stays registered"
+        );
+        assert!(mgr.doc_id_for_entry(1).is_none());
+
+        mgr.index_document("places", "loc", "doc3", &Geometry::point(10.5, 20.5));
+        assert_eq!(mgr.search("places", "loc", &bbox).len(), 1);
     }
 
     #[test]

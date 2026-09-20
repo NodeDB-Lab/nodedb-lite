@@ -2,6 +2,7 @@
 mod auto_compact;
 mod auto_flush;
 mod flush;
+pub mod kv_local;
 mod open;
 mod ops;
 mod rebuild;

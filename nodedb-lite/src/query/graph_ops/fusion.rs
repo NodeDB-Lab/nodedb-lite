@@ -208,6 +208,7 @@ pub async fn rag_fusion<S: StorageEngine>(
         columns: vec!["surrogate".to_string(), "score".to_string()],
         rows,
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -253,6 +254,7 @@ async fn pure_vector_path<S: StorageEngine>(
         columns: vec!["surrogate".to_string(), "score".to_string()],
         rows,
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -319,6 +321,7 @@ mod tests {
             spatial,
             csr: Arc::new(Mutex::new(std::collections::HashMap::new())),
             governor,
+            kv_local: crate::query::engine::test_kv_local(),
         })
     }
 

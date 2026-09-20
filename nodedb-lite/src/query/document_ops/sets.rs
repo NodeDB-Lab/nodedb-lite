@@ -220,6 +220,7 @@ pub async fn materialize_scan<S: StorageEngine>(
         columns: vec!["payload".into()],
         rows: vec![vec![Value::Bytes(payload)]],
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -272,6 +273,7 @@ pub async fn update_from_join<S: StorageEngine>(
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: affected_n,
+        command: Some("UPDATE".into()),
     })
 }
 
@@ -381,6 +383,7 @@ pub async fn merge<S: StorageEngine>(
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: affected_n,
+        command: Some("MERGE".into()),
     })
 }
 

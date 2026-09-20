@@ -7,6 +7,7 @@ mod lifecycle;
 mod query;
 mod retention;
 mod sync;
+mod truncate;
 mod wal;
 
 pub use compaction::{CompactionResult, MaintenanceResult};

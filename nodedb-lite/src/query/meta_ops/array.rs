@@ -62,5 +62,6 @@ pub async fn handle_alter_array<S: StorageEngine>(
         columns: vec!["array_id".into()],
         rows: vec![vec![Value::String(array_id.to_owned())]],
         rows_affected: 1,
+        command: None,
     })
 }

@@ -190,6 +190,7 @@ pub fn spatial_scan<S: StorageEngine>(
         columns,
         rows,
         rows_affected: 0,
+        command: None,
     })
 }
 

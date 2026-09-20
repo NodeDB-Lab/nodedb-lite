@@ -222,6 +222,7 @@ pub async fn aggregate<S: StorageEngine>(
                 columns,
                 rows: vec![row],
                 rows_affected: 0,
+                command: None,
             })
         }
         Some(_) => {
@@ -245,6 +246,7 @@ pub async fn aggregate<S: StorageEngine>(
                 columns,
                 rows,
                 rows_affected: 0,
+                command: None,
             })
         }
     }

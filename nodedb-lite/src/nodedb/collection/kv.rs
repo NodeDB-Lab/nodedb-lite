@@ -127,7 +127,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         // Scope all mutex work so no guard is live at the await point.
         let should_flush = {
-            let mut buf = self.kv_write_buf.lock_or_recover();
+            let mut buf = self.kv_local.write_buf.lock_or_recover();
             buf.overlay.insert(rkey.clone(), Some(encoded.clone()));
             buf.ops.push(WriteOp::Put {
                 ns: Namespace::Kv,
@@ -139,7 +139,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         // Invalidate any cached value for this key so subsequent reads go to storage.
         {
-            self.kv_cache.lock_or_recover().pop(&rkey);
+            self.kv_local.cache.lock_or_recover().pop(&rkey);
         }
 
         if should_flush {
@@ -176,7 +176,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // Acquire load of a length counter raced with a concurrent writer.
         // Scope the guard so it is not live at any await point.
         let overlay_result: Option<Option<Vec<u8>>> = {
-            let buf = self.kv_write_buf.lock_or_recover();
+            let buf = self.kv_local.write_buf.lock_or_recover();
             buf.overlay.get(&rkey).map(|entry| match entry {
                 Some(stored) => decode_value(stored).and_then(|(deadline, user_bytes)| {
                     if is_expired(deadline) {
@@ -195,7 +195,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // Cache check: look up the composite key before hitting storage.
         // Guard scoped to the block; no await inside.
         let cache_result: Option<Option<Vec<u8>>> = {
-            let mut cache = self.kv_cache.lock_or_recover();
+            let mut cache = self.kv_local.cache.lock_or_recover();
             if let Some(encoded) = cache.get(&rkey) {
                 match decode_value(encoded) {
                     Some((deadline, user_bytes)) if !is_expired(deadline) => {
@@ -237,7 +237,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                             // Populate cache with the raw encoded bytes before returning.
                             // Guard scoped to block; no await follows inside this branch.
                             {
-                                self.kv_cache.lock_or_recover().put(rkey, raw);
+                                self.kv_local.cache.lock_or_recover().put(rkey, raw);
                             }
                             Ok(Some(result))
                         }
@@ -250,7 +250,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// Internal: queue a lazy delete for an expired key.
     async fn kv_lazy_delete(&self, rkey: Vec<u8>) -> NodeDbResult<()> {
         let should_flush = {
-            let mut buf = self.kv_write_buf.lock_or_recover();
+            let mut buf = self.kv_local.write_buf.lock_or_recover();
             buf.overlay.insert(rkey.clone(), None);
             buf.ops.push(WriteOp::Delete {
                 ns: Namespace::Kv,
@@ -260,7 +260,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         };
         // Evict the expired entry so future reads don't serve stale data.
         {
-            self.kv_cache.lock_or_recover().pop(&rkey);
+            self.kv_local.cache.lock_or_recover().pop(&rkey);
         }
         if should_flush {
             self.kv_flush_inner().await?;
@@ -280,7 +280,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let rkey = kv_key(collection, key.as_bytes());
 
         let should_flush = {
-            let mut buf = self.kv_write_buf.lock_or_recover();
+            let mut buf = self.kv_local.write_buf.lock_or_recover();
             buf.overlay.insert(rkey.clone(), None);
             buf.ops.push(WriteOp::Delete {
                 ns: Namespace::Kv,
@@ -291,7 +291,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         // Invalidate the cache so subsequent reads don't return stale data.
         {
-            self.kv_cache.lock_or_recover().pop(&rkey);
+            self.kv_local.cache.lock_or_recover().pop(&rkey);
         }
 
         if should_flush {
@@ -394,7 +394,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // Lazy-delete expired keys discovered during scan.
         if !expired_keys.is_empty() {
             let should_flush = {
-                let mut buf = self.kv_write_buf.lock_or_recover();
+                let mut buf = self.kv_local.write_buf.lock_or_recover();
                 for rkey in &expired_keys {
                     buf.overlay.insert(rkey.clone(), None);
                     buf.ops.push(WriteOp::Delete {
@@ -406,7 +406,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             };
             // Evict expired keys from the cache.
             {
-                let mut cache = self.kv_cache.lock_or_recover();
+                let mut cache = self.kv_local.cache.lock_or_recover();
                 for rkey in &expired_keys {
                     cache.pop(rkey);
                 }
@@ -540,7 +540,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// `pub(in crate::nodedb)` so the global `flush()` can drain the KV buffer.
     pub(in crate::nodedb) async fn kv_flush_inner(&self) -> NodeDbResult<usize> {
         let ops: Vec<WriteOp> = {
-            let mut buf = self.kv_write_buf.lock_or_recover();
+            let mut buf = self.kv_local.write_buf.lock_or_recover();
             if buf.ops.is_empty() {
                 return Ok(0);
             }
@@ -722,7 +722,7 @@ mod tests {
         let v2 = db.kv_get("col", "key").await.unwrap();
         assert_eq!(v2.as_deref(), Some(b"hello".as_ref()));
         // Verify the cache actually holds the entry.
-        assert_eq!(db.kv_cache.lock_or_recover().len(), 1);
+        assert_eq!(db.kv_local.cache.lock_or_recover().len(), 1);
     }
 
     /// After a put-get-put sequence the second get must return the new value,
@@ -766,7 +766,7 @@ mod tests {
         assert!(v.is_none(), "expired key must return None");
         // Cache must not hold the evicted entry.
         assert_eq!(
-            db.kv_cache.lock_or_recover().len(),
+            db.kv_local.cache.lock_or_recover().len(),
             0,
             "expired entry must be evicted from cache"
         );
@@ -790,7 +790,7 @@ mod tests {
             let _ = db.kv_get(col, &i.to_string()).await.unwrap();
         }
 
-        let cache_len = db.kv_cache.lock_or_recover().len();
+        let cache_len = db.kv_local.cache.lock_or_recover().len();
         assert!(
             cache_len <= CAP,
             "cache must not exceed capacity {CAP}, got {cache_len}"

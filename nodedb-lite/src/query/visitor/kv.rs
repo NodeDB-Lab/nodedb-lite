@@ -85,11 +85,17 @@ pub(super) fn lower_kv_insert<'a, S: StorageEngine + 'a>(
     on_conflict_updates: &[(String, SqlExpr)],
 ) -> Result<LiteFut<'a>, LiteError> {
     if entries.is_empty() {
+        let verb = match intent {
+            KvInsertIntent::Insert | KvInsertIntent::InsertIfAbsent => "INSERT",
+            KvInsertIntent::Put if !on_conflict_updates.is_empty() => "INSERT",
+            KvInsertIntent::Put => "UPSERT",
+        };
         return Ok(Box::pin(async move {
             Ok(nodedb_types::result::QueryResult {
                 columns: vec![],
                 rows: vec![],
                 rows_affected: 0,
+                command: Some(verb.into()),
             })
         }));
     }
@@ -161,18 +167,32 @@ pub(super) fn lower_kv_insert<'a, S: StorageEngine + 'a>(
         ops.push(op);
     }
 
-    // Execute all ops sequentially, accumulating rows_affected.
+    // Execute all ops sequentially, accumulating rows_affected. Fold each
+    // op's reported verb the same way Postgres folds a multi-row
+    // `INSERT ... ON CONFLICT DO UPDATE`: `INSERT`/`UPDATE` mix collapses to
+    // `INSERT`, any other verb is uniform across every op in one statement.
     Ok(Box::pin(async move {
         let mut total: u64 = 0;
+        let mut verb: Option<&'static str> = None;
         for op in ops {
             let mut phys = LiteDataPlaneVisitor { engine };
             let result = phys.kv(&op)?.await?;
             total += result.rows_affected;
+            if let Some(op_verb) = result.command.as_deref() {
+                verb = Some(match (verb, op_verb) {
+                    (None, "UPDATE") => "UPDATE",
+                    (None, "UPSERT") => "UPSERT",
+                    (None, _) => "INSERT",
+                    (Some("INSERT"), "UPDATE") | (Some("UPDATE"), "INSERT") => "INSERT",
+                    (Some(prev), _) => prev,
+                });
+            }
         }
         Ok(nodedb_types::result::QueryResult {
             columns: vec![],
             rows: vec![],
             rows_affected: total,
+            command: Some(verb.unwrap_or("INSERT").into()),
         })
     }))
 }
@@ -241,6 +261,7 @@ mod tests {
             spatial,
             csr: Arc::new(Mutex::new(std::collections::HashMap::new())),
             governor,
+            kv_local: crate::query::engine::test_kv_local(),
         })
     }
 

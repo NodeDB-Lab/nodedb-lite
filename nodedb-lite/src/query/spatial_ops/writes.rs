@@ -36,6 +36,7 @@ pub fn spatial_insert<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: 1,
+        command: None,
     })
 }
 
@@ -61,6 +62,7 @@ pub fn spatial_delete<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: 1,
+        command: None,
     })
 }
 

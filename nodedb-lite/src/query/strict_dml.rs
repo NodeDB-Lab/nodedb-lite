@@ -84,6 +84,7 @@ pub async fn insert_strict<S: StorageEngine>(
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: affected,
+        command: Some("INSERT".into()),
     })
 }
 
@@ -132,6 +133,7 @@ pub async fn update_strict<S: StorageEngine>(
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: affected,
+        command: Some("UPDATE".into()),
     })
 }
 
@@ -166,5 +168,6 @@ pub async fn delete_strict<S: StorageEngine>(
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: affected,
+        command: Some("DELETE".into()),
     })
 }

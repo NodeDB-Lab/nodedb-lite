@@ -33,6 +33,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 "bitemporal document collection '{name}' created"
             ))]],
             rows_affected: 0,
+            command: None,
         })
     }
 
@@ -56,6 +57,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 "document collection '{name}' created"
             ))]],
             rows_affected: 0,
+            command: None,
         })
     }
 
@@ -91,6 +93,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             columns: vec!["result".into()],
             rows: vec![vec![Value::String(format!("collection '{name}' dropped"))]],
             rows_affected: 0,
+            command: None,
         })
     }
 

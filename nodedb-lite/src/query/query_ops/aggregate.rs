@@ -49,6 +49,7 @@ pub fn execute_aggregate(
             columns,
             rows: result_rows,
             rows_affected: 0,
+            command: None,
         })
     } else {
         // GROUPING SETS: union results for each subset.
@@ -76,6 +77,7 @@ pub fn execute_aggregate(
             columns,
             rows: all_rows,
             rows_affected: 0,
+            command: None,
         })
     }
 }
@@ -120,6 +122,7 @@ pub fn execute_partial_aggregate(
         columns,
         rows: output,
         rows_affected: 0,
+        command: None,
     })
 }
 

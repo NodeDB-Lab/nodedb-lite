@@ -312,16 +312,25 @@ async fn drop_index() {
 // visitor is reached. They are NOT a statement about variant support.
 
 #[tokio::test]
-async fn create_array_rejected_at_parse() {
-    // `CREATE ARRAY` is not part of the SQL grammar Lite accepts.
+async fn create_array_is_accepted() {
+    // `CREATE ARRAY` plans on Lite; a malformed dimension range is a parse error.
     let db = open_db().await;
-    let result = db
+    db.execute_sql(
+        "CREATE ARRAY genome DIMS (pos INT64 [0..1000000]) ATTRS (allele TEXT) TILE_EXTENTS (1000)",
+        &[],
+    )
+    .await
+    .expect("CREATE ARRAY plans on Lite");
+    let malformed = db
         .execute_sql(
-            "CREATE ARRAY genome DIMS (pos INT64 [0, 1000000]) ATTRS (allele TEXT) TILE_EXTENTS (1000)",
+            "CREATE ARRAY genome2 DIMS (pos INT64 [0, 1000000]) ATTRS (allele TEXT) TILE_EXTENTS (1000)",
             &[],
         )
         .await;
-    assert!(result.is_err(), "CREATE ARRAY must be rejected on Lite");
+    assert!(
+        malformed.is_err(),
+        "a dimension range without `..` is a parse error"
+    );
 }
 
 #[tokio::test]

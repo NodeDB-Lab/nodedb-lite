@@ -13,6 +13,7 @@ mod sync_delegate;
 mod trait_impl;
 
 pub use collection::{CollectionMeta, TransactionOp};
+pub use core::kv_local::KvLocalState;
 pub use core::{NodeDbLite, SyncGate};
 pub use diagnostic::DiagnosticDump;
 pub use health::{HealthStatus, OverallStatus};

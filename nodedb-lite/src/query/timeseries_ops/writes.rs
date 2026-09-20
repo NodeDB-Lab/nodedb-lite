@@ -50,6 +50,7 @@ pub fn ingest<S: StorageEngine>(
                     columns: Vec::new(),
                     rows: Vec::new(),
                     rows_affected: 0,
+                    command: Some("INSERT".into()),
                 },
                 Vec::new(),
             ));
@@ -84,6 +85,7 @@ pub fn ingest<S: StorageEngine>(
             columns: Vec::new(),
             rows: Vec::new(),
             rows_affected: count,
+            command: Some("INSERT".into()),
         },
         samples,
     ))

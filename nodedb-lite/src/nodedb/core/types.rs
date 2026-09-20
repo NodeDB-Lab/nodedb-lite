@@ -152,18 +152,9 @@ pub struct NodeDbLite<S: StorageEngine> {
     pub(crate) flush_lock: tokio::sync::Mutex<()>,
     /// When `false`, KV operations go directly to storage, bypassing Loro.
     pub(crate) sync_enabled: bool,
-    /// Buffered KV writes awaiting batch commit to storage.
-    /// Flushed on `kv_flush()`, threshold (1000 ops), or `flush()`.
-    /// The HashMap overlay lets reads see uncommitted writes.
-    pub(crate) kv_write_buf: Mutex<KvWriteBuffer>,
-    /// In-memory LRU cache for KV get hot path.
-    ///
-    /// Stores raw encoded bytes (8-byte LE deadline + user value) keyed by the
-    /// composite KV key (`{collection}\0{user_key}`). TTL expiry is re-checked
-    /// on every cache hit so no entry is served past its deadline.
-    ///
-    /// Capacity is controlled by [`crate::config::LiteConfig::kv_cache_capacity`].
-    pub(crate) kv_cache: Mutex<lru::LruCache<Vec<u8>, Vec<u8>>>,
+    /// The KV write buffer and read cache, shared with the query engine so a
+    /// SQL-path `TRUNCATE` forgets what they hold for the cleared collection.
+    pub(crate) kv_local: Arc<super::kv_local::KvLocalState>,
     /// Optional per-document sync gate. When set, each document write consults
     /// it; documents the gate rejects are kept local-only — excluded from the
     /// CRDT delta push, the FTS index sync, and the vector insert sync. Used by
@@ -189,18 +180,4 @@ pub trait SyncGate: Send + Sync {
     /// collection name and the document's fields (so the policy can inspect,
     /// e.g., a `share` field).
     fn should_sync(&self, collection: &str, fields: &HashMap<String, nodedb_types::Value>) -> bool;
-}
-
-/// Buffered KV writes for batch commit.
-///
-/// All public KV read and write methods acquire `Mutex<KvWriteBuffer>` before
-/// inspecting or mutating the overlay, so every read-through-overlay access is
-/// serialized against concurrent writes. Reads always lock — there is no
-/// lock-free fast path.
-pub(crate) struct KvWriteBuffer {
-    /// Pending write operations for batch commit.
-    pub ops: Vec<crate::storage::engine::WriteOp>,
-    /// Read overlay: maps composite KV key → value (None = deleted).
-    /// Lets `kv_get` see uncommitted writes without hitting storage.
-    pub overlay: HashMap<Vec<u8>, Option<Vec<u8>>>,
 }

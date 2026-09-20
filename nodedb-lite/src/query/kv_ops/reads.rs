@@ -85,6 +85,7 @@ pub async fn kv_get<S: StorageEngine>(
                         Value::Bytes(user_bytes.to_vec()),
                     ]],
                     rows_affected: 0,
+                    command: None,
                 })
             }
         },
@@ -131,6 +132,7 @@ pub async fn kv_get_ttl<S: StorageEngine>(
         columns: vec!["ttl_ms".into()],
         rows: vec![vec![Value::Integer(ttl_ms)]],
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -169,6 +171,7 @@ pub async fn kv_batch_get<S: StorageEngine>(
         columns: vec!["key".into(), "value".into()],
         rows,
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -213,6 +216,7 @@ pub async fn kv_field_get<S: StorageEngine>(
         columns: fields.to_vec(),
         rows: vec![row],
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -267,6 +271,7 @@ pub async fn kv_scan<S: StorageEngine>(
         columns: vec!["key".into(), "value".into()],
         rows,
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -330,6 +335,7 @@ pub async fn kv_materialize_scan<S: StorageEngine>(
         columns: vec!["payload".into()],
         rows: vec![vec![Value::Bytes(payload)]],
         rows_affected: 0,
+        command: None,
     })
 }
 

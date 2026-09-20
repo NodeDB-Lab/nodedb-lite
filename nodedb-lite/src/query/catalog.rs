@@ -32,6 +32,10 @@ pub struct LiteCatalog<S: StorageEngine> {
     /// query engine (async) before planning, so `get_collection` can surface
     /// the real engine/bitemporal/columns without touching async storage.
     metas: HashMap<String, CollectionMeta>,
+    /// Names of the arrays the array engine holds, snapshotted before
+    /// planning. The planner refuses table-shaped statements such as
+    /// `TRUNCATE` on an array by name.
+    array_names: Vec<String>,
 }
 
 impl<S: StorageEngine> LiteCatalog<S> {
@@ -46,7 +50,14 @@ impl<S: StorageEngine> LiteCatalog<S> {
             strict,
             columnar,
             metas,
+            array_names: Vec::new(),
         }
+    }
+
+    /// Register the array names the planner can see.
+    pub fn with_arrays(mut self, array_names: Vec<String>) -> Self {
+        self.array_names = array_names;
+        self
     }
 
     /// Build a `CollectionInfo` from persisted metadata.
@@ -188,6 +199,10 @@ impl<S: StorageEngine> LiteCatalog<S> {
 }
 
 impl<S: StorageEngine> SqlCatalog for LiteCatalog<S> {
+    fn array_exists(&self, name: &str) -> bool {
+        self.array_names.iter().any(|n| n == name)
+    }
+
     fn get_collection(
         &self,
         _database_id: nodedb_types::id::DatabaseId,

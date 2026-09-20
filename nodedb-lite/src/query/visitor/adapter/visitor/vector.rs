@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Vector-primary collection DML: vector_primary_insert/
-//! vector_primary_delete/vector_primary_update.
+//! vector_primary_delete/vector_primary_update/vector_primary_truncate.
 
 use nodedb_sql::{
     VectorPrimaryDeleteVisitArgs, VectorPrimaryInsertVisitArgs, VectorPrimaryUpdateVisitArgs,
@@ -10,7 +10,8 @@ use nodedb_sql::{
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::visitor::vector_primary::{
-    lower_vector_primary_delete, lower_vector_primary_insert, lower_vector_primary_update,
+    lower_vector_primary_delete, lower_vector_primary_insert, lower_vector_primary_truncate,
+    lower_vector_primary_update,
 };
 use crate::storage::engine::StorageEngine;
 
@@ -28,6 +29,15 @@ pub(super) fn vector_primary_delete<'a, S: StorageEngine + 'a>(
     args: VectorPrimaryDeleteVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
     lower_vector_primary_delete(engine, args)
+}
+
+pub(super) fn vector_primary_truncate<'a, S: StorageEngine + 'a>(
+    engine: &'a LiteQueryEngine<S>,
+    collection: &str,
+    field: &str,
+    restart_identity: bool,
+) -> Result<LiteFut<'a>, LiteError> {
+    lower_vector_primary_truncate(engine, collection, field, restart_identity)
 }
 
 pub(super) fn vector_primary_update<'a, S: StorageEngine + 'a>(

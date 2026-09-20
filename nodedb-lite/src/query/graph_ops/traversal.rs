@@ -67,6 +67,7 @@ pub fn hop(
         columns: node_cols(),
         rows,
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -93,6 +94,7 @@ pub fn neighbors(
         columns,
         rows,
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -144,6 +146,7 @@ pub fn neighbors_multi(
         columns,
         rows,
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -190,6 +193,7 @@ pub fn path(
         columns,
         rows,
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -221,6 +225,7 @@ pub fn subgraph(
         columns,
         rows,
         rows_affected: 0,
+        command: None,
     })
 }
 

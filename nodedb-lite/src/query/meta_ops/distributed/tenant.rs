@@ -111,6 +111,7 @@ pub async fn handle_create_tenant_snapshot<S: StorageEngine>(
         columns: vec!["snapshot".into()],
         rows: vec![vec![Value::Bytes(blob)]],
         rows_affected: entries.len() as u64,
+        command: None,
     })
 }
 
@@ -155,6 +156,7 @@ pub async fn handle_restore_tenant_snapshot<S: StorageEngine>(
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: written as u64,
+        command: None,
     })
 }
 
@@ -180,6 +182,7 @@ pub async fn handle_purge_tenant<S: StorageEngine>(
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: deleted,
+        command: None,
     })
 }
 

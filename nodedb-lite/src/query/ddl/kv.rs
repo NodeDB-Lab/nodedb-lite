@@ -96,6 +96,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 "kv collection '{name}' created{ttl_info}"
             ))]],
             rows_affected: 0,
+            command: None,
         })
     }
 }

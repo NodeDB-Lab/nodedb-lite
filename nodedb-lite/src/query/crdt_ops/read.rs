@@ -29,6 +29,7 @@ pub async fn handle_read<S: StorageEngine>(
         columns: vec!["document".to_string()],
         rows: row,
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -46,5 +47,6 @@ pub async fn handle_get_policy<S: StorageEngine>(
         columns: vec!["policy_json".to_string()],
         rows: vec![vec![Value::String(json)]],
         rows_affected: 0,
+        command: None,
     })
 }

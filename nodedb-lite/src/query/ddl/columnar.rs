@@ -95,6 +95,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 "columnar collection '{name}' created"
             ))]],
             rows_affected: 0,
+            command: None,
         })
     }
 
@@ -112,6 +113,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 "columnar collection '{name}' dropped"
             ))]],
             rows_affected: 0,
+            command: None,
         })
     }
 }

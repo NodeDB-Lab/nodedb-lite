@@ -62,6 +62,23 @@ pub(crate) async fn persist_sidecar<S: StorageEngine>(
     Ok(())
 }
 
+/// Drop the in-memory sidecar for `index_key` and its persisted bytes. The
+/// next insert re-trains one from `per_index_config` when a codec is set.
+pub(crate) async fn remove_sidecar<S: StorageEngine>(
+    vector_state: &VectorState<S>,
+    index_key: &str,
+) -> Result<(), LiteError> {
+    vector_state
+        .codec_sidecars
+        .lock_or_recover()
+        .remove(index_key);
+    let key = sidecar_storage_key(index_key);
+    vector_state
+        .storage
+        .delete(Namespace::Vector, key.as_bytes())
+        .await
+}
+
 /// Try to restore a persisted sidecar for `index_key` from storage.
 ///
 /// Returns:

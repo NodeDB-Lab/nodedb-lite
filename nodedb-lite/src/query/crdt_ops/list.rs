@@ -34,6 +34,7 @@ pub async fn handle_list_insert<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: 1,
+        command: None,
     })
 }
 
@@ -55,6 +56,7 @@ pub async fn handle_list_delete<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: 1,
+        command: None,
     })
 }
 
@@ -77,5 +79,6 @@ pub async fn handle_list_move<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: 1,
+        command: None,
     })
 }

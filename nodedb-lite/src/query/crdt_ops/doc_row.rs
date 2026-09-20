@@ -12,6 +12,7 @@
 //! `list_ids` + `read`), so mutating the CRDT state IS the materialization.
 
 use loro::LoroValue;
+use nodedb_physical::physical_plan::CrdtWriteVerb;
 use nodedb_physical::physical_plan::document::{ReturningColumns, ReturningSpec};
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
@@ -35,6 +36,7 @@ pub async fn handle_doc_upsert<S: StorageEngine>(
     document_id: &str,
     fields_json: &str,
     partial: bool,
+    verb: CrdtWriteVerb,
     returning: Option<&ReturningSpec>,
 ) -> Result<QueryResult, LiteError> {
     let fields = parse_fields(fields_json)?;
@@ -52,7 +54,7 @@ pub async fn handle_doc_upsert<S: StorageEngine>(
         }
     }
 
-    project_returning(engine, collection, document_id, returning, 1)
+    project_returning(engine, collection, document_id, returning, 1, verb)
 }
 
 /// Delete a document row, tombstoning it in the collection's Loro map.
@@ -83,16 +85,24 @@ pub async fn handle_doc_delete<S: StorageEngine>(
 
     let affected = u64::from(existed);
     match (returning, pre_delete) {
-        (Some(spec), Some(row)) => Ok(rows_from_value(&row, document_id, spec, affected)),
+        (Some(spec), Some(row)) => Ok(rows_from_value(
+            &row,
+            document_id,
+            spec,
+            affected,
+            Some("DELETE"),
+        )),
         (Some(spec), None) => Ok(QueryResult {
             columns: returning_columns(spec, &[]),
             rows: Vec::new(),
             rows_affected: affected,
+            command: Some("DELETE".into()),
         }),
         (None, _) => Ok(QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
             rows_affected: affected,
+            command: Some("DELETE".into()),
         }),
     }
 }
@@ -121,12 +131,14 @@ fn project_returning<S: StorageEngine>(
     document_id: &str,
     returning: Option<&ReturningSpec>,
     affected: u64,
+    verb: CrdtWriteVerb,
 ) -> Result<QueryResult, LiteError> {
     let Some(spec) = returning else {
         return Ok(QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
             rows_affected: affected,
+            command: Some(verb.command_tag().into()),
         });
     };
 
@@ -136,11 +148,18 @@ fn project_returning<S: StorageEngine>(
     };
 
     match row {
-        Some(v) => Ok(rows_from_value(&v, document_id, spec, affected)),
+        Some(v) => Ok(rows_from_value(
+            &v,
+            document_id,
+            spec,
+            affected,
+            Some(verb.command_tag()),
+        )),
         None => Ok(QueryResult {
             columns: returning_columns(spec, &[]),
             rows: Vec::new(),
             rows_affected: affected,
+            command: Some(verb.command_tag().into()),
         }),
     }
 }
@@ -156,6 +175,7 @@ fn rows_from_value(
     document_id: &str,
     spec: &ReturningSpec,
     affected: u64,
+    command: Option<&'static str>,
 ) -> QueryResult {
     let ndb = loro_value_to_ndb_value(value);
     let fields: Vec<(String, Value)> = match ndb {
@@ -179,6 +199,7 @@ fn rows_from_value(
                 columns,
                 rows: vec![row],
                 rows_affected: affected,
+                command: command.map(Into::into),
             }
         }
         ReturningColumns::Named(items) => {
@@ -200,6 +221,7 @@ fn rows_from_value(
                 columns,
                 rows: vec![row],
                 rows_affected: affected,
+                command: command.map(Into::into),
             }
         }
     }

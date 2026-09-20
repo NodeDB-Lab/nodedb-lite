@@ -78,6 +78,7 @@ pub async fn kv_register_sorted_index<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -141,5 +142,6 @@ pub async fn kv_drop_sorted_index<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: count,
+        command: None,
     })
 }

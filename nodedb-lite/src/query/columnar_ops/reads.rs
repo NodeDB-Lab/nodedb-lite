@@ -216,6 +216,7 @@ pub async fn scan<S: StorageEngine>(
         columns: out_columns,
         rows: out_rows,
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -289,6 +290,7 @@ pub async fn materialize_scan<S: StorageEngine>(
         columns: vec!["payload".into()],
         rows: vec![vec![Value::Bytes(payload)]],
         rows_affected: 0,
+        command: None,
     })
 }
 

@@ -196,10 +196,13 @@ pub(super) fn persist<'a, S: StorageEngine + 'a>(
 pub(super) fn truncate<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &QualifiedCollection,
+    restart_identity: bool,
 ) -> Result<LitePhysicalFut<'a>, LiteError> {
     let col = collection.clone();
     Ok(Box::pin(async move {
-        kv_ops::writes::kv_truncate(engine, col.as_str()).await
+        let result = kv_ops::writes::kv_truncate(engine, col.as_str()).await?;
+        crate::query::truncate::restart_identity(engine, col.as_str(), restart_identity);
+        Ok(result)
     }))
 }
 

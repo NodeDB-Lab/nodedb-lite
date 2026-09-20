@@ -21,6 +21,7 @@ pub(crate) mod scan_filter_convert;
 pub mod spatial_ops;
 pub mod strict_dml;
 pub mod timeseries_ops;
+pub(crate) mod truncate;
 pub(crate) mod value_utils;
 mod visitor;
 

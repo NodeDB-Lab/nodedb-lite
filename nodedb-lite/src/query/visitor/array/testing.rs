@@ -65,6 +65,7 @@ pub(super) async fn make_engine() -> LiteQueryEngine<PagedbStorageMem> {
         spatial,
         csr: Arc::new(Mutex::new(std::collections::HashMap::new())),
         governor,
+        kv_local: crate::query::engine::test_kv_local(),
     })
 }
 

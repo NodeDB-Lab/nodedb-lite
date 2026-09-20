@@ -9,6 +9,7 @@ use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
+use crate::query::truncate::{clear_spatial, truncated};
 use crate::storage::engine::{StorageEngine, WriteOp};
 
 use super::is_strict;
@@ -49,7 +50,7 @@ pub async fn point_put<S: StorageEngine>(
                 detail: e.to_string(),
             })?;
     }
-    Ok(affected(1))
+    Ok(affected(1, "INSERT"))
 }
 
 /// PointInsert: insert-only, fail on duplicate PK (or skip if `if_absent`).
@@ -64,7 +65,7 @@ pub async fn point_insert<S: StorageEngine>(
         let pk = Value::String(document_id.to_string());
         if engine.strict.get(collection, &pk).await?.is_some() {
             if if_absent {
-                return Ok(affected(0));
+                return Ok(affected(0, "INSERT"));
             }
             return Err(LiteError::BadRequest {
                 detail: format!(
@@ -85,7 +86,7 @@ pub async fn point_insert<S: StorageEngine>(
         let mut crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
         if crdt.exists(collection, document_id) {
             if if_absent {
-                return Ok(affected(0));
+                return Ok(affected(0, "INSERT"));
             }
             return Err(LiteError::BadRequest {
                 detail: format!(
@@ -98,7 +99,7 @@ pub async fn point_insert<S: StorageEngine>(
                 detail: e.to_string(),
             })?;
     }
-    Ok(affected(1))
+    Ok(affected(1, "INSERT"))
 }
 
 /// PointUpdate: read-modify-write with field-level changes.
@@ -115,11 +116,11 @@ pub async fn point_update<S: StorageEngine>(
             .strict
             .update(collection, &pk, &field_updates)
             .await?;
-        Ok(affected(if updated { 1 } else { 0 }))
+        Ok(affected(if updated { 1 } else { 0 }, "UPDATE"))
     } else {
         let crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
         if !crdt.exists(collection, document_id) {
-            return Ok(affected(0));
+            return Ok(affected(0, "UPDATE"));
         }
         let existing_val = crdt.read(collection, document_id);
         drop(crdt);
@@ -152,7 +153,7 @@ pub async fn point_update<S: StorageEngine>(
             .map_err(|e| LiteError::Storage {
                 detail: e.to_string(),
             })?;
-        Ok(affected(1))
+        Ok(affected(1, "UPDATE"))
     }
 }
 
@@ -165,17 +166,17 @@ pub async fn point_delete<S: StorageEngine>(
     if is_strict(engine, collection) {
         let pk = Value::String(document_id.to_string());
         let deleted = engine.strict.delete(collection, &pk).await?;
-        Ok(affected(if deleted { 1 } else { 0 }))
+        Ok(affected(if deleted { 1 } else { 0 }, "DELETE"))
     } else {
         let mut crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
         if !crdt.exists(collection, document_id) {
-            return Ok(affected(0));
+            return Ok(affected(0, "DELETE"));
         }
         crdt.delete(collection, document_id)
             .map_err(|e| LiteError::Storage {
                 detail: e.to_string(),
             })?;
-        Ok(affected(1))
+        Ok(affected(1, "DELETE"))
     }
 }
 
@@ -195,7 +196,7 @@ pub async fn batch_insert<S: StorageEngine>(
         }
         let affected_n = rows.len() as u64;
         engine.strict.insert_batch(collection, &rows).await?;
-        Ok(affected(affected_n))
+        Ok(affected(affected_n, "INSERT"))
     } else {
         let mut decoded: Vec<(String, Vec<(String, loro::LoroValue)>)> =
             Vec::with_capacity(documents.len());
@@ -218,7 +219,7 @@ pub async fn batch_insert<S: StorageEngine>(
         crdt.flush_deltas().map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
-        Ok(affected(affected_n))
+        Ok(affected(affected_n, "INSERT"))
     }
 }
 
@@ -263,10 +264,13 @@ pub async fn upsert<S: StorageEngine>(
                 detail: e.to_string(),
             })?;
     }
-    Ok(affected(1))
+    Ok(affected(1, "UPSERT"))
 }
 
-/// Truncate: delete ALL documents in a collection.
+/// Truncate: delete ALL documents in a collection, then the overlays they
+/// fed: the FTS index, the sparse-vector postings, the R-tree entries, and
+/// every vector bucket of the collection. Answers with the bare `TRUNCATE`
+/// tag, never a row count.
 pub async fn truncate<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
@@ -284,20 +288,38 @@ pub async fn truncate<S: StorageEngine>(
                 key,
             });
         }
-        let affected_n = ops.len() as u64;
         if !ops.is_empty() {
             engine.storage.batch_write(&ops).await?;
         }
-        Ok(affected(affected_n))
     } else {
-        let mut crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
-        let count = crdt
-            .clear_collection(collection)
-            .map_err(|e| LiteError::Storage {
-                detail: e.to_string(),
-            })?;
-        Ok(affected(count as u64))
+        let ids = {
+            let mut crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
+            let ids = crdt.list_ids(collection);
+            crdt.clear_collection(collection)
+                .map_err(|e| LiteError::Storage {
+                    detail: e.to_string(),
+                })?;
+            ids
+        };
+        let mut sparse = engine
+            .sparse_state
+            .manager
+            .lock()
+            .map_err(|_| LiteError::LockPoisoned)?;
+        for id in &ids {
+            sparse.remove_document_all_fields(collection, id);
+        }
     }
+    engine
+        .fts_state
+        .manager
+        .lock()
+        .map_err(|_| LiteError::LockPoisoned)?
+        .drop_collection(collection);
+    clear_spatial(engine, collection)?;
+    crate::query::physical_visitor::clear_collection_indexes(&engine.vector_state, collection)
+        .await?;
+    Ok(truncated())
 }
 
 /// BulkUpdate: scan matching documents and apply field updates to all.
@@ -329,7 +351,7 @@ pub async fn bulk_update<S: StorageEngine>(
                 affected_n += 1;
             }
         }
-        Ok(affected(affected_n))
+        Ok(affected(affected_n, "UPDATE"))
     } else {
         let loro_updates: Vec<(String, loro::LoroValue)> = field_updates
             .into_iter()
@@ -352,7 +374,7 @@ pub async fn bulk_update<S: StorageEngine>(
         crdt.flush_deltas().map_err(|e| LiteError::Storage {
             detail: e.to_string(),
         })?;
-        Ok(affected(affected_n))
+        Ok(affected(affected_n, "UPDATE"))
     }
 }
 
@@ -376,11 +398,12 @@ pub async fn bulk_delete<S: StorageEngine>(
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
-fn affected(n: u64) -> QueryResult {
+fn affected(n: u64, command: &'static str) -> QueryResult {
     QueryResult {
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: n,
+        command: Some(command.into()),
     }
 }
 

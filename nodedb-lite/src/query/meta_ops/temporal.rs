@@ -32,6 +32,7 @@ pub async fn handle_temporal_purge_edge_store<S: StorageEngine>(
         columns: vec!["rows_affected".into()],
         rows: vec![vec![Value::Integer(rows_affected as i64)]],
         rows_affected,
+        command: None,
     })
 }
 
@@ -57,6 +58,7 @@ pub async fn handle_temporal_purge_document_strict<S: StorageEngine>(
         columns: vec!["rows_affected".into()],
         rows: vec![vec![Value::Integer(rows_affected as i64)]],
         rows_affected,
+        command: None,
     })
 }
 
@@ -83,6 +85,7 @@ pub async fn handle_temporal_purge_columnar<S: StorageEngine>(
         columns: vec!["rows_affected".into()],
         rows: vec![vec![Value::Integer(rows_affected as i64)]],
         rows_affected,
+        command: None,
     })
 }
 
@@ -105,6 +108,7 @@ pub async fn handle_temporal_purge_crdt<S: StorageEngine>(
         columns: vec!["compacted".into()],
         rows: vec![vec![Value::Bool(true)]],
         rows_affected: 1,
+        command: None,
     })
 }
 
@@ -148,6 +152,7 @@ pub async fn handle_enforce_timeseries_retention<S: StorageEngine>(
         columns: vec!["dropped_partitions".into()],
         rows: vec![vec![Value::Integer(dropped.len() as i64)]],
         rows_affected: dropped.len() as u64,
+        command: None,
     })
 }
 
@@ -210,6 +215,7 @@ mod tests {
             spatial,
             csr: Arc::new(Mutex::new(std::collections::HashMap::new())),
             governor,
+            kv_local: crate::query::engine::test_kv_local(),
         })
     }
 

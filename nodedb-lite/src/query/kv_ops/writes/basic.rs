@@ -12,9 +12,24 @@ use nodedb_types::value::Value;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::on_conflict::apply_patch;
+use crate::query::truncate::truncated;
 use crate::storage::engine::{StorageEngine, WriteOp};
 
 use super::super::reads::{decode_value, encode_value, is_expired, kv_key, split_kv_key};
+
+/// `kv_put`, tagged `INSERT` instead of `UPSERT`. Backs every insert variant
+/// that falls through to an unconditional put once absence is confirmed.
+async fn insert_via_put<S: StorageEngine>(
+    engine: &LiteQueryEngine<S>,
+    collection: &str,
+    key: &[u8],
+    value: &[u8],
+    ttl_ms: u64,
+) -> Result<QueryResult, LiteError> {
+    let mut result = kv_put(engine, collection, key, value, ttl_ms).await?;
+    result.command = Some("INSERT".into());
+    Ok(result)
+}
 
 /// Put: unconditional upsert.
 pub async fn kv_put<S: StorageEngine>(
@@ -42,6 +57,7 @@ pub async fn kv_put<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: 1,
+        command: Some("UPSERT".into()),
     })
 }
 
@@ -69,7 +85,7 @@ pub async fn kv_insert<S: StorageEngine>(
             detail: format!("unique_violation: key already exists in collection '{collection}'"),
         });
     }
-    kv_put(engine, collection, key, value, ttl_ms).await
+    insert_via_put(engine, collection, key, value, ttl_ms).await
 }
 
 /// InsertIfAbsent: write if absent, silently no-op on duplicate.
@@ -96,9 +112,10 @@ pub async fn kv_insert_if_absent<S: StorageEngine>(
             columns: vec![],
             rows: vec![],
             rows_affected: 0,
+            command: Some("INSERT".into()),
         });
     }
-    kv_put(engine, collection, key, value, ttl_ms).await
+    insert_via_put(engine, collection, key, value, ttl_ms).await
 }
 
 /// InsertOnConflictUpdate: write if absent; on conflict apply field updates.
@@ -128,11 +145,11 @@ pub async fn kv_insert_on_conflict_update<S: StorageEngine>(
         })?;
 
     let raw = match existing {
-        None => return kv_put(engine, collection, key, value, ttl_ms).await,
+        None => return insert_via_put(engine, collection, key, value, ttl_ms).await,
         Some(raw) => match decode_value(&raw) {
-            None => return kv_put(engine, collection, key, value, ttl_ms).await,
+            None => return insert_via_put(engine, collection, key, value, ttl_ms).await,
             Some((deadline, _)) if is_expired(deadline) => {
-                return kv_put(engine, collection, key, value, ttl_ms).await;
+                return insert_via_put(engine, collection, key, value, ttl_ms).await;
             }
             Some(_) => raw,
         },
@@ -179,6 +196,7 @@ pub async fn kv_insert_on_conflict_update<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: 1,
+        command: Some("UPDATE".into()),
     })
 }
 
@@ -209,6 +227,7 @@ pub async fn kv_delete<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: count,
+        command: Some("DELETE".into()),
     })
 }
 
@@ -244,6 +263,7 @@ pub async fn kv_batch_put<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: count,
+        command: Some("UPSERT".into()),
     })
 }
 
@@ -268,6 +288,7 @@ pub async fn kv_expire<S: StorageEngine>(
             columns: vec![],
             rows: vec![],
             rows_affected: 0,
+            command: None,
         }),
         Some(raw) => {
             let (_, user_bytes) = decode_value(&raw).ok_or_else(|| LiteError::Storage {
@@ -286,6 +307,7 @@ pub async fn kv_expire<S: StorageEngine>(
                 columns: vec![],
                 rows: vec![],
                 rows_affected: 1,
+                command: None,
             })
         }
     }
@@ -311,6 +333,7 @@ pub async fn kv_persist<S: StorageEngine>(
             columns: vec![],
             rows: vec![],
             rows_affected: 0,
+            command: None,
         }),
         Some(raw) => {
             let (_, user_bytes) = decode_value(&raw).ok_or_else(|| LiteError::Storage {
@@ -328,16 +351,22 @@ pub async fn kv_persist<S: StorageEngine>(
                 columns: vec![],
                 rows: vec![],
                 rows_affected: 1,
+                command: None,
             })
         }
     }
 }
 
-/// Truncate: delete ALL entries in a KV collection.
+/// Truncate: delete ALL entries in a KV collection and every secondary
+/// index posting they produced. The collection stays registered. Buffered
+/// writes and cached values of the public KV API are forgotten first, so a
+/// pending put cannot resurrect a row and a cached value is not served past
+/// the clear.
 pub async fn kv_truncate<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
 ) -> Result<QueryResult, LiteError> {
+    engine.kv_local.forget_collection(collection);
     let col_prefix = {
         let mut p = collection.as_bytes().to_vec();
         p.push(0);
@@ -364,7 +393,26 @@ pub async fn kv_truncate<S: StorageEngine>(
             key: composite_key.clone(),
         });
     }
-    let count = ops.len() as u64;
+
+    // Secondary index postings: `kv:{collection}:{field}:{value}` in Meta.
+    let index_prefix = super::super::indexes::collection_index_prefix(collection);
+    let postings = engine
+        .storage
+        .scan_range_bounded(Namespace::Meta, Some(index_prefix.as_bytes()), None, None)
+        .await
+        .map_err(|e| LiteError::Storage {
+            detail: e.to_string(),
+        })?;
+    for (key, _) in &postings {
+        if !key.starts_with(index_prefix.as_bytes()) {
+            break;
+        }
+        ops.push(WriteOp::Delete {
+            ns: Namespace::Meta,
+            key: key.clone(),
+        });
+    }
+
     if !ops.is_empty() {
         engine
             .storage
@@ -374,11 +422,7 @@ pub async fn kv_truncate<S: StorageEngine>(
                 detail: e.to_string(),
             })?;
     }
-    Ok(QueryResult {
-        columns: vec![],
-        rows: vec![],
-        rows_affected: count,
-    })
+    Ok(truncated())
 }
 
 #[cfg(test)]
@@ -502,5 +546,53 @@ mod tests {
         .expect("insert");
         assert_eq!(r.rows_affected, 1);
         assert_eq!(stored_n(&engine, b"missing").await, 7);
+    }
+
+    #[tokio::test]
+    async fn truncate_removes_rows_and_index_postings() {
+        use crate::query::kv_ops::indexes::kv_register_index;
+        let engine = test_engine().await;
+        for (k, n) in [("a", 1), ("b", 2), ("c", 3)] {
+            kv_put(&engine, "kvt", k.as_bytes(), &row_bytes(&[("n", n)]), 0)
+                .await
+                .expect("seed");
+        }
+        kv_put(&engine, "kvoc", b"z", &row_bytes(&[("n", 9)]), 0)
+            .await
+            .expect("seed other");
+        kv_register_index(&engine, "kvt", "n", true)
+            .await
+            .expect("register index");
+        let posting_prefix = b"kv:kvt:";
+        let before = engine
+            .storage
+            .scan_range_bounded(Namespace::Meta, Some(posting_prefix), None, None)
+            .await
+            .expect("scan");
+        assert_eq!(before.len(), 3, "backfill wrote one posting per value");
+
+        let r = kv_truncate(&engine, "kvt").await.expect("truncate");
+        assert_eq!(r.rows_affected, 0);
+        assert_eq!(r.command.as_deref(), Some("TRUNCATE"));
+        for k in ["a", "b", "c"] {
+            let got = kv_get(&engine, "kvt", k.as_bytes(), None)
+                .await
+                .expect("get");
+            assert!(got.rows.is_empty(), "{k} survives truncate");
+        }
+        let after = engine
+            .storage
+            .scan_range_bounded(Namespace::Meta, Some(posting_prefix), None, None)
+            .await
+            .expect("scan");
+        assert!(
+            after.iter().all(|(k, _)| !k.starts_with(posting_prefix)),
+            "index postings survive truncate"
+        );
+        assert_eq!(
+            stored_n(&engine, b"z").await,
+            9,
+            "other collection untouched"
+        );
     }
 }

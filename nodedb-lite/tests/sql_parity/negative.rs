@@ -160,7 +160,7 @@ async fn alter_strict_collection_is_rejected() {
     // on Lite. The nodedb-sql parser does not recognise the `ALTER COLLECTION`
     // syntax (it expects ALTER TABLE/VIEW/etc.), so Lite returns a parse-level
     // error rather than a typed Unsupported error. This is the same documented
-    // pattern as MATCH and CREATE ARRAY syntax.
+    // pattern as MATCH syntax.
     //
     // Contract: the query must return *some* error — not succeed silently, not
     // panic. The exact error variant is a parse error (storage/query).
@@ -205,18 +205,27 @@ async fn graph_match_sql_is_parse_error() {
     assert!(result.is_err(), "MATCH syntax must return an error on Lite");
 }
 
-// ── ARRAY engine SQL — parse-level rejection ──────────────────────────────────
+// ── ARRAY engine SQL ─────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn create_array_ddl_is_parse_error() {
-    // CREATE ARRAY syntax is not understood by nodedb-sql on Lite.
-    // Returns a parse error (Query), not Unsupported. Documented behavior.
+async fn create_array_ddl_plans_on_lite() {
+    // `CREATE ARRAY` is part of the SQL grammar Lite accepts. Only a
+    // malformed dimension range is refused, at parse time.
     let db = open_lite().await;
-    let result = db
+    db.execute_sql(
+        "CREATE ARRAY genome DIMS (pos INT64 [0..1000000]) ATTRS (allele TEXT) TILE_EXTENTS (1000)",
+        &[],
+    )
+    .await
+    .expect("CREATE ARRAY plans on Lite");
+    let malformed = db
         .execute_sql(
-            "CREATE ARRAY genome DIMS (pos INT64 [0, 1000000]) ATTRS (allele TEXT) TILE_EXTENTS (1000)",
+            "CREATE ARRAY genome2 DIMS (pos INT64 [0, 1000000]) ATTRS (allele TEXT) TILE_EXTENTS (1000)",
             &[],
         )
         .await;
-    assert!(result.is_err(), "CREATE ARRAY must return an error on Lite");
+    assert!(
+        malformed.is_err(),
+        "a dimension range without `..` is a parse error"
+    );
 }

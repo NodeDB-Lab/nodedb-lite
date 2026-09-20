@@ -33,6 +33,7 @@ pub async fn handle_apply<S: StorageEngine>(
                 columns: vec![],
                 rows: vec![],
                 rows_affected: 1,
+                command: None,
             })
         }
         Err(import_err) => {
@@ -59,6 +60,7 @@ pub async fn handle_import_snapshot<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: 1,
+        command: None,
     })
 }
 
@@ -80,5 +82,6 @@ pub async fn handle_set_policy<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: 1,
+        command: None,
     })
 }

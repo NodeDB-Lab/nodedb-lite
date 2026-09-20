@@ -37,6 +37,7 @@ pub async fn compact<S: StorageEngine>(
                 columns: vec!["segments_rewritten".to_string()],
                 rows: vec![vec![nodedb_types::value::Value::Integer(0)]],
                 rows_affected: 0,
+                command: None,
             });
         }
     };
@@ -79,5 +80,6 @@ pub async fn compact<S: StorageEngine>(
         columns: vec!["segments_rewritten".to_string()],
         rows: vec![vec![nodedb_types::value::Value::Integer(rewritten as i64)]],
         rows_affected: rewritten as u64,
+        command: None,
     })
 }

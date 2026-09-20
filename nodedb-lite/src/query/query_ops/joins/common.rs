@@ -144,6 +144,7 @@ pub fn maps_to_result(rows: Vec<HashMap<String, Value>>) -> QueryResult {
         columns,
         rows: result_rows,
         rows_affected: 0,
+        command: None,
     }
 }
 

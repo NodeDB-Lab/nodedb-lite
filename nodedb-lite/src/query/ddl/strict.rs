@@ -28,6 +28,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 "strict collection '{name}' created"
             ))]],
             rows_affected: 0,
+            command: None,
         })
     }
 
@@ -44,6 +45,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 "strict collection '{name}' dropped"
             ))]],
             rows_affected: 0,
+            command: None,
         })
     }
 }

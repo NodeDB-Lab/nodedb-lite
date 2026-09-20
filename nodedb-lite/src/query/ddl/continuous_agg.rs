@@ -43,6 +43,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 def.name, def.source
             ))]],
             rows_affected: 0,
+            command: None,
         })
     }
 
@@ -70,6 +71,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 "continuous aggregate '{name}' dropped"
             ))]],
             rows_affected: 0,
+            command: None,
         })
     }
 
@@ -132,6 +134,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             columns,
             rows,
             rows_affected: 0,
+            command: None,
         })
     }
 }

@@ -83,6 +83,7 @@ pub async fn graph_match(
         columns,
         rows: result_rows,
         rows_affected: 0,
+        command: None,
     })
 }
 

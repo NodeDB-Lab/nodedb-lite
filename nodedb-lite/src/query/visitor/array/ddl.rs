@@ -85,6 +85,7 @@ pub(crate) fn lower_drop_array<'a, S: StorageEngine + 'a>(
                     columns: vec![],
                     rows: vec![],
                     rows_affected: 0,
+                    command: None,
                 });
             }
             return Err(LiteError::BadRequest {

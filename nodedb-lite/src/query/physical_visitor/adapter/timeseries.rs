@@ -142,6 +142,20 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                 Ok(result)
             }))
         }
+
+        TimeseriesOp::Truncate {
+            collection,
+            restart_identity,
+        } => {
+            let col = collection.clone();
+            let restart = *restart_identity;
+            Ok(Box::pin(async move {
+                let result = timeseries_ops::truncate::truncate(engine, col.as_str()).await?;
+                crate::query::truncate::restart_identity(engine, col.as_str(), restart);
+                Ok(result)
+            }))
+        }
+
         // Origin resolves a cross-vshard ingest before proposing it. Lite's
         // single-node engine resolves every write directly, so it never emits
         // this shape and cannot interpret one.

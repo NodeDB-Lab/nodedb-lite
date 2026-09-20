@@ -81,6 +81,7 @@ pub async fn kv_incr<S: StorageEngine>(
         columns: vec!["value".into()],
         rows: vec![vec![Value::Integer(new_val)]],
         rows_affected: 1,
+        command: None,
     })
 }
 
@@ -136,6 +137,7 @@ pub async fn kv_incr_float<S: StorageEngine>(
         columns: vec!["value".into()],
         rows: vec![vec![Value::Float(new_val)]],
         rows_affected: 1,
+        command: None,
     })
 }
 
@@ -189,6 +191,7 @@ pub async fn kv_cas<S: StorageEngine>(
         columns: vec!["success".into(), "current_value".into()],
         rows: vec![vec![Value::Bool(success), Value::Bytes(current_bytes)]],
         rows_affected: if success { 1 } else { 0 },
+        command: None,
     })
 }
 
@@ -236,5 +239,6 @@ pub async fn kv_get_set<S: StorageEngine>(
         columns: vec!["old_value".into()],
         rows: vec![vec![old_val]],
         rows_affected: 1,
+        command: None,
     })
 }

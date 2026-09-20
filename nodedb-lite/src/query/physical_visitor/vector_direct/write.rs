@@ -93,7 +93,8 @@ where
             });
 
         let existing = read_row(&crdt, &collection, &doc_id);
-        let row = match (intent, existing) {
+        let has_conflict_updates = !on_conflict_updates.is_empty();
+        let (row, command): (_, &'static str) = match (intent, existing) {
             (VectorDirectWriteIntent::Insert, Some(_)) => {
                 return Err(LiteError::UniqueViolation {
                     collection: collection.clone(),
@@ -105,21 +106,18 @@ where
                     columns: vec![],
                     rows: vec![],
                     rows_affected: 0,
+                    command: Some("INSERT".into()),
                 });
             }
-            (VectorDirectWriteIntent::Upsert, Some(mut stored))
-                if !on_conflict_updates.is_empty() =>
-            {
+            (VectorDirectWriteIntent::Upsert, Some(mut stored)) if has_conflict_updates => {
                 apply_patch(&mut stored, &on_conflict_updates, &incoming)?;
-                stored
+                (stored, "UPDATE")
             }
-            (VectorDirectWriteIntent::Upsert, Some(_)) => incoming,
-            (
-                VectorDirectWriteIntent::Insert
-                | VectorDirectWriteIntent::InsertIfAbsent
-                | VectorDirectWriteIntent::Upsert,
-                None,
-            ) => incoming,
+            (VectorDirectWriteIntent::Upsert, Some(_)) => (incoming, "UPSERT"),
+            (VectorDirectWriteIntent::Insert, None) => (incoming, "INSERT"),
+            (VectorDirectWriteIntent::InsertIfAbsent, None) => (incoming, "INSERT"),
+            (VectorDirectWriteIntent::Upsert, None) if has_conflict_updates => (incoming, "INSERT"),
+            (VectorDirectWriteIntent::Upsert, None) => (incoming, "UPSERT"),
         };
 
         // A stored row keeps exactly one live node: the old one goes before
@@ -132,6 +130,7 @@ where
             columns: vec![],
             rows: vec![],
             rows_affected: 1,
+            command: Some(command.into()),
         })
     }))
 }

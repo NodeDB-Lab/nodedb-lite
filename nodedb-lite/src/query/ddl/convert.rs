@@ -97,6 +97,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 "converted {converted} documents to strict '{source_name}'"
             ))]],
             rows_affected: converted,
+            command: None,
         })
     }
 
@@ -146,6 +147,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 "converted {converted} rows to columnar '{source_name}'"
             ))]],
             rows_affected: converted,
+            command: None,
         })
     }
 
@@ -212,6 +214,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 "converted {converted} rows to document '{source_name}'"
             ))]],
             rows_affected: converted,
+            command: None,
         })
     }
 

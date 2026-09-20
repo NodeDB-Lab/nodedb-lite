@@ -72,7 +72,7 @@ async fn load_segment_bytes<S: StorageEngine>(
 
 /// Helper: delete large segment bytes via the segment ext if available, or
 /// fall back to the KV blob path.
-async fn remove_segment_bytes<S: StorageEngine>(
+pub(super) async fn remove_segment_bytes<S: StorageEngine>(
     storage: &S,
     collection: &str,
     segment_id: u32,
@@ -101,9 +101,9 @@ const META_COLUMNAR_COLLECTIONS: &[u8] = b"meta:columnar_collections";
     zerompk::ToMessagePack,
     zerompk::FromMessagePack,
 )]
-struct SegmentMeta {
-    segment_id: u32,
-    row_count: u64,
+pub(super) struct SegmentMeta {
+    pub(super) segment_id: u32,
+    pub(super) row_count: u64,
     /// Milliseconds since Unix epoch when this segment was first written.
     /// Used by bitemporal purge to determine which superseded segments are
     /// eligible for deletion.
@@ -114,18 +114,18 @@ struct SegmentMeta {
     /// the segment still has live rows. Segments with `Some(t)` where
     /// `t < cutoff_ms` are eligible for physical deletion by `purge_bitemporal_before`.
     #[serde(default)]
-    fully_deleted_at_ms: Option<i64>,
+    pub(super) fully_deleted_at_ms: Option<i64>,
 }
 
 /// Per-collection state. Wrapped in `Mutex` inside `ColumnarEngine`.
-struct CollectionState {
-    mutation: MutationEngine,
+pub(super) struct CollectionState {
+    pub(super) mutation: MutationEngine,
     profile: ColumnarProfile,
     /// Whether this collection has bitemporal system-time tracking.
     bitemporal: bool,
     /// Ordered list of flushed segments (including fully-deleted tombstones for
     /// bitemporal collections — they persist until `purge_bitemporal_before` clears them).
-    segments: Vec<SegmentMeta>,
+    pub(super) segments: Vec<SegmentMeta>,
     /// Next segment ID to assign.
     next_segment_id: u32,
 }
@@ -134,7 +134,7 @@ type CollectionMap = HashMap<String, Arc<Mutex<CollectionState>>>;
 
 /// Manages all columnar collections for a NodeDbLite instance.
 pub struct ColumnarEngine<S: StorageEngine> {
-    storage: Arc<S>,
+    pub(super) storage: Arc<S>,
     collections: RwLock<CollectionMap>,
     /// Optional outbound queue for plain columnar insert sync.
     /// `None` when sync is disabled or not yet configured.
@@ -273,7 +273,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
 
     // -- Internal helpers --
 
-    fn lookup(&self, name: &str) -> Result<Arc<Mutex<CollectionState>>, LiteError> {
+    pub(super) fn lookup(&self, name: &str) -> Result<Arc<Mutex<CollectionState>>, LiteError> {
         let guard = self
             .collections
             .read()
@@ -283,7 +283,7 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         })
     }
 
-    fn lock_state<'a>(
+    pub(super) fn lock_state<'a>(
         state: &'a Arc<Mutex<CollectionState>>,
     ) -> Result<std::sync::MutexGuard<'a, CollectionState>, LiteError> {
         state.lock().map_err(|_| LiteError::LockPoisoned)

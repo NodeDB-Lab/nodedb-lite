@@ -81,6 +81,7 @@ where
             columns: vec![],
             rows: vec![],
             rows_affected: removed,
+            command: Some("DELETE".into()),
         })
     })
 }
@@ -146,6 +147,7 @@ where
             columns: vec![],
             rows: vec![],
             rows_affected: updated,
+            command: Some("UPDATE".into()),
         })
     }))
 }

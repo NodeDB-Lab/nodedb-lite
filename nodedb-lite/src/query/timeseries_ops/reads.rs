@@ -233,6 +233,7 @@ fn bucket_scan(
         columns: final_columns,
         rows: final_rows,
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -277,6 +278,7 @@ fn raw_scan(
         columns: final_columns,
         rows: final_rows,
         rows_affected: 0,
+        command: None,
     })
 }
 

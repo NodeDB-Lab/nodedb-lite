@@ -183,6 +183,7 @@ pub async fn elementwise_op<S: StorageEngine>(
         columns,
         rows,
         rows_affected: 0,
+        command: None,
     })
 }
 

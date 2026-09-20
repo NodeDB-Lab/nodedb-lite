@@ -28,6 +28,7 @@ pub async fn point_get<S: StorageEngine>(
                 columns,
                 rows: vec![values],
                 rows_affected: 0,
+                command: None,
             }),
             None => Ok(QueryResult::empty()),
         }
@@ -44,6 +45,7 @@ pub async fn point_get<S: StorageEngine>(
                         Value::Bytes(bytes),
                     ]],
                     rows_affected: 0,
+                    command: None,
                 })
             }
             None => Ok(QueryResult::empty()),
@@ -66,6 +68,7 @@ pub async fn scan<S: StorageEngine>(
             columns,
             rows,
             rows_affected: 0,
+            command: None,
         })
     } else {
         let crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
@@ -82,6 +85,7 @@ pub async fn scan<S: StorageEngine>(
             columns: vec!["id".into(), "data".into()],
             rows,
             rows_affected: 0,
+            command: None,
         })
     }
 }
@@ -138,6 +142,7 @@ pub async fn range_scan<S: StorageEngine>(
             columns,
             rows,
             rows_affected: 0,
+            command: None,
         })
     } else {
         let crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
@@ -167,6 +172,7 @@ pub async fn range_scan<S: StorageEngine>(
             columns: vec!["id".into(), "data".into()],
             rows,
             rows_affected: 0,
+            command: None,
         })
     }
 }
@@ -202,6 +208,7 @@ pub async fn indexed_fetch<S: StorageEngine>(
             columns,
             rows,
             rows_affected: 0,
+            command: None,
         })
     } else {
         let crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
@@ -225,6 +232,7 @@ pub async fn indexed_fetch<S: StorageEngine>(
             columns: vec!["id".into(), "data".into()],
             rows,
             rows_affected: 0,
+            command: None,
         })
     }
 }
@@ -242,6 +250,7 @@ pub async fn index_lookup<S: StorageEngine>(
         columns: vec!["document_id".into()],
         rows,
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -260,6 +269,7 @@ pub async fn estimate_count<S: StorageEngine>(
         columns: vec!["count".into()],
         rows: vec![vec![Value::Integer(count as i64)]],
         rows_affected: 0,
+        command: None,
     })
 }
 

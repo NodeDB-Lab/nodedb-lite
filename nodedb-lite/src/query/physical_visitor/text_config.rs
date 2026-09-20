@@ -45,6 +45,7 @@ where
             columns: vec![],
             rows: vec![],
             rows_affected: 0,
+            command: None,
         })
     }))
 }

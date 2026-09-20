@@ -70,6 +70,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 "timeseries collection '{name}' created (interval: {interval})"
             ))]],
             rows_affected: 0,
+            command: None,
         })
     }
 }

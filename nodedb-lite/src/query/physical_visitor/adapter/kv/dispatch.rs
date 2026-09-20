@@ -174,7 +174,10 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             rls_write_check,
         } => writes::persist(engine, collection, key, rls_write_check),
 
-        KvOp::Truncate { collection } => writes::truncate(engine, collection),
+        KvOp::Truncate {
+            collection,
+            restart_identity,
+        } => writes::truncate(engine, collection, *restart_identity),
 
         KvOp::Incr {
             collection,

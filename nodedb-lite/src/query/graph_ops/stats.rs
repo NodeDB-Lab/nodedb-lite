@@ -55,6 +55,7 @@ pub async fn graph_stats<S: StorageEngine>(
         columns,
         rows,
         rows_affected: 0,
+        command: None,
     })
 }
 

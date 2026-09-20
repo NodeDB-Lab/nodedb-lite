@@ -154,5 +154,6 @@ pub async fn project<S: StorageEngine>(
         columns,
         rows,
         rows_affected: 0,
+        command: None,
     })
 }

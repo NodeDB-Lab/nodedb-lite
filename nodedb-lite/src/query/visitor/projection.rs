@@ -361,6 +361,7 @@ mod tests {
                 vec![Value::Integer(2), Value::Integer(5), Value::Integer(3)],
             ],
             rows_affected: 0,
+            command: None,
         }
     }
 
@@ -409,6 +410,7 @@ mod tests {
                 Value::String(r#"{"name":"Ann","age":30}"#.into()),
             ]],
             rows_affected: 0,
+            command: None,
         };
         let projection = vec![
             Projection::Column("t.name".into()),

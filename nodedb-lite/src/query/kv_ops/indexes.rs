@@ -14,9 +14,14 @@ use crate::storage::engine::{StorageEngine, WriteOp};
 
 use super::reads::{decode_value, is_expired, split_kv_key};
 
+/// Prefix of every index posting a collection owns, across all fields.
+pub(super) fn collection_index_prefix(collection: &str) -> String {
+    format!("kv:{collection}:")
+}
+
 /// Index key prefix in Meta namespace.
 fn meta_prefix(collection: &str, field: &str) -> String {
-    format!("kv:{collection}:{field}:")
+    format!("{}{field}:", collection_index_prefix(collection))
 }
 
 /// Full meta key for a given (collection, field, value).
@@ -36,6 +41,7 @@ pub async fn kv_register_index<S: StorageEngine>(
             columns: vec![],
             rows: vec![],
             rows_affected: 0,
+            command: None,
         });
     }
 
@@ -87,6 +93,7 @@ pub async fn kv_register_index<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: indexed,
+        command: None,
     })
 }
 
@@ -128,6 +135,7 @@ pub async fn kv_drop_index<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: count,
+        command: None,
     })
 }
 

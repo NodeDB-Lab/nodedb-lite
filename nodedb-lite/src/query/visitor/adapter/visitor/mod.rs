@@ -17,7 +17,7 @@
 //! - `array`         — insert_array/delete_array/array_slice/array_project/
 //!   array_agg/array_elementwise/array_flush/array_compact.
 //! - `vector`        — vector_primary_insert/vector_primary_delete/
-//!   vector_primary_update.
+//!   vector_primary_update/vector_primary_truncate.
 //! - `kv`            — kv_insert.
 
 mod admin;

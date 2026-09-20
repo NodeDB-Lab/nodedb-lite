@@ -128,6 +128,27 @@ impl LiteSequenceRegistry {
         Ok(value)
     }
 
+    /// Restart every sequence named `<collection>_<field>_seq` so its next
+    /// value is its start value. Backs `TRUNCATE ... RESTART IDENTITY`.
+    /// Returns the names restarted.
+    pub fn restart_collection_sequences(&self, collection: &str) -> Vec<String> {
+        let prefix = format!("{collection}_");
+        let map = self.sequences.lock().unwrap_or_else(|p| p.into_inner());
+        let mut restarted = Vec::new();
+        for (name, handle) in map.iter() {
+            if !(name.starts_with(&prefix) && name.ends_with("_seq")) {
+                continue;
+            }
+            handle.counter.store(
+                handle.def.start_value - handle.def.increment,
+                Ordering::Relaxed,
+            );
+            handle.called.store(false, Ordering::Relaxed);
+            restarted.push(name.clone());
+        }
+        restarted
+    }
+
     /// List all sequence names.
     pub fn names(&self) -> Vec<String> {
         let map = self.sequences.lock().unwrap_or_else(|p| p.into_inner());
@@ -177,6 +198,38 @@ mod tests {
         reg.register(make_def("s1"));
         reg.setval("s1", 50).unwrap();
         assert_eq!(reg.nextval("s1").unwrap(), 51);
+    }
+
+    #[test]
+    fn restart_collection_sequences_makes_start_the_next_value() {
+        let reg = LiteSequenceRegistry::new();
+        reg.register(make_def("orders_id_seq"));
+        reg.register(make_def("orders_line_seq"));
+        reg.register(make_def("orders_archive_id_seq"));
+        reg.register(make_def("users_id_seq"));
+        for _ in 0..3 {
+            reg.nextval("orders_id_seq").unwrap();
+            reg.nextval("orders_line_seq").unwrap();
+            reg.nextval("orders_archive_id_seq").unwrap();
+            reg.nextval("users_id_seq").unwrap();
+        }
+        let mut restarted = reg.restart_collection_sequences("orders");
+        restarted.sort();
+        assert_eq!(
+            restarted,
+            vec![
+                "orders_archive_id_seq".to_string(),
+                "orders_id_seq".to_string(),
+                "orders_line_seq".to_string()
+            ]
+        );
+        assert!(
+            reg.currval("orders_id_seq").is_err(),
+            "restart clears currval"
+        );
+        assert_eq!(reg.nextval("orders_id_seq").unwrap(), 1);
+        assert_eq!(reg.nextval("orders_line_seq").unwrap(), 1);
+        assert_eq!(reg.nextval("users_id_seq").unwrap(), 4);
     }
 
     #[test]

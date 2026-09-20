@@ -49,6 +49,7 @@ pub async fn handle_checkpoint<S: StorageEngine>(
         columns: vec!["lsn".into()],
         rows: vec![vec![Value::Integer(0)]],
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -86,6 +87,7 @@ pub async fn handle_unregister_collection<S: StorageEngine>(
         columns: vec!["deleted_entries".into()],
         rows: vec![vec![Value::Integer(deleted as i64)]],
         rows_affected: deleted,
+        command: None,
     })
 }
 
@@ -109,6 +111,7 @@ pub async fn handle_unregister_materialized_view<S: StorageEngine>(
         columns: vec!["deleted_entries".into()],
         rows: vec![vec![Value::Integer(deleted as i64)]],
         rows_affected: deleted,
+        command: None,
     })
 }
 
@@ -144,6 +147,7 @@ pub async fn handle_rename_collection<S: StorageEngine>(
         columns: vec!["renamed_entries".into()],
         rows: vec![vec![Value::Integer(renamed as i64)]],
         rows_affected: renamed,
+        command: None,
     })
 }
 

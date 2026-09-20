@@ -84,6 +84,7 @@ pub async fn handle_wal_append<S: StorageEngine>(
         columns: vec!["lsn".into()],
         rows: vec![vec![Value::Integer(lsn as i64)]],
         rows_affected: 0,
+        command: None,
     })
 }
 

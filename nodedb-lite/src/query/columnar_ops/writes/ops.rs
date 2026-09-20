@@ -165,6 +165,7 @@ pub async fn insert<S: StorageEngine>(
             columns: Vec::new(),
             rows: Vec::new(),
             rows_affected: affected,
+            command: Some("INSERT".into()),
         },
         inserted_rows,
     ))
@@ -241,6 +242,7 @@ pub async fn update<S: StorageEngine>(
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: affected,
+        command: Some("UPDATE".into()),
     })
 }
 
@@ -294,6 +296,7 @@ pub async fn delete<S: StorageEngine>(
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: affected,
+        command: Some("DELETE".into()),
     })
 }
 

@@ -238,5 +238,6 @@ pub(crate) fn describe_strict_collection(
         ],
         rows,
         rows_affected: 0,
+        command: None,
     }
 }

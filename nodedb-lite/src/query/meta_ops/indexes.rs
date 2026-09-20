@@ -31,6 +31,7 @@ pub async fn handle_rebuild_index<S: StorageEngine>(
                 "index '{field}' on '{collection}' rebuilt"
             ))]],
             rows_affected: 1,
+            command: None,
         })
     } else {
         // No specific index: nothing to do without an explicit field name.
@@ -40,6 +41,7 @@ pub async fn handle_rebuild_index<S: StorageEngine>(
                 "no index name specified for '{collection}' — nothing rebuilt"
             ))]],
             rows_affected: 0,
+            command: None,
         })
     }
 }

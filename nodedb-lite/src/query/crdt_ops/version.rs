@@ -83,6 +83,7 @@ pub async fn handle_read_at_version<S: StorageEngine>(
         columns: vec!["document".to_string()],
         rows: row,
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -99,6 +100,7 @@ pub async fn handle_get_version_vector<S: StorageEngine>(
         columns: vec!["version_vector_json".to_string()],
         rows: vec![vec![Value::String(json)]],
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -124,6 +126,7 @@ pub async fn handle_export_delta<S: StorageEngine>(
         columns: vec!["delta_bytes".to_string()],
         rows: vec![vec![Value::Bytes(delta_bytes)]],
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -151,6 +154,7 @@ pub async fn handle_restore_to_version<S: StorageEngine>(
         columns: vec!["delta_bytes".to_string()],
         rows: vec![vec![Value::Bytes(delta_bytes)]],
         rows_affected: 1,
+        command: None,
     })
 }
 
@@ -176,5 +180,6 @@ pub async fn handle_compact_at_version<S: StorageEngine>(
         columns: vec![],
         rows: vec![],
         rows_affected: 1,
+        command: None,
     })
 }

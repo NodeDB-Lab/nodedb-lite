@@ -83,6 +83,7 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                     columns,
                     rows,
                     rows_affected: 0,
+                    command: None,
                 })
             }))
         }
@@ -117,6 +118,7 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                     columns,
                     rows,
                     rows_affected: 0,
+                    command: None,
                 })
             }))
         }
@@ -150,6 +152,7 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                     columns,
                     rows,
                     rows_affected: 0,
+                    command: None,
                 })
             }))
         }
@@ -258,6 +261,7 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                     columns,
                     rows,
                     rows_affected: 0,
+                    command: None,
                 })
             }))
         }
@@ -412,6 +416,7 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                     columns,
                     rows,
                     rows_affected: 0,
+                    command: None,
                 })
             }))
         }
@@ -449,6 +454,7 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                     columns: vec![],
                     rows: vec![],
                     rows_affected: 1,
+                    command: None,
                 })
             }))
         }
@@ -480,6 +486,7 @@ pub(super) fn execute_text_op<'a, S: StorageEngine + 'a>(
                     columns: vec![],
                     rows: vec![],
                     rows_affected: if removed_doc_id.is_some() { 1 } else { 0 },
+                    command: None,
                 })
             }))
         }

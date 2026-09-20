@@ -33,6 +33,7 @@ pub async fn handle_query_collection_size<S: StorageEngine>(
         columns: vec!["size_bytes".into()],
         rows: vec![vec![Value::Integer(total_bytes as i64)]],
         rows_affected: 0,
+        command: None,
     })
 }
 

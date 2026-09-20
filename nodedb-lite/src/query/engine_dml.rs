@@ -78,6 +78,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             columns: Vec::new(),
             rows: Vec::new(),
             rows_affected: affected,
+            command: Some("INSERT".into()),
         })
     }
 
@@ -120,6 +121,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             columns: Vec::new(),
             rows: Vec::new(),
             rows_affected: affected,
+            command: Some("UPDATE".into()),
         })
     }
 
@@ -145,18 +147,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             columns: Vec::new(),
             rows: Vec::new(),
             rows_affected: affected,
+            command: Some("DELETE".into()),
         })
-    }
-
-    pub(super) async fn execute_truncate(
-        &self,
-        collection: &str,
-    ) -> Result<QueryResult, LiteError> {
-        self.crdt
-            .lock()
-            .map_err(|_| LiteError::LockPoisoned)?
-            .clear_collection(collection)
-            .map_err(|e| LiteError::Query(format!("truncate: {e}")))?;
-        Ok(QueryResult::empty())
     }
 }

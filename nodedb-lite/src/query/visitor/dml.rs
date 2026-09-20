@@ -222,6 +222,7 @@ pub(super) fn lower_insert_select<'a, S: StorageEngine + 'a>(
             columns: Vec::new(),
             rows: Vec::new(),
             rows_affected: affected,
+            command: Some("INSERT".into()),
         })
     }))
 }
@@ -310,6 +311,7 @@ pub(super) fn lower_update_from<'a, S: StorageEngine + 'a>(
             columns: Vec::new(),
             rows: Vec::new(),
             rows_affected: affected,
+            command: Some("UPDATE".into()),
         })
     }))
 }
@@ -398,6 +400,7 @@ pub(super) fn lower_merge<'a, S: StorageEngine + 'a>(
             columns: Vec::new(),
             rows: Vec::new(),
             rows_affected: affected,
+            command: Some("MERGE".into()),
         })
     }))
 }

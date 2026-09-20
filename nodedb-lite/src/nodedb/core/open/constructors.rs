@@ -32,7 +32,8 @@ use crate::engine::vector::{RestoredVectorState, VectorState};
 use crate::nodedb::lock_ext::LockExt;
 use crate::storage::engine::StorageEngine;
 
-use crate::nodedb::core::types::{KvWriteBuffer, NodeDbLite};
+use crate::nodedb::core::kv_local::KvLocalState;
+use crate::nodedb::core::types::NodeDbLite;
 
 impl<S: StorageEngine> NodeDbLite<S> {
     /// Open or create a Lite database backed by the given storage engine.
@@ -85,6 +86,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let sync_enabled = config.sync_enabled;
         let kv_cache_capacity = NonZeroUsize::new(config.kv_cache_capacity)
             .ok_or_else(|| NodeDbError::config("kv_cache_capacity must be greater than 0"))?;
+        let kv_local = Arc::new(KvLocalState::new(kv_cache_capacity));
 
         // Only the outbound sync queues (compiled out on wasm32) consume the cap.
         #[cfg(not(target_arch = "wasm32"))]
@@ -208,6 +210,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 spatial: Arc::clone(&spatial),
                 csr: Arc::clone(&csr_arc),
                 governor: Arc::clone(&governor),
+                kv_local: Arc::clone(&kv_local),
             });
 
         // Wire FTS and spatial outbound queues into the query engine so that
@@ -283,11 +286,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             identity_change: tokio::sync::Mutex::new(()),
             flush_lock: tokio::sync::Mutex::new(()),
             sync_enabled,
-            kv_cache: Mutex::new(lru::LruCache::new(kv_cache_capacity)),
-            kv_write_buf: Mutex::new(KvWriteBuffer {
-                ops: Vec::with_capacity(1024),
-                overlay: HashMap::new(),
-            }),
+            kv_local,
             sync_gate: std::sync::RwLock::new(None),
             tasks: crate::tasks::TaskRegistry::default(),
         };

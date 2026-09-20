@@ -32,6 +32,7 @@ pub async fn handle_register_continuous_aggregate<S: StorageEngine>(
         columns: vec!["name".into()],
         rows: vec![vec![Value::String(def.name)]],
         rows_affected: 1,
+        command: None,
     })
 }
 
@@ -46,6 +47,7 @@ pub async fn handle_unregister_continuous_aggregate<S: StorageEngine>(
         columns: vec!["name".into()],
         rows: vec![vec![Value::String(name.to_owned())]],
         rows_affected: 1,
+        command: None,
     })
 }
 
@@ -64,6 +66,7 @@ pub async fn handle_list_continuous_aggregates<S: StorageEngine>(
         columns: vec!["name".into()],
         rows: names,
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -79,6 +82,7 @@ pub async fn handle_apply_continuous_agg_retention<S: StorageEngine>(
         columns: vec!["dropped_buckets".into()],
         rows: vec![vec![Value::Integer(dropped as i64)]],
         rows_affected: dropped as u64,
+        command: None,
     })
 }
 
@@ -93,6 +97,7 @@ pub async fn handle_query_aggregate_watermark<S: StorageEngine>(
         columns: vec!["watermark_ms".into()],
         rows: vec![vec![Value::Integer(wm)]],
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -170,6 +175,7 @@ pub async fn handle_query_aggregate_last_values<S: StorageEngine>(
         ],
         rows,
         rows_affected: 0,
+        command: None,
     })
 }
 
@@ -242,5 +248,6 @@ pub async fn handle_query_aggregate_last_value<S: StorageEngine>(
         ],
         rows: vec![row],
         rows_affected: 0,
+        command: None,
     })
 }

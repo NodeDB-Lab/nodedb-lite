@@ -118,6 +118,7 @@ pub async fn edge_put<S: StorageEngine>(
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: 1,
+        command: Some("INSERT".into()),
     })
 }
 
@@ -181,6 +182,7 @@ pub async fn edge_put_batch<S: StorageEngine>(
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: edges.len() as u64,
+        command: Some("INSERT".into()),
     })
 }
 
@@ -217,6 +219,7 @@ pub async fn edge_delete<S: StorageEngine>(
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: 1,
+        command: Some("DELETE".into()),
     })
 }
 
@@ -265,6 +268,7 @@ pub async fn edge_delete_batch<S: StorageEngine>(
         columns: Vec::new(),
         rows: Vec::new(),
         rows_affected: edges.len() as u64,
+        command: Some("DELETE".into()),
     })
 }
 

@@ -36,6 +36,7 @@ pub(super) fn lower_text_search<'a, S: StorageEngine + 'a>(
                         columns: vec!["id".to_string(), "score".to_string()],
                         rows: vec![],
                         rows_affected: 0,
+                        command: None,
                     })
                 }));
             }

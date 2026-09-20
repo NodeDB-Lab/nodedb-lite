@@ -120,9 +120,10 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
     fn truncate(
         &mut self,
         collection: &str,
+        engine: EngineType,
         restart_identity: bool,
     ) -> Result<LiteFut<'a>, LiteError> {
-        admin::truncate(self.engine, collection, restart_identity)
+        admin::truncate(self.engine, collection, engine, restart_identity)
     }
 
     fn vector_search(&mut self, args: VectorSearchVisitArgs<'_>) -> Result<LiteFut<'a>, LiteError> {
@@ -284,6 +285,15 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         args: VectorPrimaryDeleteVisitArgs<'_>,
     ) -> Result<LiteFut<'a>, LiteError> {
         vector::vector_primary_delete(self.engine, args)
+    }
+
+    fn vector_primary_truncate(
+        &mut self,
+        collection: &str,
+        field: &str,
+        restart_identity: bool,
+    ) -> Result<LiteFut<'a>, LiteError> {
+        vector::vector_primary_truncate(self.engine, collection, field, restart_identity)
     }
 
     fn vector_primary_update(

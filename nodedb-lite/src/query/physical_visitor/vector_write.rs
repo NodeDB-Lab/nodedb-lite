@@ -137,6 +137,7 @@ where
             columns: vec![],
             rows: vec![],
             rows_affected: 1,
+            command: None,
         })
     })
 }
@@ -180,6 +181,7 @@ where
             columns: vec![],
             rows: vec![],
             rows_affected: 1,
+            command: None,
         })
     })
 }
@@ -221,6 +223,7 @@ where
             columns: vec![],
             rows: vec![],
             rows_affected: u64::from(had_node || had_row),
+            command: None,
         })
     })
 }
@@ -264,6 +267,7 @@ where
             columns: vec![],
             rows: vec![],
             rows_affected: 0,
+            command: None,
         })
     }))
 }
@@ -300,6 +304,7 @@ where
             columns,
             rows,
             rows_affected: 0,
+            command: None,
         })
     })
 }
@@ -386,6 +391,7 @@ where
             columns: Vec::new(),
             rows: Vec::new(),
             rows_affected: u64::from(existed),
+            command: None,
         })
     }))
 }
