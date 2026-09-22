@@ -59,7 +59,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake clang libclang-dev pkg-config protobuf-compiler perl
+            cmake clang libclang-dev pkg-config protobuf-compiler perl \
+            libcurl4-openssl-dev libsasl2-dev
       - name: Set up workspace
         uses: ./.github/actions/setup-workspace
         with:
@@ -98,6 +99,8 @@ jobs:
               -p nodedb-lite-ffi -E 'binary(abi_surface)'"
             exit 1
           fi
+      - name: Advisory-ignore policy gate
+        run: python3 scripts/ci/check_advisory_ignores.py
       - name: Install cargo-deny
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2
         with:
@@ -120,7 +123,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake clang libclang-dev pkg-config protobuf-compiler perl
+            cmake clang libclang-dev pkg-config protobuf-compiler perl \
+            libcurl4-openssl-dev libsasl2-dev
       - name: Set up workspace
         uses: ./.github/actions/setup-workspace
         with:

@@ -30,6 +30,14 @@ ignore = [
     "RUSTSEC-2024-0436", # paste; review-by: 2027-01-31
     "RUSTSEC-2023-0089", # atomic-polyfill; review-by: 2027-01-31
     "RUSTSEC-2021-0153", # encoding; review-by: 2027-01-31
+    # loro-internal pulls im and its two support crates transitively. All
+    # three were archived upstream on 2026-05-03, so no fixed version exists
+    # and no known security impact applies. The maintained forks (imbl,
+    # imbl-sized-chunks) are loro's call, not ours. Revisit on each loro
+    # upgrade.
+    "RUSTSEC-2026-0247", # bitmaps; review-by: 2027-05-01
+    "RUSTSEC-2026-0248", # im; review-by: 2027-05-01
+    "RUSTSEC-2026-0251", # sized-chunks; review-by: 2027-05-01
 ]
 
 [licenses]
