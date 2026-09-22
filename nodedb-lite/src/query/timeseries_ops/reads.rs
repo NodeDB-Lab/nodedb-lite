@@ -196,8 +196,11 @@ fn bucket_scan(
                     }
                 }
                 "linear" | "next" => {
-                    // For simplicity, emit null; true linear/next interpolation
-                    // requires a forward pass. The current engine is single-pass.
+                    // Refused at dispatch (`physical_visitor/adapter/timeseries.rs`):
+                    // interpolation needs a forward pass the single-pass engine
+                    // lacks, and emitting NULL silently was the bug. Kept as the
+                    // null path so a future caller cannot get a wrong answer if
+                    // the refusal ever moves.
                     agg_ops.iter().map(|_| Value::Null).collect()
                 }
                 literal => {

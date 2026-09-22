@@ -44,6 +44,18 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                     detail: "ORDER BY is not supported on the timeseries engine in Lite".into(),
                 });
             }
+            // `linear` and `next` interpolate between buckets, which needs a
+            // forward pass the single-pass engine does not have. It used to
+            // emit NULL for both, so a caller who asked for interpolation got
+            // silent gaps instead; refuse at dispatch and keep the strategies
+            // that do work (`prev`, `null`/`none`/"" and numeric literals).
+            if matches!(gap_fill.as_str(), "linear" | "next") {
+                return Err(LiteError::Unsupported {
+                    detail: "gap_fill='linear'/'next' is not implemented on the timeseries \
+                             engine in Lite; use 'prev', 'null' or a literal value"
+                        .into(),
+                });
+            }
             // Timeseries does not implement all-versions audit in Lite.
             if system_time.is_all_versions() {
                 return Err(LiteError::Unsupported {
