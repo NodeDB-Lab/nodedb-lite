@@ -15,6 +15,11 @@
 #
 # While the label is on, every subsequent push to the PR re-runs the suites.
 #
+# A nightly `schedule` run probes the same suites against whatever the sibling
+# refs currently point at, so upstream breakage surfaces on a quiet run of
+# `main` instead of on the next PR a maintainer labels. GitHub sends failure
+# notifications for a scheduled run to whoever last edited the cron line.
+#
 # PRs build against the sibling nodedb/pagedb sources (the `sources` default);
 # the release path passes `registry` instead. See test.yml's header.
 
@@ -25,6 +30,8 @@ on:
     branches: [main]
     types: [labeled, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC daily
 
 concurrency:
   group: ci-${{ github.ref }}
