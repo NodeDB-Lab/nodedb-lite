@@ -41,6 +41,29 @@ impl NodeDbLiteWasm {
         serde_wasm_bindgen::to_value(&json).map_err(|e| JsError::new(&e.to_string()))
     }
 
+    /// Alias for [`Self::execute_sql`]. The deployment examples named the
+    /// statement entry point `sql` before the binding settled on
+    /// `executeSql`; both call the same path.
+    #[wasm_bindgen(js_name = "sql")]
+    pub async fn sql(&self, sql: &str) -> Result<JsValue, JsError> {
+        self.execute_sql(sql).await
+    }
+
+    /// Alias for [`Self::execute_sql`], for callers following the examples
+    /// that spelled it `exec`.
+    #[wasm_bindgen(js_name = "exec")]
+    pub async fn exec(&self, sql: &str) -> Result<JsValue, JsError> {
+        self.execute_sql(sql).await
+    }
+
+    /// Alias for [`Self::execute_sql`], for callers following the examples
+    /// that spelled it `query`. Typed search stays on [`Self::text_search`]
+    /// and [`Self::vector_search`].
+    #[wasm_bindgen(js_name = "query")]
+    pub async fn query(&self, sql: &str) -> Result<JsValue, JsError> {
+        self.execute_sql(sql).await
+    }
+
     /// Execute a SQL query. Returns JSON with columns and rows.
     #[wasm_bindgen(js_name = "executeSql")]
     pub async fn execute_sql(&self, sql: &str) -> Result<JsValue, JsError> {

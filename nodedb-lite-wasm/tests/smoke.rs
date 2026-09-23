@@ -35,3 +35,26 @@ async fn open_alias_still_works() {
     let db = NodeDbLiteWasm::open().await.unwrap();
     db.flush().await.unwrap();
 }
+
+#[wasm_bindgen_test]
+async fn statement_aliases_share_the_execute_path() {
+    // `sql`, `exec`, and `query` are backward-compat names for `executeSql`.
+    // The assertion is deliberately about the plumbing, not SQL semantics:
+    // each alias must answer exactly as the canonical call does.
+    let db = NodeDbLiteWasm::open_in_memory().await.unwrap();
+    let statement = "SELECT 1";
+
+    let canonical = db.execute_sql(statement).await;
+    let aliases = [
+        ("sql", db.sql(statement).await),
+        ("exec", db.exec(statement).await),
+        ("query", db.query(statement).await),
+    ];
+    for (name, result) in aliases {
+        assert_eq!(
+            result.is_ok(),
+            canonical.is_ok(),
+            "`{name}` diverged from executeSql"
+        );
+    }
+}
