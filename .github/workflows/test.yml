@@ -71,6 +71,15 @@ jobs:
         run: cargo clippy --workspace --all-targets --profile ci -- -D warnings
       - name: Check wasm32 target
         run: cargo check -p nodedb-lite-wasm --target wasm32-unknown-unknown
+
+      # The shared-crate wasm job and the schedule that reports a red `main` are
+      # both invisible in review and easy to undo by accident. The gate asserts
+      # their shape, and `--self-test` proves each assertion still rejects the
+      # configuration it exists to catch.
+      - name: Wasm-probe and scheduled-main gate
+        run: |
+          python3 scripts/ci/check_wasm_probe.py --self-test
+          python3 scripts/ci/check_wasm_probe.py
       # build.rs regenerates the C header on every build. Nothing else notices
       # when the committed copy no longer matches what cbindgen produces, so
       # the repo can ship a header that declares a surface the library does

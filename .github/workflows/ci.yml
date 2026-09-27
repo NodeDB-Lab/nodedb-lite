@@ -25,6 +25,12 @@ on:
     branches: [main]
     types: [labeled, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+  # A nightly probe of `main` itself. The label gate keeps upstream churn out of
+  # PR runs, which means nothing else reports a red `main`: without this, the
+  # first run to notice is the next PR a maintainer labels. GitHub sends failure
+  # notifications for a scheduled run to whoever last edited the cron line.
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC daily, staggered from NodeDB's 04:00
 
 concurrency:
   group: ci-${{ github.ref }}

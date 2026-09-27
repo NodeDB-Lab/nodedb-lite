@@ -101,3 +101,63 @@ jobs:
 
       - name: Run WASM browser tests (headless Chrome)
         run: wasm-pack test --headless --chrome nodedb-lite-wasm
+
+  # The suites of the shared crates Lite consumes, executed on a wasm target.
+  #
+  # Lite is a separate workspace: its own tests never load `nodedb-wal`,
+  # `nodedb-crdt` and friends onto a wasm runtime, so a target-specific panic in
+  # them reaches Lite as a broken release. This job runs their test binaries
+  # under wasmtime against the sibling checkout `setup-workspace` materialises.
+  #
+  # Shape the gate `scripts/ci/check_wasm_probe.py` pins:
+  #   - sibling mode only: registry mode has no `.ci-sources/nodedb` to test;
+  #   - `cargo test`, never `cargo check`, because a check cannot see a panic;
+  #   - all sixteen shared crates in the `-p` list;
+  #   - `RUSTFLAGS` cleared at job level: a workflow-level `RUSTFLAGS` outranks
+  #     `CARGO_TARGET_*_RUSTFLAGS`, and the Origin workflow this job came from
+  #     points the linker at mold, which cannot link a wasm target. This
+  #     repository sets no `RUSTFLAGS` today, so the line is defensive here: it
+  #     keeps the job correct if one is ever added to this workflow;
+  #   - a runner that raises the wasm stack, because an unoptimized `ci`-profile
+  #     test binary overflows the runtime default.
+  shared-crates-wasip1:
+    name: WASM tests (shared crates, wasip1)
+    if: inputs.sources == 'sibling'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime -W max-wasm-stack=33554432 --dir=.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust + wasm target
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Install wasmtime
+        uses: bytecodealliance/actions/wasmtime/setup@9152e710e9f7182e4c29ad218e4f335a7b203613 # v1
+        with:
+          version: "35.0.0"
+
+      - name: Set up workspace
+        uses: ./.github/actions/setup-workspace
+        with:
+          sources: ${{ inputs.sources }}
+          nodedb-ref: ${{ inputs.nodedb-ref }}
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: ".ci-sources/nodedb -> target"
+          prefix-key: lite-shared-wasip1
+
+      - name: Run shared crate tests (wasip1)
+        working-directory: .ci-sources/nodedb
+        run: |
+          cargo test --profile ci --target wasm32-wasip1 \
+            -p nodedb-types -p nodedb-codec -p nodedb-physical -p nodedb-mem \
+            -p nodedb-crdt -p nodedb-columnar -p nodedb-fts -p nodedb-graph \
+            -p nodedb-spatial -p nodedb-strict -p nodedb-sql -p nodedb-query \
+            -p nodedb-array -p nodedb-vector -p nodedb-client -p nodedb-wal \
+            -- --skip top1_recall
