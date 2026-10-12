@@ -19,6 +19,7 @@ type PendingArrayAcks = std::collections::HashMap<String, ArrayAckMsg>;
 /// Pending array catch-up requests keyed by array name, sent in name order.
 type PendingArrayCatchups = std::collections::BTreeMap<String, ArrayCatchupRequestMsg>;
 
+use super::array_push::ArrayPushWindow;
 use super::config::{SyncConfig, SyncState};
 use crate::sync::clock::VectorClock;
 use crate::sync::compensation::{CompensationHandler, CompensationRegistry};
@@ -133,6 +134,9 @@ pub struct SyncClient {
     /// `RowPushReject` frames waiting for the next push tick, one per
     /// `RowPush` this replica refused. Bounded by `ROW_PUSH_REJECT_CAP`.
     pub(super) pending_row_push_rejects: Arc<Mutex<Vec<RowPushRejectMsg>>>,
+    /// Per-session array push state: the open delta window, schema
+    /// announces, and ops held until the next session. Reset on connect.
+    pub(super) array_push: Arc<Mutex<ArrayPushWindow>>,
 }
 
 impl SyncClient {
@@ -177,6 +181,7 @@ impl SyncClient {
             row_push_watermark: Arc::new(Mutex::new(std::collections::HashMap::new())),
             delta_targets: Arc::new(Mutex::new(std::collections::HashMap::new())),
             pending_row_push_rejects: Arc::new(Mutex::new(Vec::new())),
+            array_push: Arc::new(Mutex::new(ArrayPushWindow::default())),
         }
     }
 
@@ -286,6 +291,11 @@ impl SyncClient {
     /// `CollectionSchema` (opcode `0x13`).
     pub(crate) fn announced_collections(&self) -> &Arc<Mutex<std::collections::HashSet<String>>> {
         &self.announced_collections
+    }
+
+    /// Access the per-session array push state.
+    pub(crate) fn array_push(&self) -> &Arc<Mutex<ArrayPushWindow>> {
+        &self.array_push
     }
 
     /// Returns true when this row push should be applied.

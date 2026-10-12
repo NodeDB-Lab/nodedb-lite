@@ -7,6 +7,7 @@ mod delegate_impl;
 mod fts_handlers;
 mod import_collection_schema;
 mod kv_handlers;
+mod outbound_state;
 mod producer_state;
 mod reject;
 mod spatial_handlers;

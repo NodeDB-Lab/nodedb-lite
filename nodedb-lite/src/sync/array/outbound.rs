@@ -7,12 +7,13 @@
 //! 2. Mints a fresh HLC via [`ReplicaState::next_hlc`].
 //! 3. Builds the [`ArrayOp`].
 //! 4. Appends to the durable [`KvOpLogStore`] (permanent record for GC).
-//! 5. Enqueues in the durable [`PendingQueue`] (transport buffer).
+//! 5. Enqueues in the durable [`PendingQueue`], which the sync push loop
+//!    drains to Origin.
 //!
 //! The caller must ensure the local engine write has already succeeded before
 //! calling [`ArrayOutbound`] methods. If emit fails after a successful engine
-//! write, the error is returned and the write is **not** rolled back — ack
-//! reconciliation in later phases will detect the gap.
+//! write, the error is returned to the caller and the write is **not** rolled
+//! back. The cell stays local and never reaches Origin.
 
 use std::sync::Arc;
 

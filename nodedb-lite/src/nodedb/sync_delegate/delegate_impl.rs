@@ -132,6 +132,35 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
         super::array::begin_array_catchup_impl(self)
     }
 
+    async fn pending_array_ops(
+        &self,
+        after: Option<nodedb_array::sync::hlc::Hlc>,
+        limit: usize,
+    ) -> Result<Vec<crate::sync::array::PendingArrayOp>, crate::error::LiteError> {
+        super::array::pending_array_ops_impl(self, after, limit).await
+    }
+
+    async fn persist_array_op_seq(
+        &self,
+        op: &crate::sync::array::PendingArrayOp,
+    ) -> Result<(), crate::error::LiteError> {
+        super::array::persist_array_op_seq_impl(self, op).await
+    }
+
+    async fn retire_array_ops(
+        &self,
+        hlcs: &[nodedb_array::sync::hlc::Hlc],
+    ) -> Result<(), crate::error::LiteError> {
+        super::array::retire_array_ops_impl(self, hlcs).await
+    }
+
+    fn array_schema_announce(
+        &self,
+        array: &str,
+    ) -> Result<Option<nodedb_types::sync::wire::ArraySchemaSyncMsg>, crate::error::LiteError> {
+        super::array::array_schema_announce_impl(self, array)
+    }
+
     async fn pending_columnar_batches(
         &self,
     ) -> Vec<(
@@ -332,49 +361,15 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
     }
 
     async fn clear_engine_in_flight(&self) {
-        if let Some(q) = &self.columnar_outbound {
-            q.clear_in_flight().await;
-        }
-        if let Some(q) = &self.timeseries_outbound {
-            q.clear_in_flight().await;
-        }
-        if let Some(q) = &self.vector_outbound {
-            q.clear_in_flight().await;
-        }
-        if let Some(q) = &self.fts_outbound {
-            q.clear_in_flight().await;
-        }
-        if let Some(q) = &self.spatial_outbound {
-            q.clear_in_flight().await;
-        }
-        if let Some(q) = &self.kv_outbound {
-            q.clear_in_flight().await;
-        }
+        super::outbound_state::clear_engine_in_flight_impl(self).await
     }
 
     async fn next_stream_seq(&self, stream_id: u64) -> u64 {
-        match self.stream_seq.next_seq(stream_id).await {
-            Ok(seq) => seq,
-            Err(e) => {
-                tracing::warn!(
-                    stream_id,
-                    error = %e,
-                    "SyncDelegate::next_stream_seq: persist failed; using sentinel 0"
-                );
-                0
-            }
-        }
+        super::outbound_state::next_stream_seq_impl(self, stream_id).await
     }
 
     async fn record_stream_ack(&self, stream_id: u64, applied_seq: u64) {
-        if let Err(e) = self.stream_seq.record_ack(stream_id, applied_seq).await {
-            tracing::warn!(
-                stream_id,
-                applied_seq,
-                error = %e,
-                "SyncDelegate::record_stream_ack: persist failed; ignoring"
-            );
-        }
+        super::outbound_state::record_stream_ack_impl(self, stream_id, applied_seq).await
     }
 
     async fn persist_producer_state(&self, producer_id: u64, accepted_epoch: u64) {

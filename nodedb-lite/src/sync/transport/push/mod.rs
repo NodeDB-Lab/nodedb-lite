@@ -3,6 +3,7 @@
 //! sibling modules; the shared send / encode primitives live in `send`; the
 //! tick coordinator loops (`delta_push_loop`, `ping_loop`) live in `loops`.
 
+mod array;
 mod columnar;
 // `control` is visible within the `transport` module so `transport::tests` can
 // drive `push_collection_schemas` / `push_crdt_deltas` directly for the

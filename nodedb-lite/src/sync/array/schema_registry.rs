@@ -227,6 +227,21 @@ impl<S: StorageEngine> SchemaRegistry<S> {
         }
     }
 
+    /// Export `name`'s current `schema_hlc` and Loro snapshot together.
+    ///
+    /// Both come from one lock acquisition, so the HLC always describes the
+    /// snapshot it travels with. Returns `None` if `name` is not registered.
+    pub fn export_versioned(&self, name: &str) -> Result<Option<(Hlc, Vec<u8>)>, LiteError> {
+        let docs = self.docs.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let Some(doc) = docs.get(name) else {
+            return Ok(None);
+        };
+        let bytes = doc.export_snapshot().map_err(|e| LiteError::Storage {
+            detail: format!("schema_registry export_versioned '{name}': {e}"),
+        })?;
+        Ok(Some((doc.schema_hlc(), bytes)))
+    }
+
     // ─── Internal helpers ─────────────────────────────────────────────────────
 
     async fn persist(
@@ -393,5 +408,17 @@ mod tests {
         let reg = make_registry(storage).await;
         let result = reg.export_snapshot("nonexistent").unwrap();
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn export_versioned_pairs_the_schema_hlc_with_its_snapshot() {
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+        let reg = make_registry(storage).await;
+        let put_hlc = reg.put_schema("v", &simple_schema("v")).await.unwrap();
+
+        let (hlc, snapshot) = reg.export_versioned("v").unwrap().unwrap();
+        assert_eq!(hlc, put_hlc);
+        assert!(!snapshot.is_empty(), "the snapshot carries the schema");
+        assert!(reg.export_versioned("nonexistent").unwrap().is_none());
     }
 }

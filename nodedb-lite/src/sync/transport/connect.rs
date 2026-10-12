@@ -44,6 +44,11 @@ pub(super) async fn connect_and_run(
     client.reset_flow_control().await;
     client.clear_fenced();
 
+    // Reset the array push window: the new session announces every array's
+    // schema again and re-sends every unconfirmed op from the queue head.
+    // Ops held for the last session become sendable again.
+    client.array_push().lock().await.reset();
+
     // Clear in-flight maps for all engine outbound queues. The durable entries
     // are still in storage; clearing in-flight makes them eligible for
     // re-drain → re-send → Origin deduplicates via its idempotent gate.

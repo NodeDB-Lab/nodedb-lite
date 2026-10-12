@@ -26,9 +26,10 @@
 //! Backpressure is enforced at the [`PendingQueue`] (100k-op cap); overflow
 //! surfaces as [`crate::error::LiteError::Backpressure`].
 //!
-//! Transport wiring (WebSocket/HTTP dispatch into `ArrayInbound` and out of
-//! `PendingQueue`) is handled by a separate layer; this module is transport-
-//! agnostic and exercised in tests by hand-constructed wire messages.
+//! Transport wiring (WebSocket dispatch into `ArrayInbound` and the push loop
+//! that drains `PendingQueue`) lives in `crate::sync::transport`. This module
+//! is transport-agnostic. [`reject_policy`] decides what happens to a local op
+//! Origin refuses.
 
 pub mod ack_sender;
 pub mod catchup;
@@ -36,6 +37,7 @@ pub mod inbound;
 pub mod op_log_store;
 pub mod outbound;
 pub mod pending;
+pub mod reject_policy;
 pub mod replica_state;
 pub mod schema_registry;
 
@@ -44,6 +46,7 @@ pub use catchup::CatchupTracker;
 pub use inbound::{ArrayInbound, InboundOutcome, LiteApplyEngine};
 pub use op_log_store::KvOpLogStore;
 pub use outbound::ArrayOutbound;
-pub use pending::PendingQueue;
+pub use pending::{PendingArrayOp, PendingQueue};
+pub use reject_policy::{RejectDisposition, reject_disposition};
 pub use replica_state::ReplicaState;
 pub use schema_registry::SchemaRegistry;

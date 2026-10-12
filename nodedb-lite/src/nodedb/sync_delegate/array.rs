@@ -7,16 +7,22 @@
 //! [`CatchupTracker`](crate::sync::array::CatchupTracker). The next session's
 //! `ArrayCatchupRequest` starts at that HLC, so Origin re-sends only the ops
 //! this replica has not applied.
+//!
+//! The push-side functions read and retire the durable array pending queue
+//! and build the `ArraySchema` announce the push loop sends before an array's
+//! first delta in each session.
 
 use nodedb_array::sync::hlc::Hlc;
 use nodedb_array::sync::op_codec;
 use nodedb_types::sync::wire::{
     AckStatus, ArrayAckMsg, ArrayCatchupRequestMsg, ArrayDeltaBatchMsg, ArrayDeltaMsg,
-    ArrayRejectMsg, ArrayRejectReason, ArraySnapshotChunkMsg, ArraySnapshotMsg,
+    ArrayRejectMsg, ArrayRejectReason, ArraySchemaSyncMsg, ArraySnapshotChunkMsg, ArraySnapshotMsg,
 };
 
+use crate::error::LiteError;
 use crate::nodedb::core::NodeDbLite;
 use crate::storage::engine::StorageEngine;
+use crate::sync::array::PendingArrayOp;
 use crate::sync::array::inbound::outcome::InboundOutcome;
 
 /// The ack Origin's GC frontier advances on: `hlc` is applied on `array`.
@@ -234,4 +240,50 @@ pub(super) fn begin_array_catchup_impl<S: StorageEngine>(
         );
         Vec::new()
     })
+}
+
+pub(super) async fn pending_array_ops_impl<S: StorageEngine>(
+    db: &NodeDbLite<S>,
+    after: Option<Hlc>,
+    limit: usize,
+) -> Result<Vec<PendingArrayOp>, LiteError> {
+    db.array_outbound.pending().scan_after(after, limit).await
+}
+
+pub(super) async fn persist_array_op_seq_impl<S: StorageEngine>(
+    db: &NodeDbLite<S>,
+    op: &PendingArrayOp,
+) -> Result<(), LiteError> {
+    if db.array_outbound.pending().set_seq(op.hlc, op.seq).await? {
+        return Ok(());
+    }
+    Err(LiteError::Storage {
+        detail: format!(
+            "array '{}' op at {}ms left the pending queue before its seq was persisted; it is not sent",
+            op.array, op.hlc.physical_ms
+        ),
+    })
+}
+
+pub(super) async fn retire_array_ops_impl<S: StorageEngine>(
+    db: &NodeDbLite<S>,
+    hlcs: &[Hlc],
+) -> Result<(), LiteError> {
+    db.array_outbound.pending().retire(hlcs).await.map(|_| ())
+}
+
+pub(super) fn array_schema_announce_impl<S: StorageEngine>(
+    db: &NodeDbLite<S>,
+    array: &str,
+) -> Result<Option<ArraySchemaSyncMsg>, LiteError> {
+    let announce =
+        db.array_schemas
+            .export_versioned(array)?
+            .map(|(schema_hlc, snapshot_payload)| ArraySchemaSyncMsg {
+                array: array.to_owned(),
+                replica_id: db.array_inbound.replica_id(),
+                schema_hlc_bytes: schema_hlc.to_bytes(),
+                snapshot_payload,
+            });
+    Ok(announce)
 }

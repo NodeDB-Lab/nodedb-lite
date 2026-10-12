@@ -8,7 +8,8 @@
 //! being interleaved with the push loop.
 //!
 //! Engine-level ack dispatch (with AckStatus handling) lives in
-//! `dispatch_acks` to keep this file within the 500-line limit.
+//! `dispatch_acks`. Array reject and push-window pong handling lives in
+//! `dispatch_array`.
 
 use std::sync::Arc;
 
@@ -321,23 +322,7 @@ pub(super) async fn dispatch_frame(
             }
         }
         SyncMessageType::ArrayReject => {
-            if let Some(msg) = frame.decode_body::<nodedb_types::sync::wire::ArrayRejectMsg>() {
-                tracing::warn!(
-                    array = %msg.array,
-                    reason = ?msg.reason,
-                    detail = %msg.detail,
-                    "received ArrayReject from Origin — op removed from pending queue"
-                );
-                // A `RetentionFloor` reject means Origin's GC passed this
-                // replica's cursor: the op stream cannot resume, so the
-                // delegate returns a catch-up request that Origin answers
-                // with a snapshot. The push loop sends it on its next tick.
-                if let Some(request) = delegate.handle_array_reject(&msg).await {
-                    client.queue_array_catchup(request).await;
-                }
-            } else {
-                tracing::warn!("ArrayReject: failed to decode frame body");
-            }
+            super::dispatch_array::handle_array_reject(client, delegate, frame).await;
         }
         SyncMessageType::ColumnarInsertAck => {
             dispatch_acks::handle_columnar_insert_ack(client, delegate, frame).await;
@@ -367,9 +352,7 @@ pub(super) async fn dispatch_frame(
             super::dispatch_kv::handle_kv_push_ack(client, delegate, frame).await;
         }
         SyncMessageType::PingPong => {
-            // Origin pinged. Our `ping_loop` already keeps the link alive,
-            // so no response is needed here.
-            tracing::trace!("received ping/pong from Origin");
+            super::dispatch_array::handle_ping_pong(client, delegate, frame).await;
         }
         _ => {
             tracing::debug!(msg_type = ?frame.msg_type, "unexpected frame type from Origin");

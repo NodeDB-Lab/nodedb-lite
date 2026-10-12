@@ -10,6 +10,7 @@
 //! drives it is feature-gated.
 
 use crate::engine::crdt::engine::PendingDelta;
+use crate::sync::array::PendingArrayOp;
 use crate::sync::outbound::columnar::PendingColumnarBatch;
 use crate::sync::outbound::fts::{PendingFtsDelete, PendingFtsIndex};
 use crate::sync::outbound::kv::PendingKvWrite;
@@ -138,10 +139,13 @@ pub trait SyncDelegate: Send + Sync + 'static {
 
     /// Process an `ArrayReject` from Origin.
     ///
-    /// Removes the rejected op from the Lite pending queue. For
+    /// Applies the reason's [`RejectDisposition`]: a `Drop` removes the op
+    /// from the pending queue, and every other disposition keeps it. For
     /// `RetentionFloor`, persists the array's catch-up flag and returns the
     /// catch-up request to send: it starts at `Hlc::ZERO`, so Origin answers
     /// with a snapshot. Returns `None` for every other reason.
+    ///
+    /// [`RejectDisposition`]: crate::sync::array::RejectDisposition
     async fn handle_array_reject(
         &self,
         msg: &nodedb_types::sync::wire::ArrayRejectMsg,
@@ -170,6 +174,39 @@ pub trait SyncDelegate: Send + Sync + 'static {
     /// when flagged for a snapshot). Drops partial snapshot assemblies from
     /// the previous session. Returns an empty list when no arrays exist.
     fn begin_array_catchup(&self) -> Vec<nodedb_types::sync::wire::ArrayCatchupRequestMsg>;
+
+    // ── Array push ───────────────────────────────────────────────────────────
+    /// Up to `limit` queued local array ops with an HLC strictly greater than
+    /// `after`, in HLC order. `None` starts at the head of the queue.
+    async fn pending_array_ops(
+        &self,
+        after: Option<nodedb_array::sync::hlc::Hlc>,
+        limit: usize,
+    ) -> Result<Vec<PendingArrayOp>, crate::error::LiteError>;
+
+    /// Persist `op.seq` into the queued op before its first send.
+    ///
+    /// On an error the caller does not send, and the op waits for a later
+    /// tick.
+    async fn persist_array_op_seq(
+        &self,
+        op: &PendingArrayOp,
+    ) -> Result<(), crate::error::LiteError>;
+
+    /// Remove the queued array ops named in `hlcs`: ops Origin applied, and
+    /// ops the push loop cannot encode. Ops no longer queued are skipped.
+    async fn retire_array_ops(
+        &self,
+        hlcs: &[nodedb_array::sync::hlc::Hlc],
+    ) -> Result<(), crate::error::LiteError>;
+
+    /// The `ArraySchema` body announcing `array`'s current schema to Origin:
+    /// the schema HLC and Loro snapshot, read together. Returns `None` when
+    /// `array` has no local schema.
+    fn array_schema_announce(
+        &self,
+        array: &str,
+    ) -> Result<Option<nodedb_types::sync::wire::ArraySchemaSyncMsg>, crate::error::LiteError>;
 
     // ── Columnar ─────────────────────────────────────────────────────────────
     /// Drain up to `PUSH_DRAIN_LIMIT` pending batches from durable storage,

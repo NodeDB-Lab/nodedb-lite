@@ -13,12 +13,14 @@
 //! - `connect`   — single-attempt connect + handshake
 //! - `dispatch`  — inbound frame receive loop and message dispatch table
 //! - `dispatch_kv` — `KvPushAck` handling
+//! - `dispatch_array` — `ArrayReject` and array push-window `PingPong` handling
 //! - `push`      — outbound delta + per-engine push loops, plus ping keepalive
 //! - `run`       — the reconnecting sync loop
 
 mod connect;
 mod dispatch;
 mod dispatch_acks;
+mod dispatch_array;
 mod dispatch_kv;
 mod push;
 mod run;
