@@ -70,9 +70,14 @@ pub fn coerce_sql_value(v: &SqlValue, col_type: &ColumnType) -> Result<Value, Li
             SqlValue::Bool(b) => Ok(Value::Bool(*b)),
             other => sql_value_to_value(other),
         },
+        ColumnType::Decimal(_) => match v {
+            SqlValue::Decimal(d) => Ok(Value::Decimal(*d)),
+            SqlValue::Int(i) => Ok(Value::Decimal(rust_decimal::Decimal::from(*i))),
+            SqlValue::String(s) => Ok(Value::String(s.clone())),
+            other => sql_value_to_value(other),
+        },
         ColumnType::Bytes
         | ColumnType::SystemTimestamp
-        | ColumnType::Decimal { .. }
         | ColumnType::Geometry
         | ColumnType::Vector(_)
         | ColumnType::SparseVector
@@ -84,6 +89,28 @@ pub fn coerce_sql_value(v: &SqlValue, col_type: &ColumnType) -> Result<Value, Li
             detail: format!("column type {other} has no write coercion rule in Lite"),
         }),
     }
+}
+
+/// Coerce an evaluated `Value` to the target column type by the rules
+/// [`coerce_sql_value`] applies to a literal of the same value.
+///
+/// A value no SQL literal spells (an array, object, vector, geometry, or
+/// identifier type) passes through. The strict engine checks it against the
+/// column type.
+pub fn coerce_value(v: Value, col_type: &ColumnType) -> Result<Value, LiteError> {
+    let literal = match &v {
+        Value::Null => return Ok(Value::Null),
+        Value::Integer(i) => SqlValue::Int(*i),
+        Value::Float(f) => SqlValue::Float(*f),
+        Value::Decimal(d) => SqlValue::Decimal(*d),
+        Value::String(s) => SqlValue::String(s.clone()),
+        Value::Bool(b) => SqlValue::Bool(*b),
+        Value::Bytes(b) => SqlValue::Bytes(b.clone()),
+        Value::NaiveDateTime(at) => SqlValue::Timestamp(*at),
+        Value::DateTime(at) => SqlValue::Timestamptz(*at),
+        _ => return Ok(v),
+    };
+    coerce_sql_value(&literal, col_type)
 }
 
 /// The instant a literal denotes under a timestamp column, mirroring the
@@ -209,6 +236,26 @@ mod tests {
         );
     }
 
+    /// A planner-fitted decimal lands in a decimal column exactly, with its
+    /// scale intact, never through `f64`.
+    #[test]
+    fn decimal_column_stores_the_exact_decimal() {
+        let typmod = nodedb_types::columnar::DecimalTypmod::new(5, 2).expect("typmod");
+        let exact = rust_decimal::Decimal::new(101, 2);
+        assert_eq!(
+            coerce_sql_value(
+                &SqlValue::Decimal(exact),
+                &ColumnType::Decimal(Some(typmod))
+            )
+            .expect("coerce"),
+            Value::Decimal(exact)
+        );
+        assert_eq!(
+            coerce_sql_value(&SqlValue::Int(7), &ColumnType::Decimal(None)).expect("coerce"),
+            Value::Decimal(rust_decimal::Decimal::from(7))
+        );
+    }
+
     /// `build_row` places a typed instant under its column and leaves absent
     /// columns NULL.
     #[test]
@@ -226,6 +273,25 @@ mod tests {
         assert_eq!(
             row,
             vec![Value::Integer(1), Value::NaiveDateTime(at()), Value::Null]
+        );
+    }
+
+    /// An evaluated value takes the coercion a literal of the same value
+    /// takes, and a value no literal spells passes through.
+    #[test]
+    fn evaluated_value_coerces_like_its_literal() {
+        assert_eq!(
+            coerce_value(Value::Integer(3), &ColumnType::Float64).expect("coerce"),
+            Value::Float(3.0)
+        );
+        assert_eq!(
+            coerce_value(Value::String("a-b".into()), &ColumnType::Uuid).expect("coerce"),
+            Value::Uuid("a-b".into())
+        );
+        let array = Value::Array(vec![Value::Float(1.0)]);
+        assert_eq!(
+            coerce_value(array.clone(), &ColumnType::Array).expect("coerce"),
+            array
         );
     }
 }

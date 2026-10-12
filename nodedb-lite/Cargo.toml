@@ -20,6 +20,7 @@ sync = ["dep:tokio-tungstenite", "dep:futures"]
 
 [dependencies]
 nodedb-types = { workspace = true }
+rust_decimal = { workspace = true }
 nodedb-codec = { workspace = true }
 nodedb-client = { workspace = true }
 nodedb-crdt = { workspace = true }
@@ -79,7 +80,6 @@ futures = { workspace = true, optional = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 tempfile = { workspace = true }
-rust_decimal = { workspace = true }
 tokio-postgres = { workspace = true }
 
 # Mock Origin servers and raw WebSocket probes in tests and examples. These

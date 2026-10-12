@@ -155,11 +155,12 @@ pub(crate) fn parse_column_def(s: &str) -> Result<nodedb_types::columnar::Column
         None
     };
 
-    let mut col = if nullable {
+    let base = if nullable {
         ColumnDef::nullable(name, column_type)
     } else {
         ColumnDef::required(name, column_type)
     };
+    let mut col = base.with_declared_width(type_str);
 
     if is_pk {
         col = col.with_primary_key();
