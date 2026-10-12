@@ -142,7 +142,7 @@ impl IndexCatalog {
         &self,
         storage: &S,
         engine: IndexEngine,
-        mut ops: Vec<WriteOp>,
+        ops: Vec<WriteOp>,
         images: Vec<RowImage>,
         read_row: R,
     ) -> Result<(), LiteError>
@@ -151,11 +151,66 @@ impl IndexCatalog {
         R: Fn(String, String) -> F,
         F: Future<Output = Result<Option<Value>, LiteError>>,
     {
+        self.commit_rows_with(storage, engine, ops, images, read_row, |ops| async move {
+            Ok(ops)
+        })
+        .await
+    }
+
+    /// [`Self::commit_rows`], with `extra` completing the batch.
+    ///
+    /// `extra` receives the row writes and their secondary-index entries
+    /// once the unique checks pass, and returns the whole batch to commit.
+    /// It runs only when a written collection has a secondary or sorted
+    /// index, with the definitions fixed and no other row write of an
+    /// indexed collection in progress, so it plans from stored state no
+    /// other write changes before the batch commits.
+    pub(crate) async fn commit_rows_with<S, R, F, X, XF>(
+        &self,
+        storage: &S,
+        engine: IndexEngine,
+        ops: Vec<WriteOp>,
+        images: Vec<RowImage>,
+        read_row: R,
+        extra: X,
+    ) -> Result<(), LiteError>
+    where
+        S: StorageEngine,
+        R: Fn(String, String) -> F,
+        F: Future<Output = Result<Option<Value>, LiteError>>,
+        X: FnOnce(Vec<WriteOp>) -> XF,
+        XF: Future<Output = Result<Vec<WriteOp>, LiteError>>,
+    {
         let _ddl = self.durable_ddl.read().await;
+        self.commit_rows_held(storage, engine, ops, images, read_row, extra)
+            .await
+    }
+
+    /// [`Self::commit_rows_with`] for a caller that holds `durable_ddl`,
+    /// for reading or for writing.
+    pub(crate) async fn commit_rows_held<S, R, F, X, XF>(
+        &self,
+        storage: &S,
+        engine: IndexEngine,
+        mut ops: Vec<WriteOp>,
+        images: Vec<RowImage>,
+        read_row: R,
+        extra: X,
+    ) -> Result<(), LiteError>
+    where
+        S: StorageEngine,
+        R: Fn(String, String) -> F,
+        F: Future<Output = Result<Option<Value>, LiteError>>,
+        X: FnOnce(Vec<WriteOp>) -> XF,
+        XF: Future<Output = Result<Vec<WriteOp>, LiteError>>,
+    {
         let indexed = images
             .iter()
             .any(|image| self.has_defs(&image.collection, engine));
-        if !indexed {
+        let sorted_touched = images
+            .iter()
+            .any(|image| self.has_sorted(&image.collection));
+        if !indexed && !sorted_touched {
             return if ops.is_empty() {
                 Ok(())
             } else {
@@ -163,7 +218,11 @@ impl IndexCatalog {
             };
         }
         let _rows = self.durable_rows.lock().await;
-        let changes = self.plan_checked(engine, &images, &read_row).await?;
+        let changes = if indexed {
+            self.plan_checked(engine, &images, &read_row).await?
+        } else {
+            Vec::new()
+        };
 
         for (_, _, entry_ops) in &changes {
             for op in entry_ops {
@@ -180,6 +239,7 @@ impl IndexCatalog {
                 });
             }
         }
+        let ops = extra(ops).await?;
         if !ops.is_empty() {
             storage.batch_write(&ops).await?;
         }

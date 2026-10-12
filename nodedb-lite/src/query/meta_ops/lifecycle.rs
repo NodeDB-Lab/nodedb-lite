@@ -103,11 +103,9 @@ pub(crate) async fn handle_unregister_collection_admitted<S: StorageEngine>(
                 .map_err(|e| e.within(&format!("UnregisterCollection: delete CRDT doc '{id}'")))?;
         }
     }
-    // The collection's documents are gone, and so is every index over them.
-    engine
-        .indexes
-        .drop_collection(&*engine.storage, name)
-        .await?;
+    // The collection's documents and key-value rows are gone, and so is
+    // every index over them.
+    crate::query::kv_ops::indexes::kv_drop_collection(engine, name).await?;
     engine
         .fts_state
         .manager

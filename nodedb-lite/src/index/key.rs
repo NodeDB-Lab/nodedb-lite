@@ -26,6 +26,7 @@ const ENTRY: u8 = 0x01;
 const DEF: u8 = 0x02;
 const FORMAT: u8 = 0x03;
 const LEGACY_CLEARED: u8 = 0x04;
+const SORTED_DEF: u8 = 0x05;
 
 /// Version of the entry key layout and value encoding written by this build.
 /// Entries stored under another version are rebuilt from rows at open.
@@ -69,6 +70,20 @@ pub(crate) fn defs_prefix() -> Vec<u8> {
 pub(crate) fn def_key(collection: &str, name: &str) -> Vec<u8> {
     let mut key = defs_prefix();
     push_component(&mut key, collection);
+    push_component(&mut key, name);
+    key
+}
+
+/// Prefix of every stored sorted-index definition.
+pub(crate) fn sorted_defs_prefix() -> Vec<u8> {
+    let mut key = ROOT.to_vec();
+    key.push(SORTED_DEF);
+    key
+}
+
+/// The key one sorted-index definition is stored under.
+pub(crate) fn sorted_def_key(name: &str) -> Vec<u8> {
+    let mut key = sorted_defs_prefix();
     push_component(&mut key, name);
     key
 }

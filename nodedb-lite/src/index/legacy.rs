@@ -26,6 +26,7 @@ use super::key;
 /// collection with one of these names cannot prove a key is its old entry.
 const RESERVED_FIRST_SEGMENTS: &[&str] = &[
     "kv",
+    "kv_sorted",
     "meta",
     "crdt",
     "collection",

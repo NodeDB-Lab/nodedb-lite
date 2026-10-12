@@ -11,6 +11,7 @@ pub(crate) mod legacy;
 pub(crate) mod lookup;
 pub(crate) mod maintain;
 pub(crate) mod rebuild;
+pub(crate) mod sorted_def;
 pub(crate) mod store;
 
 pub use catalog::{

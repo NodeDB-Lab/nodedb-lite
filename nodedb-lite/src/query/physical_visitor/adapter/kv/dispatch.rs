@@ -312,19 +312,26 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
         KvOp::DropIndex { collection, field } => indexes::drop_index(engine, collection, field),
 
         KvOp::RegisterSortedIndex {
+            collection,
             index_name,
+            sort_columns,
+            key_column,
             window_type,
             window_timestamp_column,
             window_start_ms,
             window_end_ms,
-            ..
         } => indexes::register_sorted_index(
             engine,
-            index_name,
-            window_type,
-            window_timestamp_column,
-            *window_start_ms,
-            *window_end_ms,
+            indexes::RegisterSortedIndexArgs {
+                collection,
+                index_name,
+                sort_columns,
+                key_column,
+                window_type,
+                window_timestamp_column,
+                window_start_ms: *window_start_ms,
+                window_end_ms: *window_end_ms,
+            },
         ),
 
         KvOp::DropSortedIndex { index_name } => indexes::drop_sorted_index(engine, index_name),

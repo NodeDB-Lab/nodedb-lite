@@ -1,332 +1,181 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Window metadata storage and lazy purge for time-windowed sorted indexes.
+//! Time windows of sorted indexes.
 //!
-//! Window definition is persisted in the Meta namespace under a well-known key
-//! so that purge logic survives restarts without re-registering the index.
+//! A windowed index stores an entry for every row whatever its timestamp,
+//! and a read keeps the entries stamped at or after the current window's
+//! start. Window starts follow UTC:
 //!
-//! Key layout:
-//!   `kv_sorted:{index_name}:window` → msgpack-encoded WindowDef
-//!
-//! Each score entry in a windowed index carries an 8-byte timestamp appended
-//! after the pk separator:
-//!   `kv_sorted:{index_name}:score:{score_bytes}:{pk_hex}:{ts_bytes}` → empty
-//!
-//! The timestamp bytes are 8-byte little-endian u64 (ms since epoch).
-//!
-//! Purge semantics:
-//!   tumbling / custom : delete entries whose stored_ts ∉ [window_start_ms, window_end_ms]
-//!   sliding           : delete entries whose stored_ts < (now_ms - window_size_ms)
-//!   session           : treated as sliding with window_size_ms = (window_end_ms - window_start_ms)
+//! - daily: midnight;
+//! - weekly: Monday 00:00;
+//! - monthly: the 1st 00:00;
+//! - custom: `start_ms` while now is in `[start_ms, end_ms)`, and no entry
+//!   at all outside that range.
 
 use std::collections::HashMap;
 
-use nodedb_types::Namespace;
 use nodedb_types::value::Value;
 
-use crate::error::LiteError;
-use crate::query::engine::LiteQueryEngine;
-use crate::storage::engine::{StorageEngine, WriteOp};
+use crate::index::sorted_def::{WindowDef, WindowKind};
 
-use super::keys::{SCORE_TS_SEPARATOR, score_prefix};
+use super::keys::{FIELD_LEN, complement, score_prefix};
 
-// ─── Window definition ───────────────────────────────────────────────────────
+const MS_PER_DAY: u64 = 86_400_000;
 
-#[derive(Debug, Clone)]
-pub(super) struct WindowDef {
-    /// "tumbling", "sliding", "session", or "none".
-    pub window_type: String,
-    /// Column from which the timestamp is read (stored for documentation; Lite
-    /// uses the timestamp embedded in the score entry key itself).
-    pub window_timestamp_column: String,
-    /// Lower bound ms (tumbling/custom) or window size ms (sliding/session).
-    pub window_start_ms: u64,
-    /// Upper bound ms (tumbling/custom); 0 for sliding/session.
-    pub window_end_ms: u64,
-}
-
-fn window_meta_key(index_name: &str) -> Vec<u8> {
-    format!("kv_sorted:{index_name}:window").into_bytes()
-}
-
-/// Persist the window definition for `index_name`.
-pub(super) async fn store_window_def<S: StorageEngine>(
-    engine: &LiteQueryEngine<S>,
-    index_name: &str,
-    def: &WindowDef,
-) -> Result<(), LiteError> {
-    let mut map: HashMap<String, Value> = HashMap::with_capacity(4);
-    map.insert("window_type".into(), Value::String(def.window_type.clone()));
-    map.insert(
-        "window_timestamp_column".into(),
-        Value::String(def.window_timestamp_column.clone()),
-    );
-    map.insert(
-        "window_start_ms".into(),
-        Value::Integer(def.window_start_ms as i64),
-    );
-    map.insert(
-        "window_end_ms".into(),
-        Value::Integer(def.window_end_ms as i64),
-    );
-    let bytes =
-        zerompk::to_msgpack_vec(&Value::Object(map)).map_err(|e| LiteError::Serialization {
-            detail: format!("store_window_def serialize: {e}"),
-        })?;
-    engine
-        .storage
-        .put(Namespace::Meta, &window_meta_key(index_name), &bytes)
-        .await
-        .map_err(|e| LiteError::Storage {
-            detail: e.to_string(),
-        })
-}
-
-/// Load the window definition for `index_name`, returning `None` if not found
-/// (non-windowed index).
-pub(super) async fn load_window_def<S: StorageEngine>(
-    engine: &LiteQueryEngine<S>,
-    index_name: &str,
-) -> Result<Option<WindowDef>, LiteError> {
-    let raw = engine
-        .storage
-        .get(Namespace::Meta, &window_meta_key(index_name))
-        .await
-        .map_err(|e| LiteError::Storage {
-            detail: e.to_string(),
-        })?;
-    match raw {
-        None => Ok(None),
-        Some(bytes) => {
-            let val: Value =
-                zerompk::from_msgpack(&bytes).map_err(|e| LiteError::Serialization {
-                    detail: format!("load_window_def deserialize: {e}"),
-                })?;
-            let map = match val {
-                Value::Object(m) => m,
-                _ => {
-                    return Err(LiteError::Storage {
-                        detail: "load_window_def: expected object".into(),
-                    });
-                }
-            };
-            let get_str = |key: &str| -> Result<String, LiteError> {
-                match map.get(key) {
-                    Some(Value::String(s)) => Ok(s.clone()),
-                    _ => Err(LiteError::Storage {
-                        detail: format!("load_window_def: missing or invalid field '{key}'"),
-                    }),
-                }
-            };
-            let get_u64 = |key: &str| -> Result<u64, LiteError> {
-                match map.get(key) {
-                    Some(Value::Integer(n)) => Ok(*n as u64),
-                    _ => Err(LiteError::Storage {
-                        detail: format!("load_window_def: missing or invalid field '{key}'"),
-                    }),
-                }
-            };
-            Ok(Some(WindowDef {
-                window_type: get_str("window_type")?,
-                window_timestamp_column: get_str("window_timestamp_column")?,
-                window_start_ms: get_u64("window_start_ms")?,
-                window_end_ms: get_u64("window_end_ms")?,
-            }))
-        }
-    }
-}
-
-/// Remove the window definition for `index_name` (called from DropSortedIndex).
-pub(super) async fn delete_window_def<S: StorageEngine>(
-    engine: &LiteQueryEngine<S>,
-    index_name: &str,
-) -> Result<(), LiteError> {
-    engine
-        .storage
-        .delete(Namespace::Meta, &window_meta_key(index_name))
-        .await
-        .map_err(|e| LiteError::Storage {
-            detail: e.to_string(),
-        })
-}
-
-// ─── Lazy purge ──────────────────────────────────────────────────────────────
-
-/// Call before every sorted-index read. Scans the score entries, identifies
-/// those whose embedded timestamp falls outside the active window, and removes
-/// them together with their reverse pk entries.
-///
-/// For non-windowed indexes (window_def is None) this is a no-op.
-pub(super) async fn purge_outside_window<S: StorageEngine>(
-    engine: &LiteQueryEngine<S>,
-    index_name: &str,
-    now_ms: u64,
-) -> Result<(), LiteError> {
-    let def = match load_window_def(engine, index_name).await? {
-        None => return Ok(()),
-        Some(d) => d,
-    };
-
-    if def.window_type == "none" {
-        return Ok(());
-    }
-
-    // Compute [keep_from, keep_to) based on window type.
-    let (keep_from, keep_to) = window_bounds(&def, now_ms);
-
-    let score_pfx = score_prefix(index_name);
-    let all = engine
-        .storage
-        .scan_range_bounded(Namespace::Meta, Some(score_pfx.as_bytes()), None, None)
-        .await
-        .map_err(|e| LiteError::Storage {
-            detail: e.to_string(),
-        })?;
-
-    let prefix_bytes = score_pfx.as_bytes();
-    let mut ops: Vec<WriteOp> = Vec::new();
-
-    for (key, _) in &all {
-        if !key.starts_with(prefix_bytes) {
-            break;
-        }
-        // Key layout after prefix: {score_bytes:8}{SCORE_TS_SEPARATOR}{pk}{SCORE_TS_SEPARATOR}{ts_bytes:8}
-        let rest = &key[prefix_bytes.len()..];
-        if rest.len() < 8 {
-            continue;
-        }
-        let ts_opt = extract_timestamp(rest);
-        let ts = match ts_opt {
-            Some(t) => t,
-            // No timestamp embedded → non-windowed entry, skip
-            None => continue,
-        };
-
-        let in_window = ts >= keep_from && ts < keep_to;
-        if !in_window {
-            ops.push(WriteOp::Delete {
-                ns: Namespace::Meta,
-                key: key.clone(),
-            });
-            // Also remove the pk reverse entry.
-            let pk = extract_pk(rest);
-            if let Some(pk_bytes) = pk {
-                let pk_key = super::keys::pk_entry_key(index_name, pk_bytes);
-                ops.push(WriteOp::Delete {
-                    ns: Namespace::Meta,
-                    key: pk_key,
-                });
-            }
-        }
-    }
-
-    if !ops.is_empty() {
-        engine
-            .storage
-            .batch_write(&ops)
-            .await
-            .map_err(|e| LiteError::Storage {
-                detail: e.to_string(),
-            })?;
-    }
-    Ok(())
-}
-
-fn window_bounds(def: &WindowDef, now_ms: u64) -> (u64, u64) {
-    match def.window_type.as_str() {
-        "tumbling" | "custom" => (def.window_start_ms, def.window_end_ms),
-        "sliding" | "session" => {
-            // window_start_ms holds the window size in ms.
-            let size = if def.window_start_ms > 0 {
-                def.window_start_ms
-            } else {
-                // Fallback: derive size from start/end if both nonzero.
-                def.window_end_ms.saturating_sub(def.window_start_ms)
-            };
-            let from = now_ms.saturating_sub(size);
-            (from, now_ms + 1)
-        }
-        // Unknown window type — keep everything.
-        _ => (0, u64::MAX),
-    }
-}
-
-/// Extract the trailing 8-byte timestamp from a score key's rest segment
-/// (everything after the score prefix). Returns `None` if no SCORE_TS_SEPARATOR
-/// is found (i.e. a non-windowed entry).
-fn extract_timestamp(rest: &[u8]) -> Option<u64> {
-    // Rest = {score:8}{SEP}{pk}{SEP}{ts:8}
-    // Find the last occurrence of SCORE_TS_SEPARATOR.
-    let sep = SCORE_TS_SEPARATOR;
-    let pos = rest.iter().rposition(|&b| b == sep)?;
-    let ts_slice = &rest[pos + 1..];
-    if ts_slice.len() != 8 {
-        return None;
-    }
-    Some(u64::from_le_bytes(ts_slice.try_into().ok()?))
-}
-
-/// Extract the pk bytes from rest. pk sits between the first sep (after score)
-/// and the last sep (before ts). Returns None if layout doesn't match.
-fn extract_pk(rest: &[u8]) -> Option<&[u8]> {
-    if rest.len() < 8 {
-        return None;
-    }
-    let sep = SCORE_TS_SEPARATOR;
-    // First sep is after the 8-byte score.
-    let first_sep = rest[8..].iter().position(|&b| b == sep)? + 8;
-    // Last sep: find rposition from full slice.
-    let last_sep = rest.iter().rposition(|&b| b == sep)?;
-    if last_sep <= first_sep {
-        return None;
-    }
-    Some(&rest[first_sep + 1..last_sep])
-}
-
-// ─── Window-aware score key builder ──────────────────────────────────────────
-
-/// Build the score entry key for a windowed index.
-/// Layout: `{score_prefix}{score_bytes:8}{SEP}{pk}{SEP}{ts_bytes:8}`
-#[allow(dead_code)]
+/// Build the score entry key of a windowed index:
+/// `{score_prefix}{score:8}{ts:8}{pk}`. Both fields are key-order bytes.
 pub(super) fn windowed_score_key(
     index_name: &str,
-    score_bytes: &[u8; 8],
+    score: &[u8; FIELD_LEN],
+    ts: &[u8; FIELD_LEN],
     pk: &[u8],
-    ts_ms: u64,
 ) -> Vec<u8> {
-    let pfx = score_prefix(index_name);
-    let mut k = pfx.into_bytes();
-    k.extend_from_slice(score_bytes);
-    k.push(SCORE_TS_SEPARATOR);
-    k.extend_from_slice(pk);
-    k.push(SCORE_TS_SEPARATOR);
-    k.extend_from_slice(&ts_ms.to_le_bytes());
-    k
+    let mut key = score_prefix(index_name);
+    key.extend_from_slice(score);
+    key.extend_from_slice(ts);
+    key.extend_from_slice(pk);
+    key
 }
 
-// ─── Value helper: extract timestamp from a KV value map ─────────────────────
-
-/// Try to read the `window_timestamp_column` field from a msgpack-encoded
-/// KV value as a u64 millisecond timestamp.
-///
-/// Returns `None` if the column is absent or the value is not numeric.
-#[allow(dead_code)]
-pub(super) fn extract_ts_from_value(value_bytes: &[u8], column: &str) -> Option<u64> {
-    let map = crate::query::kv_ops::body::decode_kv_map(value_bytes).ok()??;
-    match map.get(column)? {
-        Value::Integer(n) => {
-            if *n >= 0 {
-                Some(*n as u64)
-            } else {
-                None
-            }
-        }
-        Value::Float(f) => {
-            if *f >= 0.0 {
-                Some(*f as u64)
-            } else {
-                None
-            }
-        }
+/// Read the timestamp column `column` of a row's typed columns as ms since
+/// epoch. `None` when the column is absent, not numeric, or negative.
+pub(super) fn extract_ts_from_value(columns: &HashMap<String, Value>, column: &str) -> Option<u64> {
+    match columns.get(column)? {
+        Value::Integer(n) => u64::try_from(*n).ok(),
+        Value::Float(f) if *f >= 0.0 && f.is_finite() => Some(*f as u64),
         _ => None,
+    }
+}
+
+/// The key-order bytes of a timestamp: big-endian, complemented when the
+/// timestamp sorts descending.
+pub(super) fn encode_ts(ts_ms: u64, desc: bool) -> [u8; FIELD_LEN] {
+    let bytes = ts_ms.to_be_bytes();
+    if desc { complement(bytes) } else { bytes }
+}
+
+/// Reverse [`encode_ts`].
+pub(super) fn decode_ts(bytes: &[u8; FIELD_LEN], desc: bool) -> u64 {
+    let bytes = if desc { complement(*bytes) } else { *bytes };
+    u64::from_be_bytes(bytes)
+}
+
+/// The start (inclusive) of the window current at `now_ms`. `None` for an
+/// index with no window: every entry is visible.
+pub(super) fn window_start(window: &WindowDef, now_ms: u64) -> Option<u64> {
+    match window.kind {
+        WindowKind::None => None,
+        WindowKind::Daily => Some(start_of_day(now_ms)),
+        WindowKind::Weekly => Some(start_of_week(now_ms)),
+        WindowKind::Monthly => Some(start_of_month(now_ms)),
+        WindowKind::Custom => {
+            if now_ms >= window.start_ms && now_ms < window.end_ms {
+                Some(window.start_ms)
+            } else {
+                Some(u64::MAX)
+            }
+        }
+    }
+}
+
+fn start_of_day(now_ms: u64) -> u64 {
+    (now_ms / MS_PER_DAY) * MS_PER_DAY
+}
+
+fn start_of_week(now_ms: u64) -> u64 {
+    let days = now_ms / MS_PER_DAY;
+    // 1970-01-01 was a Thursday: (days + 3) % 7 is 0 on a Monday.
+    let since_monday = (days + 3) % 7;
+    (days - since_monday) * MS_PER_DAY
+}
+
+fn start_of_month(now_ms: u64) -> u64 {
+    let days = (now_ms / MS_PER_DAY) as i64;
+    let (year, month) = civil_year_month(days);
+    days_from_civil(year, month, 1) as u64 * MS_PER_DAY
+}
+
+/// The `(year, month)` of a day count since 1970-01-01 (proleptic
+/// Gregorian, Howard Hinnant's `civil_from_days`).
+fn civil_year_month(days: i64) -> (i64, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let month = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (year, month)
+}
+
+/// The day count since 1970-01-01 of a civil date (Howard Hinnant's
+/// `days_from_civil`).
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year.rem_euclid(400);
+    let month = i64::from(month);
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window(kind: WindowKind, start_ms: u64, end_ms: u64) -> WindowDef {
+        WindowDef {
+            kind,
+            timestamp_column: "ts".into(),
+            timestamp_desc: false,
+            start_ms,
+            end_ms,
+        }
+    }
+
+    // 2024-05-02 (a Thursday) 15:30:00 UTC.
+    const NOW: u64 = 1_714_663_800_000;
+
+    #[test]
+    fn calendar_windows_start_at_utc_boundaries() {
+        // 2024-05-02 00:00, 2024-04-29 (Monday) 00:00, 2024-05-01 00:00 UTC.
+        assert_eq!(
+            window_start(&window(WindowKind::Daily, 0, 0), NOW),
+            Some(1_714_608_000_000)
+        );
+        assert_eq!(
+            window_start(&window(WindowKind::Weekly, 0, 0), NOW),
+            Some(1_714_348_800_000)
+        );
+        assert_eq!(
+            window_start(&window(WindowKind::Monthly, 0, 0), NOW),
+            Some(1_714_521_600_000)
+        );
+        assert_eq!(window_start(&WindowDef::none(), NOW), None);
+    }
+
+    #[test]
+    fn month_start_handles_january_and_leap_february() {
+        // 2024-01-15 and 2024-02-29 12:00 UTC.
+        assert_eq!(start_of_month(1_705_320_000_000), 1_704_067_200_000);
+        assert_eq!(start_of_month(1_709_208_000_000), 1_706_745_600_000);
+    }
+
+    #[test]
+    fn custom_window_is_empty_outside_its_range() {
+        let custom = window(WindowKind::Custom, 1_000, 2_000);
+        assert_eq!(window_start(&custom, 1_500), Some(1_000));
+        assert_eq!(window_start(&custom, 2_000), Some(u64::MAX));
+        assert_eq!(window_start(&custom, 999), Some(u64::MAX));
+    }
+
+    #[test]
+    fn timestamps_round_trip_in_both_directions() {
+        for desc in [false, true] {
+            assert_eq!(decode_ts(&encode_ts(1_234, desc), desc), 1_234);
+        }
+        assert!(encode_ts(1, true) > encode_ts(2, true));
     }
 }

@@ -9,7 +9,8 @@ use crate::query::engine::LiteQueryEngine;
 use crate::query::truncate::truncated;
 use crate::storage::engine::{StorageEngine, WriteOp};
 
-use super::super::reads::{encode_value, kv_key, split_kv_key};
+use super::super::indexes::kv_truncate_commit;
+use super::super::reads::{encode_value, kv_key};
 
 /// Delete: remove keys by primary key list.
 pub async fn kv_delete<S: StorageEngine>(
@@ -65,7 +66,8 @@ pub async fn kv_batch_put<S: StorageEngine>(
 }
 
 /// Truncate: delete ALL entries in a KV collection and every secondary
-/// index entry they produced. The collection stays registered. Buffered
+/// index entry they produced, and drop the collection's sorted indexes. The
+/// collection and its secondary index definitions stay registered. Buffered
 /// writes and cached values of the public KV API are forgotten first, so a
 /// pending put cannot resurrect a row and a cached value is not served past
 /// the clear.
@@ -74,34 +76,6 @@ pub async fn kv_truncate<S: StorageEngine>(
     collection: &str,
 ) -> Result<QueryResult, LiteError> {
     engine.kv_local.forget_collection(collection);
-    let col_prefix = {
-        let mut p = collection.as_bytes().to_vec();
-        p.push(0);
-        p
-    };
-    let entries = engine
-        .storage
-        .scan_range_bounded(Namespace::Kv, Some(&col_prefix), None, None)
-        .await
-        .map_err(|e| LiteError::Storage {
-            detail: e.to_string(),
-        })?;
-
-    let mut ops: Vec<WriteOp> = Vec::with_capacity(entries.len());
-    for (composite_key, _) in entries {
-        let Some((coll, _)) = split_kv_key(&composite_key) else {
-            continue;
-        };
-        if coll != collection {
-            break;
-        }
-        ops.push(WriteOp::Delete {
-            ns: Namespace::Kv,
-            key: composite_key,
-        });
-    }
-
-    // Each deleted row takes its index entries with it in the same batch.
-    engine.kv_local.commit(&*engine.storage, ops).await?;
+    kv_truncate_commit(&*engine.storage, &engine.indexes, collection).await?;
     Ok(truncated())
 }

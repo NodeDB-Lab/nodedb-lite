@@ -73,12 +73,14 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         guard.finish(result)
     }
 
-    /// Handle: `DROP COLLECTION <name>` for a schemaless document collection.
+    /// Handle: `DROP COLLECTION <name>` for a collection neither the strict
+    /// nor the columnar engine holds: a schemaless document or key-value
+    /// collection.
     ///
-    /// Clears the collection's CRDT state, drops its secondary and text
-    /// indexes and removes the persisted metadata — the same steps the
-    /// programmatic `drop_collection` performs, so the SQL and API paths leave
-    /// the store in the same state.
+    /// Clears the collection's CRDT state and key-value rows, drops its
+    /// secondary, sorted and text indexes and removes the persisted
+    /// metadata — the same steps the programmatic `drop_collection`
+    /// performs, so the SQL and API paths leave the store in the same state.
     pub(in crate::query) async fn handle_drop_document(
         &self,
         name: &str,
@@ -93,7 +95,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 .map_err(|_| LiteError::LockPoisoned)?
                 .clear_collection(name)
                 .map_err(|e| LiteError::Query(e.to_string()))?;
-            self.indexes.drop_collection(&*self.storage, name).await?;
+            crate::query::kv_ops::indexes::kv_drop_collection(self, name).await?;
 
             self.fts_state
                 .manager

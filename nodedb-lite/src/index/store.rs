@@ -33,6 +33,7 @@ use crate::storage::engine::{StorageEngine, WriteOp};
 use super::catalog::{IndexDef, IndexEngine};
 use super::key;
 use super::maintain::IndexWriteOp;
+use super::sorted_def::SortedIndexDef;
 
 /// A key whose stored form is behind memory: `Some` bytes to put, `None` to
 /// delete. `seq` identifies the change so a flush acknowledges only the
@@ -47,6 +48,9 @@ struct Dirty {
 pub(crate) struct IndexState {
     /// Every definition, by index name.
     pub(super) defs: BTreeMap<String, Arc<IndexDef>>,
+    /// Every sorted-index definition, by index name. Its entries live only
+    /// in storage.
+    pub(super) sorted: BTreeMap<String, Arc<SortedIndexDef>>,
     /// Every entry key, in storage order.
     pub(super) entries: BTreeSet<Vec<u8>>,
     /// Entry keys per `(collection, document id)`: what a row currently
@@ -263,6 +267,12 @@ impl IndexCatalog {
         let entries = storage
             .scan_prefix(Namespace::Meta, &key::entries_prefix())
             .await?;
+        let sorted = storage
+            .scan_prefix(Namespace::Meta, &key::sorted_defs_prefix())
+            .await?
+            .iter()
+            .map(|(_, bytes)| SortedIndexDef::decode(bytes))
+            .collect::<Result<Vec<_>, _>>()?;
 
         let current = format.as_deref() == Some(key::FORMAT_VERSION.to_be_bytes().as_slice());
         let stored_nothing = defs.is_empty() && entries.is_empty();
@@ -274,6 +284,9 @@ impl IndexCatalog {
             let mut state = self.lock();
             for def in decoded {
                 state.defs.insert(def.name.clone(), Arc::new(def));
+            }
+            for def in sorted {
+                state.sorted.insert(def.name.clone(), Arc::new(def));
             }
             for (entry, _) in entries {
                 if current && let Some(parsed) = key::parse_entry(&entry) {
@@ -379,6 +392,41 @@ impl IndexCatalog {
             .values()
             .find(|d| d.collection == collection && d.field_spec() == field_spec)
             .cloned()
+    }
+
+    /// The sorted indexes on `collection`, in name order.
+    pub(crate) fn sorted_on(&self, collection: &str) -> Vec<Arc<SortedIndexDef>> {
+        self.lock()
+            .sorted
+            .values()
+            .filter(|d| d.collection == collection)
+            .cloned()
+            .collect()
+    }
+
+    /// The sorted index named `name`.
+    pub(crate) fn sorted_named(&self, name: &str) -> Option<Arc<SortedIndexDef>> {
+        self.lock().sorted.get(name).cloned()
+    }
+
+    /// Whether `collection` has a sorted index.
+    pub(crate) fn has_sorted(&self, collection: &str) -> bool {
+        self.lock()
+            .sorted
+            .values()
+            .any(|d| d.collection == collection)
+    }
+
+    /// Every sorted index, grouped by the collection it ranks.
+    pub(crate) fn sorted_by_collection(&self) -> HashMap<String, Vec<Arc<SortedIndexDef>>> {
+        let mut grouped: HashMap<String, Vec<Arc<SortedIndexDef>>> = HashMap::new();
+        for def in self.lock().sorted.values() {
+            grouped
+                .entry(def.collection.clone())
+                .or_default()
+                .push(Arc::clone(def));
+        }
+        grouped
     }
 
     /// What the planner sees for `collection`: its document and strict

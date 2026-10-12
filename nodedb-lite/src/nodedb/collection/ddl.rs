@@ -178,9 +178,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 let mut crdt = self.crdt.lock_or_recover();
                 crdt.clear_collection(name).map_err(NodeDbError::storage)?;
             }
-            self.query_engine
-                .indexes
-                .drop_collection(&*self.storage, name)
+            crate::query::kv_ops::indexes::kv_drop_collection(&self.query_engine, name)
                 .await
                 .map_err(NodeDbError::storage)?;
 

@@ -35,25 +35,42 @@ pub(super) fn drop_index<'a, S: StorageEngine + 'a>(
     }))
 }
 
+/// The fields of a `KvOp::RegisterSortedIndex`, borrowed from the plan.
+pub(super) struct RegisterSortedIndexArgs<'p> {
+    pub collection: &'p QualifiedCollection,
+    pub index_name: &'p str,
+    pub sort_columns: &'p [(String, String)],
+    pub key_column: &'p str,
+    pub window_type: &'p str,
+    pub window_timestamp_column: &'p str,
+    pub window_start_ms: u64,
+    pub window_end_ms: u64,
+}
+
 pub(super) fn register_sorted_index<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
-    index_name: &str,
-    window_type: &str,
-    window_timestamp_column: &str,
-    window_start_ms: u64,
-    window_end_ms: u64,
+    args: RegisterSortedIndexArgs<'_>,
 ) -> Result<LitePhysicalFut<'a>, LiteError> {
-    let name = index_name.to_owned();
-    let wt = window_type.to_owned();
-    let ts_col = window_timestamp_column.to_owned();
+    let collection = args.collection.as_str().to_owned();
+    let index_name = args.index_name.to_owned();
+    let sort_columns = args.sort_columns.to_vec();
+    let key_column = args.key_column.to_owned();
+    let window_type = args.window_type.to_owned();
+    let window_timestamp_column = args.window_timestamp_column.to_owned();
+    let (window_start_ms, window_end_ms) = (args.window_start_ms, args.window_end_ms);
     Ok(Box::pin(async move {
         kv_ops::sorted::kv_register_sorted_index(
             engine,
-            &name,
-            &wt,
-            &ts_col,
-            window_start_ms,
-            window_end_ms,
+            kv_ops::sorted::RegisterSortedIndex {
+                collection: &collection,
+                index_name: &index_name,
+                sort_columns: &sort_columns,
+                key_column: &key_column,
+                window_type: &window_type,
+                window_timestamp_column: &window_timestamp_column,
+                window_start_ms,
+                window_end_ms,
+            },
         )
         .await
     }))

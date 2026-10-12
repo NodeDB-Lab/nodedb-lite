@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Catalog changes made by DDL: dropping and moving indexes, and
-//! clearing a collection's entries.
+//! Catalog changes made by DDL: dropping and moving indexes, clearing a
+//! collection's entries, and installing and dropping sorted indexes.
 //!
 //! A document index's changes are left for the flush, like the CRDT state
 //! they follow. A strict or key-value index's changes are written to storage
@@ -12,10 +12,15 @@
 
 use std::sync::Arc;
 
+use nodedb_types::Namespace;
+
 use crate::error::LiteError;
+use crate::query::kv_ops::sorted::entries_prefix;
 use crate::storage::engine::{StorageEngine, WriteOp};
 
 use super::catalog::{IndexDef, IndexEngine};
+use super::key;
+use super::sorted_def::SortedIndexDef;
 use super::store::{IndexCatalog, IndexState};
 
 fn durable(def: &IndexDef) -> bool {
@@ -38,6 +43,12 @@ async fn write<S: StorageEngine>(storage: &S, ops: Vec<WriteOp>) -> Result<(), L
     } else {
         storage.batch_write(&ops).await
     }
+}
+
+/// The storage writes that remove some sorted indexes, and their names.
+pub(crate) struct SortedRemoval {
+    pub ops: Vec<WriteOp>,
+    pub names: Vec<String>,
 }
 
 impl IndexCatalog {
@@ -128,19 +139,10 @@ impl IndexCatalog {
         }
     }
 
-    /// Remove every index on `collection`, definitions and entries, and its
-    /// tombstones: what dropping the collection does to its indexes.
-    pub(crate) async fn drop_collection<S: StorageEngine>(
-        &self,
-        storage: &S,
-        collection: &str,
-    ) -> Result<(), LiteError> {
-        self.drop_collection_with(storage, collection, || async { Ok(Vec::new()) })
-            .await
-    }
-
-    /// [`Self::drop_collection`], committing the writes `rows` returns —
-    /// the drop of the collection's rows — in the same storage batch. `rows`
+    /// Remove every index on `collection`, secondary and sorted,
+    /// definitions and entries, and its tombstones: what dropping the
+    /// collection does to its indexes. The writes `rows` returns — the drop
+    /// of the collection's rows — commit in the same storage batch. `rows`
     /// runs with no strict or key-value row write in progress, and none
     /// starts until the drop is applied.
     pub(crate) async fn drop_collection_with<S, F, Fut>(
@@ -155,7 +157,11 @@ impl IndexCatalog {
         Fut: Future<Output = Result<Vec<WriteOp>, LiteError>>,
     {
         let _ddl = self.durable_ddl.write().await;
-        let extra = rows().await?;
+        let mut extra = rows().await?;
+        let sorted = self
+            .sorted_removal(storage, self.sorted_on(collection))
+            .await?;
+        extra.extend(sorted.ops);
         self.apply_locked(
             storage,
             extra,
@@ -170,7 +176,95 @@ impl IndexCatalog {
                 Ok(((), ops))
             },
         )
-        .await
+        .await?;
+        self.forget_sorted(&sorted.names);
+        Ok(())
+    }
+
+    /// The storage writes that remove `defs` — every entry and the stored
+    /// definition of each. Call with `durable_ddl` held for writing.
+    pub(crate) async fn sorted_removal<S: StorageEngine>(
+        &self,
+        storage: &S,
+        defs: Vec<Arc<SortedIndexDef>>,
+    ) -> Result<SortedRemoval, LiteError> {
+        let mut ops = Vec::new();
+        let mut names = Vec::with_capacity(defs.len());
+        for def in defs {
+            for (entry, _) in storage
+                .scan_prefix(Namespace::Meta, &entries_prefix(&def.name))
+                .await?
+            {
+                ops.push(WriteOp::Delete {
+                    ns: Namespace::Meta,
+                    key: entry,
+                });
+            }
+            ops.push(WriteOp::Delete {
+                ns: Namespace::Meta,
+                key: key::sorted_def_key(&def.name),
+            });
+            names.push(def.name.clone());
+        }
+        Ok(SortedRemoval { ops, names })
+    }
+
+    /// Remove the sorted indexes named `names` from memory: their stored
+    /// removal has committed.
+    pub(crate) fn forget_sorted(&self, names: &[String]) {
+        let mut state = self.lock();
+        for name in names {
+            state.sorted.remove(name);
+        }
+    }
+
+    /// Install the sorted index `def`, replacing any index of the same name.
+    ///
+    /// `entries` runs with no strict or key-value row write in progress, and
+    /// none starts until the install is applied. It returns the entry writes
+    /// of the rows `def` covers, committed in one storage batch with the
+    /// definition and the removal of the index `def` replaces.
+    pub(crate) async fn install_sorted<S, F, Fut, R>(
+        &self,
+        storage: &S,
+        def: Arc<SortedIndexDef>,
+        entries: F,
+    ) -> Result<R, LiteError>
+    where
+        S: StorageEngine,
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(Vec<WriteOp>, R), LiteError>>,
+    {
+        let _ddl = self.durable_ddl.write().await;
+        let replaced = self.sorted_named(&def.name).into_iter().collect();
+        let mut ops = self.sorted_removal(storage, replaced).await?.ops;
+        let (entry_ops, result) = entries().await?;
+        ops.extend(entry_ops);
+        ops.push(WriteOp::Put {
+            ns: Namespace::Meta,
+            key: key::sorted_def_key(&def.name),
+            value: def.encode()?,
+        });
+        write(storage, ops).await?;
+        self.lock().sorted.insert(def.name.clone(), def);
+        Ok(result)
+    }
+
+    /// Remove the sorted index named `name`, its entries and its stored
+    /// definition, in one storage batch. `None` when no such index exists.
+    pub(crate) async fn drop_sorted<S: StorageEngine>(
+        &self,
+        storage: &S,
+        name: &str,
+    ) -> Result<Option<Arc<SortedIndexDef>>, LiteError> {
+        let _ddl = self.durable_ddl.write().await;
+        let Some(def) = self.sorted_named(name) else {
+            return Ok(None);
+        };
+        let removal = self.sorted_removal(storage, vec![Arc::clone(&def)]).await?;
+        write(storage, removal.ops).await?;
+        self.forget_sorted(&removal.names);
+        Ok(Some(def))
     }
 
     /// Re-declare every index on `collection` as covering `engine` rows and
@@ -321,7 +415,7 @@ mod tests {
 
             assert!(
                 catalog
-                    .drop_collection(&RejectingStorage, "users")
+                    .drop_collection_with(&RejectingStorage, "users", || async { Ok(Vec::new()) })
                     .await
                     .is_err()
             );

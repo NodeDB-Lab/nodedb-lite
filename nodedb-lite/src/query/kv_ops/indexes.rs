@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Secondary indexes on typed KV rows.
+//! Secondary and sorted indexes on typed KV rows.
 //!
 //! The indexes live in the shared catalog (`crate::index`) as key-value
 //! indexes. Every KV write commits through [`kv_commit`], which adds the
-//! entries the written rows imply to the same storage batch. An entry names
+//! secondary and sorted entries the written rows imply to the same storage
+//! batch. Truncate and collection drop clear rows and entries in one batch
+//! the same way. A secondary entry names
 //! a row by the hex of its key, which reads back whatever bytes the key is.
 //! A raw (untyped) body has no columns to index; an expired row holds no
 //! entries a read or a unique check counts.
@@ -22,6 +24,7 @@ use crate::storage::engine::{StorageEngine, WriteOp};
 
 use super::body::decode_kv_map;
 use super::reads::{decode_value, is_expired, kv_key, split_kv_key};
+use super::sorted::plan_sorted_ops;
 
 /// The row a stored KV value holds for its indexes: its typed columns, none
 /// for a raw body, and no row at all once expired.
@@ -113,8 +116,9 @@ pub(crate) async fn kv_check<S: StorageEngine>(
 }
 
 /// Commit KV writes `ops` — puts of encoded values and deletes in
-/// `Namespace::Kv` — with the index entries they imply, in one storage
-/// batch. A write a unique index refuses commits nothing.
+/// `Namespace::Kv` — with the secondary and sorted index entries they
+/// imply, in one storage batch. A write a unique index refuses commits
+/// nothing.
 pub(crate) async fn kv_commit<S: StorageEngine>(
     storage: &S,
     indexes: &IndexCatalog,
@@ -122,14 +126,93 @@ pub(crate) async fn kv_commit<S: StorageEngine>(
 ) -> Result<(), LiteError> {
     let images = kv_images(&ops)?;
     indexes
-        .commit_rows(
+        .commit_rows_with(
             storage,
             IndexEngine::KeyValue,
             ops,
             images,
             |collection, id| async move { kv_row_by_doc_id(storage, &collection, &id).await },
+            |mut ops| async move {
+                let sorted =
+                    plan_sorted_ops(storage, &indexes.sorted_by_collection(), &ops).await?;
+                ops.extend(sorted);
+                Ok(ops)
+            },
         )
         .await
+}
+
+/// Delete every row of the KV collection `collection` with its secondary
+/// index entries, and drop its sorted indexes with their entries, in one
+/// storage batch. The secondary index definitions stay.
+///
+/// Sorted registrations go with the rows: a sorted index left on a cleared
+/// collection would rank keys for rows that no longer exist.
+pub(crate) async fn kv_truncate_commit<S: StorageEngine>(
+    storage: &S,
+    indexes: &IndexCatalog,
+    collection: &str,
+) -> Result<(), LiteError> {
+    // No row write lands between the row scan and the commit.
+    let _ddl = indexes.durable_ddl.write().await;
+    let mut ops = kv_row_deletes(storage, collection).await?;
+    let sorted = indexes
+        .sorted_removal(storage, indexes.sorted_on(collection))
+        .await?;
+    ops.extend(sorted.ops);
+    let images = kv_images(&ops)?;
+    indexes
+        .commit_rows_held(
+            storage,
+            IndexEngine::KeyValue,
+            ops,
+            images,
+            |collection, id| async move { kv_row_by_doc_id(storage, &collection, &id).await },
+            |ops| async move { Ok(ops) },
+        )
+        .await?;
+    indexes.forget_sorted(&sorted.names);
+    Ok(())
+}
+
+/// Delete every KV row `collection` holds and drop every index on it,
+/// secondary and sorted, definitions and entries, in one storage batch:
+/// what dropping the collection does to its key-value state.
+///
+/// The public KV API's buffered writes and cached values of the collection
+/// are forgotten first, under the write-order lock, so no pending put
+/// resurrects a row after the drop.
+pub(crate) async fn kv_drop_collection<S: StorageEngine>(
+    engine: &LiteQueryEngine<S>,
+    collection: &str,
+) -> Result<(), LiteError> {
+    let _order = engine.kv_local.write_order.lock().await;
+    engine.kv_local.forget_collection(collection);
+    let storage = &*engine.storage;
+    engine
+        .indexes
+        .drop_collection_with(storage, collection, || kv_row_deletes(storage, collection))
+        .await
+}
+
+/// A delete of every row `collection` holds in storage.
+pub(crate) async fn kv_row_deletes<S: StorageEngine>(
+    storage: &S,
+    collection: &str,
+) -> Result<Vec<WriteOp>, LiteError> {
+    let mut ops = Vec::new();
+    for (composite, _) in storage
+        .scan_prefix(Namespace::Kv, &kv_key(collection, b""))
+        .await?
+    {
+        if split_kv_key(&composite).is_some_and(|(coll, _)| coll == collection) {
+            ops.push(WriteOp::Delete {
+                ns: Namespace::Kv,
+                key: composite,
+            });
+        }
+    }
+    Ok(ops)
 }
 
 /// RegisterIndex: declare a key-value index on `field` of `collection` and
