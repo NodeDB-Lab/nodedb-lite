@@ -8,7 +8,7 @@ mod merge;
 mod rows;
 mod update_from;
 
+pub(super) use crate::query::assignments::convert_assignments;
 pub(super) use insert_select::lower_insert_select;
 pub(super) use merge::lower_merge;
-pub(super) use rows::convert_assignments;
 pub(super) use update_from::lower_update_from;

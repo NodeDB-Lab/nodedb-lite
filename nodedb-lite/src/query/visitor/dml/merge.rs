@@ -15,11 +15,9 @@ use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
 use crate::error::LiteError;
+use crate::query::assignments::convert_assignments_with_source;
 use crate::query::document_ops::sets::{
-    build_insert_map, collect_ids_pub, fetch_document_value_pub,
-};
-use crate::query::document_ops::writes::{
-    point_delete_admitted, point_insert_admitted, point_update_admitted,
+    MergeWrite, apply_merge_write, collect_ids_pub, fetch_document_value_pub, plan_merge_write,
 };
 use crate::query::engine::LiteQueryEngine;
 use crate::query::value_utils::value_to_string;
@@ -27,13 +25,16 @@ use crate::storage::engine::StorageEngine;
 
 use crate::query::visitor::adapter::LiteFut;
 
-use super::rows::{
-    convert_assignments, expr_to_update_value, extract_id, result_to_maps, row_to_msgpack,
-};
+use super::rows::{extract_id, result_to_maps};
 
 // ── Merge ────────────────────────────────────────────────────────────────────
 
 /// `MERGE INTO target USING source ON ... WHEN ...`
+///
+/// An UPDATE arm evaluates against the matched target row, with source
+/// fields readable as `<source_alias>.<field>`. Every arm's write is
+/// resolved before the first one applies, so an assignment that fails
+/// leaves every row unchanged.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::query::visitor) fn lower_merge<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
@@ -43,7 +44,7 @@ pub(in crate::query::visitor) fn lower_merge<'a, S: StorageEngine + 'a>(
     source: &SqlPlan,
     target_join_col: &str,
     source_join_col: &str,
-    _source_alias: &str,
+    source_alias: &str,
     clauses: &[MergePlanClause],
     _returning: bool,
 ) -> Result<LiteFut<'a>, LiteError> {
@@ -51,7 +52,8 @@ pub(in crate::query::visitor) fn lower_merge<'a, S: StorageEngine + 'a>(
     let source = source.clone();
     let t_join = target_join_col.to_string();
     let s_join = source_join_col.to_string();
-    let phys_clauses = convert_merge_clauses(clauses)?;
+    let alias = source_alias.to_string();
+    let phys_clauses = convert_merge_clauses(clauses, std::slice::from_ref(&alias))?;
 
     Ok(Box::pin(async move {
         let source_result = engine.execute_plan_admitted(&source, Some(permit)).await?;
@@ -66,13 +68,13 @@ pub(in crate::query::visitor) fn lower_merge<'a, S: StorageEngine + 'a>(
 
         let target_ids = collect_ids_pub(engine, &target).await?;
         let mut matched_source_keys: HashSet<String> = HashSet::new();
-        let mut affected: u64 = 0;
+        let mut planned: Vec<(String, MergeWrite)> = Vec::new();
+        let no_row: HashMap<String, Value> = HashMap::new();
 
         for doc_id in &target_ids {
             let target_val = fetch_document_value_pub(engine, &target, doc_id).await?;
-            let join_key = match target_val.get(&t_join).map(value_to_string) {
-                Some(k) => k,
-                None => continue,
+            let Some(join_key) = target_val.get(&t_join).map(value_to_string) else {
+                continue;
             };
 
             if let Some(source_row) = source_index.get(&join_key) {
@@ -81,9 +83,8 @@ pub(in crate::query::visitor) fn lower_merge<'a, S: StorageEngine + 'a>(
                     .iter()
                     .find(|c| c.kind == MergeClauseKind::Matched);
                 if let Some(arm) = arm {
-                    apply_merge_action(engine, permit, &target, doc_id, &arm.action, source_row)
-                        .await?;
-                    affected += 1;
+                    let write = plan_merge_write(&arm.action, &target_val, source_row, &alias)?;
+                    planned.push((doc_id.clone(), write));
                 }
             } else {
                 let arm = phys_clauses
@@ -92,16 +93,8 @@ pub(in crate::query::visitor) fn lower_merge<'a, S: StorageEngine + 'a>(
                 if let Some(arm) = arm {
                     // No source row for this target — NOT MATCHED BY SOURCE arms
                     // are UPDATE/DELETE only, so an empty source suffices.
-                    apply_merge_action(
-                        engine,
-                        permit,
-                        &target,
-                        doc_id,
-                        &arm.action,
-                        &HashMap::new(),
-                    )
-                    .await?;
-                    affected += 1;
+                    let write = plan_merge_write(&arm.action, &target_val, &no_row, &alias)?;
+                    planned.push((doc_id.clone(), write));
                 }
             }
         }
@@ -112,13 +105,22 @@ pub(in crate::query::visitor) fn lower_merge<'a, S: StorageEngine + 'a>(
             .find(|c| c.kind == MergeClauseKind::NotMatched);
         if let Some(arm) = not_matched_arm {
             for (source_key, source_row) in &source_index {
-                if !matched_source_keys.contains(source_key) {
-                    let doc_id = extract_id(source_row);
-                    apply_merge_action(engine, permit, &target, &doc_id, &arm.action, source_row)
-                        .await?;
-                    affected += 1;
+                if matched_source_keys.contains(source_key) {
+                    continue;
                 }
+                let write = plan_merge_write(&arm.action, &no_row, source_row, &alias)?;
+                // An inserted row is keyed by its own `id`.
+                let doc_id = match &write {
+                    MergeWrite::Insert(row) => extract_id(row),
+                    _ => extract_id(source_row),
+                };
+                planned.push((doc_id, write));
             }
+        }
+
+        let affected = planned.len() as u64;
+        for (doc_id, write) in planned {
+            apply_merge_write(engine, permit, &target, &doc_id, write).await?;
         }
 
         Ok(QueryResult {
@@ -130,48 +132,28 @@ pub(in crate::query::visitor) fn lower_merge<'a, S: StorageEngine + 'a>(
     }))
 }
 
-pub(super) async fn apply_merge_action<S: StorageEngine>(
-    engine: &LiteQueryEngine<S>,
-    permit: &crate::engine::fts::coordinator::TextMutationPermit,
-    target: &str,
-    doc_id: &str,
-    action: &MergeActionOp,
-    source_row: &HashMap<String, Value>,
-) -> Result<(), LiteError> {
-    match action {
-        MergeActionOp::Update { updates } => {
-            point_update_admitted(engine, permit, target, doc_id, updates).await?;
-        }
-        MergeActionOp::Delete => {
-            point_delete_admitted(engine, permit, target, doc_id).await?;
-        }
-        MergeActionOp::Insert { columns, values } => {
-            // Evaluate each value against the source row: literals decode
-            // directly, expressions (`s.new_embedding`, `s.qty * 2`) evaluate
-            // against the bare-keyed source fields. Result keyed by target column.
-            let row_map = build_insert_map(columns, values, source_row)?;
-            let id = extract_id(&row_map);
-            let bytes = row_to_msgpack(row_map)?;
-            point_insert_admitted(engine, permit, target, &id, &bytes, true).await?;
-        }
-        MergeActionOp::DoNothing => {}
-    }
-    Ok(())
-}
-
+/// Convert MERGE arms. A column qualified by a name in `source_refs` reads
+/// the source row.
 pub(super) fn convert_merge_clauses(
     clauses: &[MergePlanClause],
+    source_refs: &[String],
 ) -> Result<Vec<MergeClauseOp>, LiteError> {
-    clauses.iter().map(convert_one_clause).collect()
+    clauses
+        .iter()
+        .map(|clause| convert_one_clause(clause, source_refs))
+        .collect()
 }
 
-pub(super) fn convert_one_clause(clause: &MergePlanClause) -> Result<MergeClauseOp, LiteError> {
+pub(super) fn convert_one_clause(
+    clause: &MergePlanClause,
+    source_refs: &[String],
+) -> Result<MergeClauseOp, LiteError> {
     let kind = match clause.kind {
         SqlMergeKind::Matched => MergeClauseKind::Matched,
         SqlMergeKind::NotMatched => MergeClauseKind::NotMatched,
         SqlMergeKind::NotMatchedBySource => MergeClauseKind::NotMatchedBySource,
     };
-    let action = convert_merge_action(&clause.action)?;
+    let action = convert_merge_action(&clause.action, source_refs)?;
     Ok(MergeClauseOp {
         kind,
         extra_predicate: Vec::new(),
@@ -179,10 +161,13 @@ pub(super) fn convert_one_clause(clause: &MergePlanClause) -> Result<MergeClause
     })
 }
 
-pub(super) fn convert_merge_action(action: &MergePlanAction) -> Result<MergeActionOp, LiteError> {
+pub(super) fn convert_merge_action(
+    action: &MergePlanAction,
+    source_refs: &[String],
+) -> Result<MergeActionOp, LiteError> {
     match action {
         MergePlanAction::Update { assignments } => {
-            let updates = convert_assignments(assignments)?;
+            let updates = convert_assignments_with_source(assignments, source_refs)?;
             Ok(MergeActionOp::Update { updates })
         }
         MergePlanAction::Delete => Ok(MergeActionOp::Delete),
@@ -190,10 +175,15 @@ pub(super) fn convert_merge_action(action: &MergePlanAction) -> Result<MergeActi
             // Literal values are pre-encoded; source-referencing expressions
             // (`s.new_embedding`, `s.qty * 2`) are carried as `UpdateValue::Expr`
             // and evaluated against the source row at apply time.
-            let encoded = values
+            let pairs: Vec<(String, nodedb_sql::types_expr::SqlExpr)> = columns
                 .iter()
-                .map(expr_to_update_value)
-                .collect::<Result<Vec<_>, LiteError>>()?;
+                .cloned()
+                .zip(values.iter().cloned())
+                .collect();
+            let encoded = convert_assignments_with_source(&pairs, source_refs)?
+                .into_iter()
+                .map(|(_, value)| value)
+                .collect();
             Ok(MergeActionOp::Insert {
                 columns: columns.clone(),
                 values: encoded,

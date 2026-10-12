@@ -4,12 +4,15 @@
 
 use nodedb_sql::types::{EngineType, SqlValue, WriteRoute};
 use nodedb_types::result::QueryResult;
+use nodedb_types::value::Value;
 
+use super::assignments::{convert_assignments, resolve_updates};
 use super::dml_targets::document_targets;
 use super::engine::{LiteQueryEngine, sql_value_to_string};
 use super::text_index::reindex_documents;
 use crate::engine::crdt::{CrdtRowOp, CrdtRowWrite};
 use crate::error::LiteError;
+use crate::nodedb::convert::{loro_value_to_document, value_to_loro};
 use crate::storage::engine::StorageEngine;
 use nodedb_sql::types::filter::Filter;
 
@@ -151,39 +154,49 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             .await;
         }
         let targets = document_targets(self, collection, filters, target_keys)?;
+        let updates = convert_assignments(assignments)?;
         // CRDT / schemaless path.
         let mut crdt = self.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
         // UPDATE changes existing rows only, and only the assigned fields.
-        let fields: Vec<(&str, loro::LoroValue)> = assignments
+        // Each assignment resolves against its row's pre-image, in the
+        // document's SQL read shape the WHERE saw.
+        let mut written: Vec<String> = Vec::with_capacity(targets.len());
+        let mut row_fields: Vec<Vec<(String, loro::LoroValue)>> = Vec::with_capacity(targets.len());
+        for key in targets {
+            let Some(stored) = crdt.read(collection, &key) else {
+                continue;
+            };
+            let current = Value::Object(loro_value_to_document(&key, &stored).fields);
+            let resolved = resolve_updates(&updates, &current)?;
+            row_fields.push(
+                resolved
+                    .into_iter()
+                    .map(|(field, value)| (field, value_to_loro(&value)))
+                    .collect(),
+            );
+            written.push(key);
+        }
+        let fields: Vec<Vec<(&str, loro::LoroValue)>> = row_fields
             .iter()
-            .filter_map(|(field, expr)| {
-                if let nodedb_sql::types::SqlExpr::Literal(val) = expr {
-                    Some((field.as_str(), sql_value_to_loro(val)))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let written: Vec<String> = targets
-            .into_iter()
-            .filter(|key| crdt.exists(collection, key))
+            .map(|row| row.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
             .collect();
         // Every row is checked before any is written, so a statement that
         // fails writes nothing.
         let checks: Vec<CrdtRowOp<'_>> = written
             .iter()
-            .map(|id| {
+            .zip(&fields)
+            .map(|(id, row)| {
                 (
                     CrdtRowWrite::SetFields,
                     collection,
                     id.as_str(),
-                    fields.as_slice(),
+                    row.as_slice(),
                 )
             })
             .collect();
         crdt.check_unique_writes(&checks)?;
-        for key_str in &written {
-            crdt.set_fields(collection, key_str, &fields)?;
+        for (key_str, row) in written.iter().zip(&fields) {
+            crdt.set_fields(collection, key_str, row)?;
         }
         let affected = written.len() as u64;
         drop(crdt);

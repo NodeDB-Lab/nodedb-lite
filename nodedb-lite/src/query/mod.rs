@@ -1,3 +1,4 @@
+pub(crate) mod assignments;
 pub mod catalog;
 mod catalog_columns;
 pub mod coerce;

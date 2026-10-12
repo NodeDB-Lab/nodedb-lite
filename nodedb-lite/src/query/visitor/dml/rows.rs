@@ -5,45 +5,14 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use nodedb_sql::types_expr::SqlExpr;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
-use crate::query::filter_convert::sql_value_to_value;
 use crate::query::value_utils::value_to_string;
+use crate::query::visitor::scan_post::row_to_typed_value;
 use crate::storage::engine::StorageEngine;
-
-pub(super) type UpdateValue = nodedb_physical::physical_plan::document::types::UpdateValue;
-
-/// Convert a `SqlExpr` to `UpdateValue` for use in point_update.
-pub(super) fn expr_to_update_value(expr: &SqlExpr) -> Result<UpdateValue, LiteError> {
-    match expr {
-        SqlExpr::Literal(v) => {
-            let ndb_val = sql_value_to_value(v)?;
-            let bytes =
-                zerompk::to_msgpack_vec(&ndb_val).map_err(|e| LiteError::Serialization {
-                    detail: format!("encode update literal: {e}"),
-                })?;
-            Ok(UpdateValue::Literal(bytes))
-        }
-        other => {
-            let q_expr = crate::query::expr_convert::convert_sql_expr(other)?;
-            Ok(UpdateValue::Expr(q_expr))
-        }
-    }
-}
-
-/// Convert `Vec<(String, SqlExpr)>` assignments to `Vec<(String, UpdateValue)>`.
-pub(in crate::query::visitor) fn convert_assignments(
-    assignments: &[(String, SqlExpr)],
-) -> Result<Vec<(String, UpdateValue)>, LiteError> {
-    assignments
-        .iter()
-        .map(|(col, expr)| Ok((col.clone(), expr_to_update_value(expr)?)))
-        .collect()
-}
 
 /// Encode the typed document object that `point_insert` decodes.
 pub(super) fn row_to_msgpack(row: HashMap<String, Value>) -> Result<Vec<u8>, LiteError> {
@@ -69,45 +38,17 @@ pub(super) fn extract_id(row: &HashMap<String, Value>) -> String {
     })
 }
 
-/// Convert `QueryResult` rows to `Vec<HashMap<String, Value>>`.
+/// Convert `QueryResult` rows to field maps. A schemaless document row
+/// (`id` plus one `document` JSON column) contributes its document's fields,
+/// so a source column reads the same whichever engine holds the source.
 pub(super) fn result_to_maps(result: QueryResult) -> Vec<HashMap<String, Value>> {
     let cols = result.columns;
     result
         .rows
         .into_iter()
-        .map(|row| cols.iter().cloned().zip(row).collect())
-        .collect()
-}
-
-/// Resolve `UpdateValue::Expr` column references against a source row.
-///
-/// Column expressions of the form `table.col` or `col` are resolved
-/// against the source row map; others are left as `UpdateValue::Expr`.
-pub(super) fn resolve_updates_with_source(
-    updates: &[(String, UpdateValue)],
-    source_row: &HashMap<String, Value>,
-) -> Result<Vec<(String, UpdateValue)>, LiteError> {
-    updates
-        .iter()
-        .map(|(col, uv)| {
-            let resolved = match uv {
-                UpdateValue::Literal(_) => uv.clone(),
-                UpdateValue::Expr(expr) => {
-                    if let nodedb_query::expr::types::SqlExpr::Column(name) = expr {
-                        let field = name.rsplit('.').next().unwrap_or(name.as_str());
-                        if let Some(val) = source_row.get(field) {
-                            let bytes = zerompk::to_msgpack_vec(val).map_err(|e| {
-                                LiteError::Serialization {
-                                    detail: format!("resolve source col '{field}': {e}"),
-                                }
-                            })?;
-                            return Ok((col.clone(), UpdateValue::Literal(bytes)));
-                        }
-                    }
-                    uv.clone()
-                }
-            };
-            Ok((col.clone(), resolved))
+        .map(|row| match row_to_typed_value(&cols, &row) {
+            Value::Object(map) => map,
+            _ => HashMap::new(),
         })
         .collect()
 }

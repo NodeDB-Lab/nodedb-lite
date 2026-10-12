@@ -4,8 +4,11 @@
 use nodedb_types::value::Value;
 
 use crate::error::LiteError;
+use crate::query::assignments::resolve_updates_with_excluded;
 use crate::query::engine::LiteQueryEngine;
 use crate::storage::engine::StorageEngine;
+
+use super::super::reads::row_to_object;
 
 /// The stored row whose primary key equals `pk`, or `None`.
 ///
@@ -35,34 +38,22 @@ pub(super) async fn find_row<S: StorageEngine>(
 type UpdateValue = nodedb_physical::physical_plan::document::types::UpdateValue;
 
 /// Apply `ON CONFLICT DO UPDATE` assignments to an existing row.
+///
+/// Each assignment evaluates against the existing row, with `EXCLUDED.col`
+/// bound to `incoming`, the row the INSERT proposed.
 pub(super) fn apply_conflict_updates(
     mut existing: Vec<Value>,
     incoming: &Value,
     updates: &[(String, UpdateValue)],
     col_names: &[String],
 ) -> Result<Vec<Value>, LiteError> {
-    for (field, update_val) in updates {
-        let new_val = match update_val {
-            UpdateValue::Literal(bytes) => {
-                zerompk::from_msgpack::<Value>(bytes).unwrap_or(Value::Null)
-            }
-            UpdateValue::Expr(expr) => {
-                // Evaluate expr against the existing row document. The expr
-                // may reference EXCLUDED columns via the incoming object; we
-                // use the incoming value for the target field as a safe fallback
-                // when the expr cannot be fully resolved.
-                let evaled = expr.eval(incoming)?;
-                if matches!(evaled, Value::Null) {
-                    incoming.get(field).cloned().unwrap_or(Value::Null)
-                } else {
-                    evaled
-                }
-            }
-        };
-        if let Some(col_idx) = col_names.iter().position(|n| n == field)
-            && col_idx < existing.len()
+    let current = row_to_object(col_names, &existing);
+    let resolved = resolve_updates_with_excluded(updates, &current, incoming)?;
+    for (field, value) in resolved {
+        if let Some(col_idx) = col_names.iter().position(|n| *n == field)
+            && let Some(slot) = existing.get_mut(col_idx)
         {
-            existing[col_idx] = new_val;
+            *slot = value;
         }
     }
     Ok(existing)

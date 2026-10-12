@@ -5,6 +5,7 @@
 //! UPDATE and DELETE target the rows the WHERE names by key, or else every
 //! row it matches, and keep the text index in step.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use nodedb_sql::types::filter::Filter;
@@ -15,6 +16,9 @@ use nodedb_types::value::Value;
 
 use crate::engine::columnar::ColumnarEngine;
 use crate::error::LiteError;
+use crate::query::assignments::{
+    coerce_to_columns, convert_typed_assignments, has_expr, resolve_updates, row_object,
+};
 use crate::storage::engine::StorageEngine;
 
 use super::coerce::{build_row, coerce_sql_value};
@@ -118,8 +122,12 @@ async fn target_rows<S: StorageEngine>(
         .collect())
 }
 
-/// Update the targeted rows of a columnar collection with literal
-/// assignments. A non-literal assignment is refused.
+/// Update the targeted rows of a columnar collection.
+///
+/// A literal coerces to its column's type once. Any other right-hand side
+/// evaluates against each row's pre-image, so one assignment never sees
+/// another. Every post-image is built before the first row changes, so an
+/// assignment that fails leaves every row unchanged.
 pub async fn update_columnar<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
@@ -128,40 +136,46 @@ pub async fn update_columnar<S: StorageEngine>(
     target_keys: &[SqlValue],
 ) -> Result<QueryResult, LiteError> {
     let (schema, pk_idx) = columnar_schema(engine, collection)?;
-    let mut sets: Vec<(usize, Value)> = Vec::with_capacity(assignments.len());
-    for (field, expr) in assignments {
-        let SqlExpr::Literal(literal) = expr else {
+    for (field, _) in assignments {
+        if !schema.columns.iter().any(|c| c.name == *field) {
             return Err(LiteError::BadRequest {
-                detail: format!(
-                    "UPDATE with non-literal RHS on columnar collection '{collection}' \
-                     (field '{field}') is not supported; use a literal value"
-                ),
-            });
-        };
-        let idx = schema
-            .columns
-            .iter()
-            .position(|c| c.name == *field)
-            .ok_or_else(|| LiteError::BadRequest {
                 detail: format!("columnar collection '{collection}' has no column '{field}'"),
-            })?;
-        sets.push((
-            idx,
-            coerce_sql_value(literal, &schema.columns[idx].column_type)?,
-        ));
+            });
+        }
     }
+    let updates = convert_typed_assignments(assignments, &schema.columns)?;
+    let shared = if has_expr(&updates) {
+        None
+    } else {
+        let resolved = resolve_updates(&updates, &Value::Object(HashMap::new()))?;
+        Some(coerce_to_columns(resolved, &schema.columns)?)
+    };
 
-    let mut written: Vec<Vec<Value>> = Vec::new();
+    let mut planned: Vec<(Value, Vec<Value>)> = Vec::new();
     for row in target_rows(engine, collection, &schema, pk_idx, filters, target_keys).await? {
         let Some(pk) = row.get(pk_idx).cloned() else {
             continue;
         };
+        let resolved = match &shared {
+            Some(resolved) => resolved.clone(),
+            None => {
+                let current = row_object(&schema.columns, &row);
+                coerce_to_columns(resolve_updates(&updates, &current)?, &schema.columns)?
+            }
+        };
         let mut new_values = row;
-        for (idx, value) in &sets {
-            if let Some(slot) = new_values.get_mut(*idx) {
-                *slot = value.clone();
+        for (field, value) in resolved {
+            if let Some(idx) = schema.columns.iter().position(|c| c.name == field)
+                && let Some(slot) = new_values.get_mut(idx)
+            {
+                *slot = value;
             }
         }
+        planned.push((pk, new_values));
+    }
+
+    let mut written: Vec<Vec<Value>> = Vec::with_capacity(planned.len());
+    for (pk, new_values) in planned {
         if engine.columnar.update(collection, &pk, &new_values)? {
             written.push(new_values);
         }

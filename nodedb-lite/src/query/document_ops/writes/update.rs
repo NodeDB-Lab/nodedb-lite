@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::super::is_strict;
 use super::super::reads::{loro_value_to_ndb_value, ndb_value_to_loro};
-use super::super::write_helpers::affected;
-use super::super::write_helpers::decode_literal_updates;
+use super::super::write_helpers::{affected, strict_schema};
 use super::UpdateValue;
 use crate::error::LiteError;
+use crate::query::assignments::{coerce_to_columns, resolve_updates, row_object};
 use crate::query::engine::LiteQueryEngine;
 use crate::query::text_index::{reindex_documents, reindex_strict_rows};
 use crate::storage::engine::StorageEngine;
@@ -48,7 +48,13 @@ pub(crate) async fn point_update_admitted<S: StorageEngine>(
     let _permit = permit;
     if is_strict(engine, collection) {
         let pk = Value::String(document_id.to_string());
-        let field_updates = decode_literal_updates(updates)?;
+        let schema = strict_schema(engine, collection)?;
+        let Some(row) = engine.strict.get(collection, &pk).await? else {
+            return Ok(affected(0, "UPDATE"));
+        };
+        let current = row_object(&schema.columns, &row);
+        let resolved = resolve_updates(updates, &current)?;
+        let field_updates = coerce_to_columns(resolved, &schema.columns)?;
         let updated = engine
             .strict
             .update(collection, &pk, &field_updates)
@@ -62,25 +68,21 @@ pub(crate) async fn point_update_admitted<S: StorageEngine>(
         }
         let existing_val = crdt.read(collection, document_id);
         drop(crdt);
-        let mut merged: HashMap<String, loro::LoroValue> = if let Some(val) = existing_val {
-            match loro_value_to_ndb_value(&val) {
-                Value::Object(map) => map
-                    .into_iter()
-                    .map(|(k, v)| (k, ndb_value_to_loro(v)))
-                    .collect(),
-                _ => HashMap::new(),
-            }
-        } else {
-            HashMap::new()
+        let current = match existing_val {
+            Some(val) => loro_value_to_ndb_value(&val),
+            None => Value::Object(HashMap::new()),
         };
-        for (field, update_val) in updates {
-            if let UpdateValue::Literal(bytes) = update_val {
-                let val: Value =
-                    zerompk::from_msgpack(bytes).map_err(|e| LiteError::Serialization {
-                        detail: format!("decode update literal: {e}"),
-                    })?;
-                merged.insert(field.clone(), ndb_value_to_loro(val));
-            }
+        // Every assignment reads the pre-image, so resolve before merging.
+        let resolved = resolve_updates(updates, &current)?;
+        let mut merged: HashMap<String, loro::LoroValue> = match current {
+            Value::Object(map) => map
+                .into_iter()
+                .map(|(k, v)| (k, ndb_value_to_loro(v)))
+                .collect(),
+            _ => HashMap::new(),
+        };
+        for (field, val) in resolved {
+            merged.insert(field, ndb_value_to_loro(val));
         }
         let loro_fields: Vec<(&str, loro::LoroValue)> = merged
             .iter()

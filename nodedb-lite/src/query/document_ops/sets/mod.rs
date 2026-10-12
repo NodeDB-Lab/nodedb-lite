@@ -6,7 +6,7 @@ mod join;
 mod materialize;
 mod merge;
 mod source;
-pub(in crate::query) use actions::build_insert_map;
+pub(in crate::query) use actions::{MergeWrite, apply_merge_write, plan_merge_write};
 pub use copy::insert_select;
 pub(crate) use copy::insert_select_coordinated;
 pub use join::update_from_join;

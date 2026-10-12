@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-use super::super::writes::point_insert_admitted;
 use super::DocumentJoin;
-use super::actions::apply_merge_action;
-use super::build_insert_map;
+use super::actions::{MergeWrite, apply_merge_write, plan_merge_write};
 use super::source::{build_join_map, collect_ids, extract_field_str, fetch_document_value};
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
@@ -77,11 +75,14 @@ pub(crate) async fn merge_admitted<S: StorageEngine>(
     // Build source join map: source_join_col_value → document value map.
     let source_map = build_join_map(engine, source_collection, source_join_col).await?;
 
-    // Scan target rows and track which source keys were matched.
+    // Scan target rows and track which source keys were matched. Every
+    // arm's write is resolved before the first one applies, so an
+    // assignment that fails leaves every row unchanged.
     let target_ids = collect_ids(engine, target_collection).await?;
     let mut matched_source_keys: std::collections::HashSet<String> =
         std::collections::HashSet::new();
-    let mut affected_n: u64 = 0;
+    let mut planned: Vec<(String, MergeWrite)> = Vec::new();
+    let no_row: HashMap<String, Value> = HashMap::new();
 
     for doc_id in &target_ids {
         let target_val = fetch_document_value(engine, target_collection, doc_id).await?;
@@ -97,17 +98,9 @@ pub(crate) async fn merge_admitted<S: StorageEngine>(
                     .iter()
                     .find(|c| c.kind == MergeClauseKind::Matched && c.extra_predicate.is_empty());
                 if let Some(arm) = arm {
-                    apply_merge_action(
-                        engine,
-                        permit,
-                        target_collection,
-                        doc_id,
-                        &arm.action,
-                        source_val,
-                        source_alias,
-                    )
-                    .await?;
-                    affected_n += 1;
+                    let write =
+                        plan_merge_write(&arm.action, &target_val, source_val, source_alias)?;
+                    planned.push((doc_id.clone(), write));
                 }
             }
             _ => {
@@ -116,46 +109,36 @@ pub(crate) async fn merge_admitted<S: StorageEngine>(
                     c.kind == MergeClauseKind::NotMatchedBySource && c.extra_predicate.is_empty()
                 });
                 if let Some(arm) = arm {
-                    apply_merge_action(
-                        engine,
-                        permit,
-                        target_collection,
-                        doc_id,
-                        &arm.action,
-                        &HashMap::new(),
-                        source_alias,
-                    )
-                    .await?;
-                    affected_n += 1;
+                    let write = plan_merge_write(&arm.action, &target_val, &no_row, source_alias)?;
+                    planned.push((doc_id.clone(), write));
                 }
             }
         }
     }
 
     // Source rows with no target match — WHEN NOT MATCHED (INSERT).
-    for (key, source_val) in &source_map {
-        if matched_source_keys.contains(key) {
-            continue;
-        }
-        let arm = clauses
-            .iter()
-            .find(|c| c.kind == MergeClauseKind::NotMatched && c.extra_predicate.is_empty());
-        if let Some(arm) = arm
-            && let MergeActionOp::Insert { columns, values } = &arm.action
-        {
+    let not_matched = clauses
+        .iter()
+        .find(|c| c.kind == MergeClauseKind::NotMatched && c.extra_predicate.is_empty());
+    if let Some(arm) = not_matched
+        && matches!(arm.action, MergeActionOp::Insert { .. })
+    {
+        for (key, source_val) in &source_map {
+            if matched_source_keys.contains(key) {
+                continue;
+            }
             let doc_id = source_val
                 .get(source_join_col)
                 .map(value_to_string)
                 .unwrap_or_else(|| key.clone());
-            let map: HashMap<String, Value> = build_insert_map(columns, values, source_val)?;
-            let bytes = zerompk::to_msgpack_vec(&Value::Object(map)).map_err(|e| {
-                LiteError::Serialization {
-                    detail: format!("merge insert serialize: {e}"),
-                }
-            })?;
-            point_insert_admitted(engine, permit, target_collection, &doc_id, &bytes, true).await?;
-            affected_n += 1;
+            let write = plan_merge_write(&arm.action, &no_row, source_val, source_alias)?;
+            planned.push((doc_id, write));
         }
+    }
+
+    let affected_n = planned.len() as u64;
+    for (doc_id, write) in planned {
+        apply_merge_write(engine, permit, target_collection, &doc_id, write).await?;
     }
 
     Ok(QueryResult {

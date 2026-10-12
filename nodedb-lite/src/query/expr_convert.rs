@@ -27,17 +27,40 @@ use crate::query::filter_convert::sql_value_to_value;
 ///
 /// A subquery or a wildcard has no evaluator form and is a `BadRequest`.
 pub(crate) fn convert_sql_expr(expr: &SExpr) -> Result<QExpr, LiteError> {
+    convert(expr, &[])
+}
+
+/// [`convert_sql_expr`] for an expression that reads a joined source row.
+///
+/// A column qualified by any name in `source_refs` converts to
+/// `Column("<source_refs[0]>.<name>")`, the key a joined row gives that
+/// source field, as Origin's qualified conversion does. Any other qualifier
+/// names the target and is dropped.
+pub(crate) fn convert_sql_expr_with_source(
+    expr: &SExpr,
+    source_refs: &[String],
+) -> Result<QExpr, LiteError> {
+    convert(expr, source_refs)
+}
+
+fn convert(expr: &SExpr, source_refs: &[String]) -> Result<QExpr, LiteError> {
     match expr {
         // `EXCLUDED.col` (`INSERT ... ON CONFLICT DO UPDATE`) resolves
         // against the incoming row via `eval_with_excluded`, mirroring
-        // Origin's `sql_expr_to_bridge_expr`. Any other table qualifier
-        // is dropped: this crate evaluates single-collection expressions.
+        // Origin's `sql_expr_to_bridge_expr`.
         SExpr::Column { table, name }
             if table
                 .as_deref()
                 .is_some_and(|t| t.eq_ignore_ascii_case("excluded")) =>
         {
             Ok(QExpr::ExcludedColumn(name.clone()))
+        }
+        SExpr::Column {
+            table: Some(table),
+            name,
+        } if source_refs.iter().any(|r| r.eq_ignore_ascii_case(table)) => {
+            let alias = source_refs.first().map_or(table.as_str(), String::as_str);
+            Ok(QExpr::Column(format!("{alias}.{name}")))
         }
         SExpr::Column { name, .. } => Ok(QExpr::Column(name.clone())),
 
@@ -47,8 +70,8 @@ pub(crate) fn convert_sql_expr(expr: &SExpr) -> Result<QExpr, LiteError> {
         }
 
         SExpr::BinaryOp { left, op, right } => {
-            let ql = convert_sql_expr(left)?;
-            let qr = convert_sql_expr(right)?;
+            let ql = convert(left, source_refs)?;
+            let qr = convert(right, source_refs)?;
             let qop = convert_binary_op(*op)?;
             Ok(QExpr::BinaryOp {
                 left: Box::new(ql),
@@ -58,7 +81,7 @@ pub(crate) fn convert_sql_expr(expr: &SExpr) -> Result<QExpr, LiteError> {
         }
 
         SExpr::UnaryOp { op, expr } => {
-            let inner = convert_sql_expr(expr)?;
+            let inner = convert(expr, source_refs)?;
             match op {
                 UnaryOp::Neg => Ok(QExpr::Negate(Box::new(inner))),
                 UnaryOp::Not => Ok(QExpr::BinaryOp {
@@ -70,7 +93,8 @@ pub(crate) fn convert_sql_expr(expr: &SExpr) -> Result<QExpr, LiteError> {
         }
 
         SExpr::Function { name, args, .. } => {
-            let qargs: Result<Vec<QExpr>, LiteError> = args.iter().map(convert_sql_expr).collect();
+            let qargs: Result<Vec<QExpr>, LiteError> =
+                args.iter().map(|a| convert(a, source_refs)).collect();
             Ok(QExpr::Function {
                 name: name.clone(),
                 args: qargs?,
@@ -84,15 +108,15 @@ pub(crate) fn convert_sql_expr(expr: &SExpr) -> Result<QExpr, LiteError> {
         } => {
             let qoperand = operand
                 .as_ref()
-                .map(|e| convert_sql_expr(e).map(Box::new))
+                .map(|e| convert(e, source_refs).map(Box::new))
                 .transpose()?;
             let qwhen: Result<Vec<(QExpr, QExpr)>, LiteError> = when_then
                 .iter()
-                .map(|(cond, val)| Ok((convert_sql_expr(cond)?, convert_sql_expr(val)?)))
+                .map(|(cond, val)| Ok((convert(cond, source_refs)?, convert(val, source_refs)?)))
                 .collect();
             let qelse = else_expr
                 .as_ref()
-                .map(|e| convert_sql_expr(e).map(Box::new))
+                .map(|e| convert(e, source_refs).map(Box::new))
                 .transpose()?;
             Ok(QExpr::Case {
                 operand: qoperand,
@@ -102,7 +126,7 @@ pub(crate) fn convert_sql_expr(expr: &SExpr) -> Result<QExpr, LiteError> {
         }
 
         SExpr::Cast { expr, to_type } => {
-            let inner = convert_sql_expr(expr)?;
+            let inner = convert(expr, source_refs)?;
             let ct = convert_cast_type(to_type)?;
             Ok(QExpr::Cast {
                 expr: Box::new(inner),
@@ -111,7 +135,7 @@ pub(crate) fn convert_sql_expr(expr: &SExpr) -> Result<QExpr, LiteError> {
         }
 
         SExpr::IsNull { expr, negated } => {
-            let inner = convert_sql_expr(expr)?;
+            let inner = convert(expr, source_refs)?;
             Ok(QExpr::IsNull {
                 expr: Box::new(inner),
                 negated: *negated,
@@ -123,7 +147,7 @@ pub(crate) fn convert_sql_expr(expr: &SExpr) -> Result<QExpr, LiteError> {
             list,
             negated,
         } => {
-            let target = convert_sql_expr(expr)?;
+            let target = convert(expr, source_refs)?;
             let (eq_op, combine_op) = if *negated {
                 (QBinaryOp::NotEq, QBinaryOp::And)
             } else {
@@ -134,7 +158,7 @@ pub(crate) fn convert_sql_expr(expr: &SExpr) -> Result<QExpr, LiteError> {
                 let test = QExpr::BinaryOp {
                     left: Box::new(target.clone()),
                     op: eq_op,
-                    right: Box::new(convert_sql_expr(item)?),
+                    right: Box::new(convert(item, source_refs)?),
                 };
                 lowered = Some(match lowered {
                     None => test,
@@ -154,9 +178,9 @@ pub(crate) fn convert_sql_expr(expr: &SExpr) -> Result<QExpr, LiteError> {
             high,
             negated,
         } => {
-            let e = convert_sql_expr(expr)?;
-            let lo = convert_sql_expr(low)?;
-            let hi = convert_sql_expr(high)?;
+            let e = convert(expr, source_refs)?;
+            let lo = convert(low, source_refs)?;
+            let hi = convert(high, source_refs)?;
             let (low_op, high_op, combine_op) = if *negated {
                 (QBinaryOp::Lt, QBinaryOp::Gt, QBinaryOp::Or)
             } else {
@@ -186,7 +210,7 @@ pub(crate) fn convert_sql_expr(expr: &SExpr) -> Result<QExpr, LiteError> {
             let name = if *case_insensitive { "ilike" } else { "like" };
             let call = QExpr::Function {
                 name: name.into(),
-                args: vec![convert_sql_expr(expr)?, convert_sql_expr(pattern)?],
+                args: vec![convert(expr, source_refs)?, convert(pattern, source_refs)?],
             };
             Ok(if *negated {
                 QExpr::Negate(Box::new(call))
@@ -198,7 +222,7 @@ pub(crate) fn convert_sql_expr(expr: &SExpr) -> Result<QExpr, LiteError> {
         SExpr::ArrayLiteral(elems) => {
             let lowered = elems
                 .iter()
-                .map(convert_sql_expr)
+                .map(|e| convert(e, source_refs))
                 .collect::<Result<Vec<QExpr>, LiteError>>()?;
             let literals: Option<Vec<nodedb_types::Value>> = lowered
                 .iter()
@@ -341,6 +365,27 @@ mod tests {
         assert_eq!(
             convert_sql_expr(&literal).expect("lower"),
             QExpr::Literal(Value::Array(vec![Value::Integer(1), Value::Integer(2)]))
+        );
+    }
+
+    #[test]
+    fn source_qualified_column_reads_the_joined_source_key() {
+        let qualified = |table: &str| SExpr::Column {
+            table: Some(table.into()),
+            name: "qty".into(),
+        };
+        let refs = vec!["s".to_string(), "stock".to_string()];
+        assert_eq!(
+            convert_sql_expr_with_source(&qualified("stock"), &refs).expect("lower"),
+            QExpr::Column("s.qty".into())
+        );
+        assert_eq!(
+            convert_sql_expr_with_source(&qualified("t"), &refs).expect("lower"),
+            QExpr::Column("qty".into())
+        );
+        assert_eq!(
+            convert_sql_expr(&qualified("s")).expect("lower"),
+            QExpr::Column("qty".into())
         );
     }
 

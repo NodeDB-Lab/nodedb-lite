@@ -13,12 +13,15 @@ use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
 use crate::error::LiteError;
+use crate::query::assignments::{
+    coerce_to_columns, convert_typed_assignments, has_expr, resolve_updates, row_object,
+};
 use crate::query::dml_targets::strict_targets;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::text_index::{index_strict_rows, reindex_strict_rows};
 use crate::storage::engine::StorageEngine;
 
-use super::coerce::{build_row, coerce_sql_value, sql_value_to_string, sql_value_to_value};
+use super::coerce::{build_row, sql_value_to_string};
 use super::engine_read::parse_pk_value;
 
 /// Insert rows into a strict collection.
@@ -174,28 +177,38 @@ pub(crate) async fn update_strict_admitted<S: StorageEngine>(
             detail: format!("strict collection '{collection}' has no primary key column"),
         })?;
 
-    // Convert assignments to a HashMap<col_name, Value>.
-    let mut updates: HashMap<String, Value> = HashMap::with_capacity(assignments.len());
-    for (field, expr) in assignments {
-        let SqlExpr::Literal(val) = expr else {
-            continue;
-        };
-        let typed = match schema.columns.iter().find(|c| c.name == *field) {
-            Some(c) => coerce_sql_value(val, &c.column_type)?,
-            None => sql_value_to_value(val)?,
-        };
-        updates.insert(field.clone(), typed);
-    }
+    let updates = convert_typed_assignments(assignments, &schema.columns)?;
 
     let named: Vec<Value> = target_keys
         .iter()
         .map(|key| parse_pk_value(&sql_value_to_string(key), &pk_col.column_type))
         .collect();
     let pks = strict_targets(engine, collection, filters, named, pk_idx).await?;
+    // Each assignment resolves against its row's pre-image, and every
+    // post-image is built before the first write: an assignment that fails
+    // leaves every row unchanged. A literal-only update resolves once.
+    let shared = if has_expr(&updates) {
+        None
+    } else {
+        let resolved = resolve_updates(&updates, &Value::Object(HashMap::new()))?;
+        Some(coerce_to_columns(resolved, &schema.columns)?)
+    };
+    let mut changes: Vec<(Value, HashMap<String, Value>)> = Vec::with_capacity(pks.len());
+    for pk in &pks {
+        let row_updates = match &shared {
+            Some(resolved) => resolved.clone(),
+            None => {
+                let Some(row) = strict.get(collection, pk).await? else {
+                    continue;
+                };
+                let current = row_object(&schema.columns, &row);
+                coerce_to_columns(resolve_updates(&updates, &current)?, &schema.columns)?
+            }
+        };
+        changes.push((pk.clone(), row_updates));
+    }
     // One batch for the statement: a unique index it would break refuses
     // every row.
-    let changes: Vec<(Value, HashMap<String, Value>)> =
-        pks.iter().map(|pk| (pk.clone(), updates.clone())).collect();
     let affected = strict.update_many(collection, &changes).await?;
     reindex_strict_rows(engine, collection, &pks).await?;
     Ok(QueryResult {

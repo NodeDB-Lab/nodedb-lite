@@ -9,36 +9,14 @@ use nodedb_sql::types_expr::{SqlExpr, SqlValue};
 use nodedb_types::Surrogate;
 
 use crate::error::LiteError;
+use crate::query::assignments::convert_assignments;
 use crate::query::engine::LiteQueryEngine;
-use crate::query::expr_convert::convert_sql_expr;
-use crate::query::filter_convert::sql_value_to_value;
 use crate::query::kv_ops::sql_read::kv_key_bytes;
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
 use crate::storage::engine::StorageEngine;
 
 use super::encoding::encode_kv_value;
 use crate::query::visitor::adapter::LiteFut;
-
-/// Convert one `ON CONFLICT DO UPDATE SET col = <expr>` assignment.
-///
-/// Mirrors Origin's `assignments_to_update_values`: a literal RHS
-/// pre-encodes to msgpack (`UpdateValue::Literal`); anything else (a
-/// column reference, arithmetic, `EXCLUDED.col`, a function call, ...)
-/// converts to a query-side expression (`UpdateValue::Expr`) that
-/// `kv_ops::writes::basic::kv_insert_on_conflict_update` evaluates via
-/// `query::on_conflict::apply_patch`.
-fn assignment_to_update_value(expr: &SqlExpr) -> Result<UpdateValue, LiteError> {
-    match expr {
-        SqlExpr::Literal(v) => {
-            let value = sql_value_to_value(v)?;
-            let bytes = zerompk::to_msgpack_vec(&value).map_err(|e| LiteError::Serialization {
-                detail: format!("encode ON CONFLICT literal: {e}"),
-            })?;
-            Ok(UpdateValue::Literal(bytes))
-        }
-        other => Ok(UpdateValue::Expr(convert_sql_expr(other)?)),
-    }
-}
 
 // ── KvInsert ─────────────────────────────────────────────────────────────────
 
@@ -77,10 +55,7 @@ pub(in crate::query::visitor) fn lower_kv_insert<'a, S: StorageEngine + 'a>(
     // literal RHS pre-encodes to msgpack, anything else carries the
     // expression for `kv_insert_on_conflict_update` to evaluate against
     // the existing row (`col`) and the incoming row (`EXCLUDED.col`).
-    let updates: Vec<(String, UpdateValue)> = on_conflict_updates
-        .iter()
-        .map(|(col, expr)| Ok((col.clone(), assignment_to_update_value(expr)?)))
-        .collect::<Result<Vec<_>, LiteError>>()?;
+    let updates: Vec<(String, UpdateValue)> = convert_assignments(on_conflict_updates)?;
 
     // Pre-encode all entries so errors surface before the future is spawned.
     let mut ops: Vec<KvOp> = Vec::with_capacity(entries.len());

@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::super::is_strict;
-use super::super::reads::ndb_value_to_loro;
-use super::super::write_helpers::affected;
-use super::super::write_helpers::{decode_literal_updates, strict_schema};
+use super::super::reads::{loro_value_to_ndb_value, ndb_value_to_loro};
+use super::super::write_helpers::{affected, strict_schema};
 use super::UpdateValue;
 use crate::engine::crdt::{CrdtRowOp, CrdtRowWrite};
 use crate::error::LiteError;
+use crate::query::assignments::{coerce_to_columns, has_expr, resolve_updates, row_object};
 use crate::query::engine::LiteQueryEngine;
 use crate::query::text_index::{reindex_documents, reindex_strict_rows};
 use crate::storage::engine::StorageEngine;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
+use std::collections::HashMap;
 
 /// BulkUpdate: scan matching documents and apply field updates to all.
 ///
@@ -46,7 +47,14 @@ pub(crate) async fn bulk_update_admitted<S: StorageEngine>(
     updates: &[(String, UpdateValue)],
 ) -> Result<QueryResult, LiteError> {
     let _permit = permit;
-    let field_updates = decode_literal_updates(updates)?;
+    // A literal-only update resolves once. An expression resolves per row
+    // against that row's pre-image. Every post-image is built before the
+    // first write, so an assignment that fails leaves every row unchanged.
+    let shared = if has_expr(updates) {
+        None
+    } else {
+        Some(resolve_updates(updates, &Value::Object(HashMap::new()))?)
+    };
 
     if is_strict(engine, collection) {
         let schema = strict_schema(engine, collection)?;
@@ -58,46 +66,71 @@ pub(crate) async fn bulk_update_admitted<S: StorageEngine>(
                 detail: format!("strict collection '{collection}' has no primary key"),
             })?;
         let all_rows = engine.strict.list_rows(collection).await?;
-        let mut affected_n: u64 = 0;
-        let mut pks: Vec<Value> = Vec::with_capacity(all_rows.len());
+        let mut changes: Vec<(Value, HashMap<String, Value>)> = Vec::with_capacity(all_rows.len());
         for row in &all_rows {
             let Some(pk) = row.get(pk_idx) else {
                 continue;
             };
-            if engine.strict.update(collection, pk, &field_updates).await? {
-                affected_n += 1;
-            }
-            pks.push(pk.clone());
+            let resolved = match &shared {
+                Some(resolved) => resolved.clone(),
+                None => resolve_updates(updates, &row_object(&schema.columns, row))?,
+            };
+            changes.push((pk.clone(), coerce_to_columns(resolved, &schema.columns)?));
         }
+        // One batch for the statement: a unique index it would break refuses
+        // every row.
+        let affected_n = engine.strict.update_many(collection, &changes).await?;
+        let pks: Vec<Value> = changes.into_iter().map(|(pk, _)| pk).collect();
         reindex_strict_rows(engine, collection, &pks).await?;
         Ok(affected(affected_n, "UPDATE"))
     } else {
-        let loro_updates: Vec<(String, loro::LoroValue)> = field_updates
-            .into_iter()
-            .map(|(k, v)| (k, ndb_value_to_loro(v)))
-            .collect();
         let mut crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
         let ids = crdt.list_ids(collection);
-        let loro_slice: Vec<(&str, loro::LoroValue)> = loro_updates
+        let mut row_fields: Vec<Vec<(String, loro::LoroValue)>> = Vec::with_capacity(ids.len());
+        for id in &ids {
+            let resolved = match &shared {
+                Some(resolved) => resolved.clone(),
+                None => {
+                    let current = match crdt.read(collection, id) {
+                        Some(val) => loro_value_to_ndb_value(&val),
+                        None => Value::Object(HashMap::new()),
+                    };
+                    resolve_updates(updates, &current)?
+                }
+            };
+            row_fields.push(
+                resolved
+                    .into_iter()
+                    .map(|(k, v)| (k, ndb_value_to_loro(v)))
+                    .collect(),
+            );
+        }
+        let slices: Vec<Vec<(&str, loro::LoroValue)>> = row_fields
             .iter()
-            .map(|(k, v)| (k.as_str(), v.clone()))
+            .map(|fields| {
+                fields
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.clone()))
+                    .collect()
+            })
             .collect();
         let rows: Vec<CrdtRowOp<'_>> = ids
             .iter()
-            .map(|id| {
+            .zip(&slices)
+            .map(|(id, fields)| {
                 (
                     CrdtRowWrite::SetFields,
                     collection,
                     id.as_str(),
-                    loro_slice.as_slice(),
+                    fields.as_slice(),
                 )
             })
             .collect();
         crdt.check_unique_writes(&rows)?;
         let mut affected_n: u64 = 0;
-        for id in &ids {
+        for (id, fields) in ids.iter().zip(&slices) {
             // A merge: fields the update does not assign keep their values.
-            crdt.set_fields_deferred(collection, id, &loro_slice)?;
+            crdt.set_fields_deferred(collection, id, fields)?;
             affected_n += 1;
         }
         crdt.flush_deltas().map_err(|e| LiteError::Storage {

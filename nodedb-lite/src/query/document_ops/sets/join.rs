@@ -4,9 +4,11 @@ use super::DocumentJoin;
 use super::UpdateValue;
 use super::source::{build_join_map, collect_ids, extract_field_str, fetch_document_value};
 use crate::error::LiteError;
+use crate::query::assignments::{joined_row, literal_updates, resolve_updates};
 use crate::query::engine::LiteQueryEngine;
 use crate::storage::engine::StorageEngine;
 use nodedb_types::result::QueryResult;
+use nodedb_types::value::Value;
 /// UpdateFromJoin: update target rows matched by an equi-join with a source collection.
 ///
 /// Execution within one Lite (single-node) transaction:
@@ -63,37 +65,39 @@ pub(crate) async fn update_from_join_admitted<S: StorageEngine>(
     let DocumentJoin {
         target_collection,
         source_collection,
-        source_alias: _,
+        source_alias,
         target_join_col,
         source_join_col,
     } = join;
     // Step 1: build join map from source collection.
     let source_map = build_join_map(engine, source_collection, source_join_col).await?;
 
-    // Step 2: scan target collection to find matching rows.
+    // Step 2: scan target collection to find matching rows. Every post-image
+    // is resolved before the first write, so an assignment that fails leaves
+    // every row unchanged.
     let target_ids = collect_ids(engine, target_collection).await?;
 
-    let mut affected_n: u64 = 0;
+    let mut planned: Vec<(&str, Vec<(String, UpdateValue)>)> = Vec::new();
     for doc_id in &target_ids {
         let target_val = fetch_document_value(engine, target_collection, doc_id).await?;
-        let join_key = extract_field_str(&target_val, target_join_col);
-        let join_key = match join_key {
-            Some(k) => k,
-            None => continue,
-        };
-
-        if !source_map.contains_key(&join_key) {
+        let Some(join_key) = extract_field_str(&target_val, target_join_col) else {
             continue;
-        }
+        };
+        let Some(source_val) = source_map.get(&join_key) else {
+            continue;
+        };
+        let row = Value::Object(joined_row(&target_val, source_val, source_alias));
+        planned.push((doc_id, literal_updates(resolve_updates(updates, &row)?)?));
+    }
 
-        point_update_admitted(engine, permit, target_collection, doc_id, updates).await?;
-        affected_n += 1;
+    for (doc_id, resolved) in &planned {
+        point_update_admitted(engine, permit, target_collection, doc_id, resolved).await?;
     }
 
     Ok(QueryResult {
         columns: Vec::new(),
         rows: Vec::new(),
-        rows_affected: affected_n,
+        rows_affected: planned.len() as u64,
         command: Some("UPDATE".into()),
     })
 }
@@ -173,6 +177,59 @@ mod tests {
         let fields =
             super::super::source::fetch_document_value(&db.query_engine, "target", "one").await?;
         assert_eq!(fields.get("body"), Some(&Value::String("joined".into())));
+        Ok(())
+    }
+
+    /// An assignment reads target fields by name and source fields as
+    /// `"<alias>.<field>"`, the shape Origin's plan conversion qualifies to.
+    #[tokio::test]
+    async fn update_from_join_evaluates_target_and_source_columns()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use nodedb_query::expr::SqlExpr as QExpr;
+        use nodedb_query::expr::types::BinaryOp;
+        use nodedb_types::value::Value;
+        let db = make_db().await;
+        for (collection, qty) in [("stock_src", 5), ("stock_dst", 2)] {
+            let bytes =
+                zerompk::to_msgpack_vec(&Value::Object(std::collections::HashMap::from([
+                    ("id".into(), Value::String("one".into())),
+                    ("qty".into(), Value::Integer(qty)),
+                ])))?;
+            crate::query::document_ops::writes::point_put(
+                &db.query_engine,
+                collection,
+                "one",
+                &bytes,
+            )
+            .await?;
+        }
+        let updates = vec![(
+            "qty".into(),
+            super::super::UpdateValue::Expr(QExpr::BinaryOp {
+                left: Box::new(QExpr::Column("qty".into())),
+                op: BinaryOp::Add,
+                right: Box::new(QExpr::BinaryOp {
+                    left: Box::new(QExpr::Column("s.qty".into())),
+                    op: BinaryOp::Mul,
+                    right: Box::new(QExpr::Literal(Value::Integer(2))),
+                }),
+            }),
+        )];
+        let result = super::update_from_join(
+            &db.query_engine,
+            "stock_dst",
+            "stock_src",
+            "s",
+            "id",
+            "id",
+            &updates,
+        )
+        .await?;
+        assert_eq!(result.rows_affected, 1);
+        let fields =
+            super::super::source::fetch_document_value(&db.query_engine, "stock_dst", "one")
+                .await?;
+        assert_eq!(fields.get("qty"), Some(&Value::Integer(12)));
         Ok(())
     }
 }

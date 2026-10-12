@@ -7,10 +7,10 @@
 use std::collections::HashMap;
 
 use nodedb_physical::physical_plan::UpdateValue;
-use nodedb_query::expr::SqlExpr as QExpr;
 use nodedb_types::value::Value;
 
 use crate::error::LiteError;
+use crate::query::assignments::resolve_updates_with_excluded;
 
 /// Apply `patch` to `row`. A `Literal` decodes to its value; an `Expr`
 /// evaluates against the stored row with `excluded` bound to the incoming
@@ -23,28 +23,19 @@ pub(crate) fn apply_patch(
     if patch.is_empty() {
         return Ok(());
     }
-    let stored = Value::Object(row.clone());
-    let excluded = Value::Object(excluded.clone());
-    for (field, update) in patch {
-        let value = match update {
-            UpdateValue::Literal(bytes) => {
-                zerompk::from_msgpack::<Value>(bytes).map_err(|e| LiteError::Serialization {
-                    detail: format!("decode assignment '{field}': {e}"),
-                })?
-            }
-            UpdateValue::Expr(expr) => eval_assignment(expr, &stored, &excluded)?,
-        };
-        row.insert(field.clone(), value);
-    }
+    let resolved = resolve_updates_with_excluded(
+        patch,
+        &Value::Object(row.clone()),
+        &Value::Object(excluded.clone()),
+    )?;
+    row.extend(resolved);
     Ok(())
-}
-
-fn eval_assignment(expr: &QExpr, stored: &Value, excluded: &Value) -> Result<Value, LiteError> {
-    Ok(expr.eval_with_excluded(stored, excluded)?)
 }
 
 #[cfg(test)]
 mod tests {
+    use nodedb_query::expr::SqlExpr as QExpr;
+
     use super::*;
 
     #[test]
