@@ -2,6 +2,8 @@
 //!
 //! Tests the full compensation flow: delta rejected → rollback → callback.
 
+#![cfg(feature = "sync")]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 

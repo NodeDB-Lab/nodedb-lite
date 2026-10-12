@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use super::delegate::SyncDelegate;
 use crate::sync::client::{SyncClient, SyncState};
+use crate::sync::delegate::SyncDelegate;
 
 /// Run the sync loop — connects, handshakes, pushes/receives, reconnects.
 ///

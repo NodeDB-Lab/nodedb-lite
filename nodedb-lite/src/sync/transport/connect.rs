@@ -10,11 +10,11 @@ use tokio_tungstenite::tungstenite::Message;
 
 use nodedb_types::sync::wire::{SyncFrame, SyncMessageType};
 
-use super::delegate::SyncDelegate;
 use super::dispatch::receive_loop;
 use super::push::{delta_push_loop, ping_loop};
 use crate::error::LiteError;
 use crate::sync::client::{SyncClient, SyncState};
+use crate::sync::delegate::SyncDelegate;
 
 /// Single connection attempt: connect → handshake → message loop.
 ///

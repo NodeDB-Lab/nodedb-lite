@@ -2,9 +2,12 @@
 //! work from the owning `NodeDbLite` and to apply inbound state changes.
 //!
 //! Held as `Arc<dyn SyncDelegate>` by the transport so the runner does not
-//! own the database. Splitting this trait into its own file keeps the
-//! per-engine method blocks easy to scan and prevents the runtime modules
-//! (`dispatch`, `push`) from drowning in trait surface.
+//! own the database.
+//!
+//! The trait compiles without the `sync` feature. `NodeDbLite` implements it
+//! in every native build, so inbound-apply logic stays testable and usable
+//! by an embedder-provided transport. Only the WebSocket transport that
+//! drives it is feature-gated.
 
 use crate::engine::crdt::engine::PendingDelta;
 use crate::sync::outbound::columnar::PendingColumnarBatch;

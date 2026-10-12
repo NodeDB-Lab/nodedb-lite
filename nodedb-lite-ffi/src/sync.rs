@@ -52,6 +52,7 @@ pub unsafe extern "C" fn nodedb_start_sync(
             max_batch_size: 100,
             token_provider: None,
             token_lifetime_secs: 0,
+            tenant_id: 1,
         };
 
         // start_sync spawns the loop, so it needs a runtime context.

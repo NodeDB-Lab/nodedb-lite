@@ -17,7 +17,7 @@ use nodedb_types::sync::wire::{
 use super::send::{encode_and_send, send_binary};
 use crate::sync::client::SyncClient;
 use crate::sync::collection_schema_builder::descriptor_from_meta;
-use crate::sync::transport::delegate::SyncDelegate;
+use crate::sync::delegate::SyncDelegate;
 
 /// Drain control messages: token refresh (when paused for auth), resync
 /// requests, row push refusals, and array acks. Returns `Break` if push must pause this tick
@@ -145,7 +145,7 @@ where
         );
         return ControlFlow::Continue(());
     };
-    let Some(descriptor) = descriptor_from_meta(&meta) else {
+    let Some(descriptor) = descriptor_from_meta(&meta, client.config().tenant_id) else {
         // descriptor_from_meta already warned with the specific reason.
         return ControlFlow::Continue(());
     };

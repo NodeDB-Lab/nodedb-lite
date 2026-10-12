@@ -8,6 +8,8 @@
 //! - each `KvPushAck` status retires, keeps, or re-sends the write;
 //! - a `RowPush` this replica refuses goes back as a `RowPushReject`.
 
+#![cfg(feature = "sync")]
+
 use std::sync::Arc;
 use std::time::Duration;
 

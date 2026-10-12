@@ -22,6 +22,8 @@
 //! The test is placed in the `heavy` nextest group (serialized) by the
 //! `binary(/sync_interop/)` filter in `.config/nextest.toml`.
 
+#![cfg(feature = "sync")]
+
 mod common;
 
 use std::sync::Arc;

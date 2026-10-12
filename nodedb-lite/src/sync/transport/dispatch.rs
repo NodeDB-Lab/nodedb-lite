@@ -17,10 +17,10 @@ use tokio_tungstenite::tungstenite::Message;
 
 use nodedb_types::sync::wire::{AckStatus, SyncFrame, SyncMessageType};
 
-use super::delegate::SyncDelegate;
 use super::dispatch_acks;
 use crate::error::LiteError;
 use crate::sync::client::SyncClient;
+use crate::sync::delegate::SyncDelegate;
 
 /// Receive and dispatch incoming frames from Origin.
 pub(super) async fn receive_loop<S>(

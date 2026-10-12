@@ -3,6 +3,8 @@
 //! Tests the edge-side shape manager + sync client protocol logic
 //! using in-process message construction and dispatch.
 
+#![cfg(feature = "sync")]
+
 use std::sync::Arc;
 
 use nodedb_lite::sync::*;

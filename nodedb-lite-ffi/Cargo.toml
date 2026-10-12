@@ -13,7 +13,8 @@ homepage.workspace = true
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-nodedb-lite = { workspace = true }
+# `nodedb_start_sync` / `nodedb_stop_sync` call the WebSocket sync client.
+nodedb-lite = { workspace = true, features = ["sync"] }
 nodedb-client = { workspace = true }
 nodedb-types = { workspace = true }
 nodedb-array = { workspace = true }

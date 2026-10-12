@@ -204,7 +204,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
     ///
     /// The task is registered with the database, so `stop_sync` and
     /// [`shutdown`](Self::shutdown) both stop it.
-    #[cfg(not(target_arch = "wasm32"))]
+    ///
+    /// Requires the `sync` feature.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "sync"))]
     pub fn start_sync(
         self: &Arc<Self>,
         config: crate::sync::SyncConfig,
@@ -238,7 +240,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// Returns `true` when sync was running. Sync can be restarted afterwards
     /// with a fresh [`start_sync`](Self::start_sync) — the reconnect-with-a-
     /// new-token path.
-    #[cfg(not(target_arch = "wasm32"))]
+    ///
+    /// Requires the `sync` feature.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "sync"))]
     pub async fn stop_sync(&self) -> bool {
         self.tasks.stop(crate::tasks::TaskKind::Sync).await
     }

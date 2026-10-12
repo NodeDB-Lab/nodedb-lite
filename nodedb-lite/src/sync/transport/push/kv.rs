@@ -16,8 +16,8 @@ use nodedb_types::sync::wire::{EngineKind, KvPushMsg, SyncFrame, SyncMessageType
 
 use super::send::send_binary;
 use crate::sync::client::SyncClient;
+use crate::sync::delegate::SyncDelegate;
 use crate::sync::outbound::kv::kv_batch_id;
-use crate::sync::transport::delegate::SyncDelegate;
 
 pub(super) async fn push<S>(
     client: &Arc<SyncClient>,

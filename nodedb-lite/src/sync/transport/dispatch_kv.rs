@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 use nodedb_types::sync::wire::{AckStatus, EngineKind, KvPushAckMsg, SyncFrame, stream_id_for};
 
-use super::delegate::SyncDelegate;
 use crate::sync::client::SyncClient;
+use crate::sync::delegate::SyncDelegate;
 
 pub(super) async fn handle_kv_push_ack(
     client: &Arc<SyncClient>,

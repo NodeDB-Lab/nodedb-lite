@@ -10,6 +10,8 @@
 //! functions, so the handshake, receive loop, and push loop are all exercised
 //! as a client actually uses them.
 
+#![cfg(feature = "sync")]
+
 use std::sync::Arc;
 use std::time::Duration;
 

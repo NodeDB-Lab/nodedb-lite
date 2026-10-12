@@ -59,7 +59,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake clang libclang-dev pkg-config protobuf-compiler perl
+            cmake clang libclang-dev pkg-config protobuf-compiler perl \
+            libcurl4-openssl-dev libsasl2-dev
       - name: Set up workspace
         uses: ./.github/actions/setup-workspace
         with:
@@ -71,6 +72,20 @@ jobs:
         run: cargo clippy --workspace --all-targets --profile ci -- -D warnings
       - name: Check wasm32 target
         run: cargo check -p nodedb-lite-wasm --target wasm32-unknown-unknown
+      # An embedder that ships no network capability builds without the
+      # `sync` feature. Lint that build so a gated item used from ungated
+      # code, or an item only the transport uses, fails here.
+      - name: Check build without the sync feature
+        run: cargo clippy -p nodedb-lite --no-default-features --all-targets --profile ci -- -D warnings
+      - name: Check the no-sync build links no WebSocket client
+        run: |
+          set -euo pipefail
+          cargo tree -p nodedb-lite --no-default-features -e normal > /tmp/no-sync-tree.txt
+          if grep -q tungstenite /tmp/no-sync-tree.txt; then
+            echo "::error::nodedb-lite --no-default-features depends on a WebSocket client."
+            grep -n tungstenite /tmp/no-sync-tree.txt
+            exit 1
+          fi
       # build.rs regenerates the C header on every build. Nothing else notices
       # when the committed copy no longer matches what cbindgen produces, so
       # the repo can ship a header that declares a surface the library does
@@ -98,6 +113,10 @@ jobs:
               -p nodedb-lite-ffi -E 'binary(abi_surface)'"
             exit 1
           fi
+      - name: Advisory-ignore policy gate
+        run: |
+          python3 scripts/ci/check_advisory_ignores.py --self-test
+          python3 scripts/ci/check_advisory_ignores.py
       - name: Install cargo-deny
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2
         with:
@@ -120,7 +139,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake clang libclang-dev pkg-config protobuf-compiler perl
+            cmake clang libclang-dev pkg-config protobuf-compiler perl \
+            libcurl4-openssl-dev libsasl2-dev
       - name: Set up workspace
         uses: ./.github/actions/setup-workspace
         with:

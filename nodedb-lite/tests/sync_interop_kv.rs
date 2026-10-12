@@ -22,6 +22,8 @@
 //! The `binary(/sync_interop/)` filter in `.config/nextest.toml` puts the
 //! test in the serialized `heavy` group.
 
+#![cfg(feature = "sync")]
+
 mod common;
 
 use std::sync::Arc;

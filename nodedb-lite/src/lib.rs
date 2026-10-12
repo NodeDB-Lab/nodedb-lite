@@ -37,7 +37,21 @@
 //! The task holds a `Weak` handle and stops when the last `Arc` disappears.
 //! Set `auto_flush_ms` to 0 for manual flushing. Call [`NodeDbLite::flush`] before dropping buffered state.
 //!
-//! For at-rest encryption see [`Encryption`]. [`NodeDb`]: nodedb_client::NodeDb
+//! For at-rest encryption see [`Encryption`].
+//!
+//! ## Cargo features
+//!
+//! - `sync` (default): the WebSocket sync client and transport. It gates `sync::client`,
+//!   `sync::transport`, `SyncClient`, `run_sync_loop`, `NodeDbLite::start_sync`, and
+//!   `NodeDbLite::stop_sync`. It pulls in `tokio-tungstenite`, `futures`, and tokio's `net` feature.
+//!
+//! A native build with `--no-default-features` contains no network code. It links no WebSocket
+//! client and enables no tokio networking. Local change capture still compiles: outbound queues,
+//! pending-entry types, and the `sync::SyncDelegate` trait. An embedder can drive its own
+//! transport through `SyncDelegate`. On wasm32 the `sync` module is absent and the feature has no
+//! effect.
+//!
+//! [`NodeDb`]: nodedb_client::NodeDb
 
 pub mod config;
 pub mod engine;

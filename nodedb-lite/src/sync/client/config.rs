@@ -43,6 +43,9 @@ pub struct SyncConfig {
     /// Token lifetime in seconds (used to schedule proactive refresh at 80%).
     /// If 0, no proactive refresh occurs — only reactive on auth rejection.
     pub token_lifetime_secs: u64,
+    /// Tenant the session authenticates as. Synthesized collection
+    /// descriptors carry this tenant. Defaults to 1.
+    pub tenant_id: u64,
 }
 
 impl std::fmt::Debug for SyncConfig {
@@ -57,6 +60,7 @@ impl std::fmt::Debug for SyncConfig {
             .field("max_batch_size", &self.max_batch_size)
             .field("token_provider", &self.token_provider.is_some())
             .field("token_lifetime_secs", &self.token_lifetime_secs)
+            .field("tenant_id", &self.tenant_id)
             .finish()
     }
 }
@@ -73,6 +77,7 @@ impl SyncConfig {
             max_batch_size: 100,
             token_provider: None,
             token_lifetime_secs: 0,
+            tenant_id: 1,
         }
     }
 
@@ -81,6 +86,29 @@ impl SyncConfig {
         self.token_provider = Some(provider);
         self.token_lifetime_secs = lifetime_secs;
         self
+    }
+
+    /// Set the tenant the session authenticates as.
+    pub fn with_tenant_id(mut self, tenant_id: u64) -> Self {
+        self.tenant_id = tenant_id;
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_tenant_id_is_one() {
+        let config = SyncConfig::new("wss://localhost:9090/sync", "t");
+        assert_eq!(config.tenant_id, 1);
+    }
+
+    #[test]
+    fn with_tenant_id_sets_tenant() {
+        let config = SyncConfig::new("wss://localhost:9090/sync", "t").with_tenant_id(42);
+        assert_eq!(config.tenant_id, 42);
     }
 }
 

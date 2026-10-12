@@ -21,10 +21,16 @@ use crate::nodedb::collection::CollectionMeta;
 
 /// Build a `CollectionDescriptor` from persisted collection metadata.
 ///
+/// A stored `descriptor_json` is returned verbatim and keeps its stored
+/// tenant. A synthesized descriptor carries `tenant_id`.
+///
 /// Returns `None` (with a `tracing::warn!`) when the descriptor cannot be
 /// reconstructed losslessly — the caller must skip announcing the
 /// collection this tick rather than emit an incorrect/empty schema.
-pub(crate) fn descriptor_from_meta(meta: &CollectionMeta) -> Option<CollectionDescriptor> {
+pub(crate) fn descriptor_from_meta(
+    meta: &CollectionMeta,
+    tenant_id: u64,
+) -> Option<CollectionDescriptor> {
     if let Some(json) = &meta.descriptor_json {
         match sonic_rs::from_str::<CollectionDescriptor>(json) {
             Ok(descriptor) => return Some(descriptor),
@@ -47,12 +53,12 @@ pub(crate) fn descriptor_from_meta(meta: &CollectionMeta) -> Option<CollectionDe
     let partition_strategy = PartitionStrategy::default_for_collection_type(&collection_type);
 
     Some(CollectionDescriptor {
-        // Lite is single-tenant (tenant 1, matching the sync session identity)
-        // and single-database. The announced descriptor MUST carry the same
-        // (tenant, database) the synced data lands under on Origin — deltas
-        // apply under `DatabaseId::DEFAULT` (0), so registering the collection
-        // under any other database would make it invisible to queries.
-        tenant_id: 1,
+        // The announced descriptor carries the session's tenant: Origin
+        // refuses a descriptor whose tenant differs from the JWT tenant.
+        // Lite is single-database. Deltas apply under `DatabaseId::DEFAULT`
+        // (0), so registering the collection under any other database would
+        // make it invisible to queries.
+        tenant_id,
         database_id: DatabaseId::DEFAULT,
         name: meta.name.clone(),
         collection_type,
@@ -165,14 +171,23 @@ mod tests {
         let mut meta = base_meta("document");
         meta.descriptor_json = Some(sonic_rs::to_string(&descriptor).unwrap());
 
-        let out = descriptor_from_meta(&meta).expect("descriptor should roundtrip");
+        let out = descriptor_from_meta(&meta, 1).expect("descriptor should roundtrip");
         assert_eq!(out, descriptor);
+        let other = descriptor_from_meta(&meta, 99).expect("descriptor should roundtrip");
+        assert_eq!(other.tenant_id, 7);
+    }
+
+    #[test]
+    fn synthesized_descriptor_carries_passed_tenant() {
+        let meta = base_meta("document");
+        let out = descriptor_from_meta(&meta, 77).expect("document should synthesize");
+        assert_eq!(out.tenant_id, 77);
     }
 
     #[test]
     fn document_synthesizes_schemaless() {
         let meta = base_meta("document");
-        let out = descriptor_from_meta(&meta).expect("document should synthesize");
+        let out = descriptor_from_meta(&meta, 1).expect("document should synthesize");
         assert!(out.collection_type.is_schemaless());
         assert_eq!(out.primary, PrimaryEngine::Document);
     }
@@ -196,7 +211,7 @@ mod tests {
         let mut meta = base_meta("kv");
         meta.config_json = Some(sonic_rs::to_string(&config).unwrap());
 
-        let out = descriptor_from_meta(&meta).expect("kv should rebuild");
+        let out = descriptor_from_meta(&meta, 1).expect("kv should rebuild");
         assert!(out.collection_type.is_kv());
         assert_eq!(out.primary, PrimaryEngine::KeyValue);
     }
@@ -204,18 +219,18 @@ mod tests {
     #[test]
     fn kv_without_config_json_is_none() {
         let meta = base_meta("kv");
-        assert!(descriptor_from_meta(&meta).is_none());
+        assert!(descriptor_from_meta(&meta, 1).is_none());
     }
 
     #[test]
     fn strict_without_descriptor_json_is_none() {
         let meta = base_meta("document_strict");
-        assert!(descriptor_from_meta(&meta).is_none());
+        assert!(descriptor_from_meta(&meta, 1).is_none());
     }
 
     #[test]
     fn unrecognized_type_is_none() {
         let meta = base_meta("bogus");
-        assert!(descriptor_from_meta(&meta).is_none());
+        assert!(descriptor_from_meta(&meta, 1).is_none());
     }
 }

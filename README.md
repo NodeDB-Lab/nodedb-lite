@@ -171,6 +171,12 @@ Converged:  Device and cloud share identical Loro state hash
 - **Conflict resolution** -- Declarative per-collection policies. SQL constraints (UNIQUE, FK) enforced on Origin at sync time with typed compensation hints back to the device.
 - ACK-based flow control (AIMD), CRC32C delta integrity, JWT token refresh, replay dedup
 
+The `sync` Cargo feature gates the WebSocket client and is on by default. Build with `--no-default-features` to ship a native binary with no network code. That build links no WebSocket client and has no `start_sync`. Local change capture still compiles.
+
+```toml
+nodedb-lite = { version = "0.1", default-features = false }
+```
+
 ## Key Features
 
 - **Multi-model locally** -- Vector, graph, document, full-text, timeseries, key-value, and more, all in-process with no network

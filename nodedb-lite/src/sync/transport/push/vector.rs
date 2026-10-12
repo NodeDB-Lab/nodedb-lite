@@ -17,7 +17,7 @@ use nodedb_types::sync::wire::{EngineKind, SyncFrame, SyncMessageType, stream_id
 
 use super::send::send_binary;
 use crate::sync::client::SyncClient;
-use crate::sync::transport::delegate::SyncDelegate;
+use crate::sync::delegate::SyncDelegate;
 
 pub(super) async fn push<S>(
     client: &Arc<SyncClient>,

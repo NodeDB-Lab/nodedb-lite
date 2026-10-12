@@ -7,6 +7,8 @@
 //! Edge-side simulation tests remain in `shape_subscription.rs`.
 //! These tests require a running Origin binary (see `tests/common/origin.rs`).
 
+#![cfg(feature = "sync")]
+
 mod common;
 
 use std::sync::Arc;

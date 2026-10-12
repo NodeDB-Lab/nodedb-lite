@@ -10,7 +10,13 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
-default = []
+default = ["sync"]
+# WebSocket sync client and transport: `sync::client`, `sync::transport`,
+# `NodeDbLite::start_sync` / `stop_sync`. Off, the native build links no
+# WebSocket client and leaves tokio's `net` feature off. Local change capture (outbound
+# queues, `SyncDelegate`) compiles either way. No effect on wasm32, where the
+# `sync` module is absent.
+sync = ["dep:tokio-tungstenite", "dep:futures"]
 
 [dependencies]
 nodedb-types = { workspace = true }
@@ -64,12 +70,22 @@ js-sys = { workspace = true }
 # `rt-multi-thread` feature now that engines are interior-mutable
 # (Sections A-G of LITE_RUNTIME_REFACTOR_CHECKLIST). Tests that
 # legitimately need a multi-thread runtime opt in via dev-dependencies.
-tokio = { workspace = true, features = ["rt", "sync", "time", "net", "macros"] }
-tokio-tungstenite = { workspace = true }
-futures = { workspace = true }
+# tokio `net` is absent here: only the WebSocket transport needs it, and
+# `tokio-tungstenite` enables it when the `sync` feature pulls that crate in.
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tokio-tungstenite = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 tempfile = { workspace = true }
 rust_decimal = { workspace = true }
 tokio-postgres = { workspace = true }
+
+# Mock Origin servers and raw WebSocket probes in tests and examples. These
+# compile without the `sync` feature, so the harness builds in a
+# `--no-default-features` test run.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true, features = ["net"] }
+tokio-tungstenite = { workspace = true }
+futures = { workspace = true }

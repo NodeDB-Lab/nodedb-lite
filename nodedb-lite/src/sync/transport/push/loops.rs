@@ -11,9 +11,9 @@ use tokio_tungstenite::tungstenite::Message;
 
 use nodedb_types::sync::wire::SyncMessageType;
 
-use super::super::delegate::SyncDelegate;
 use super::send::{encode_and_send, send_binary};
 use crate::sync::client::{SyncClient, SyncState};
+use crate::sync::delegate::SyncDelegate;
 
 /// Maximum age of an unACK'd in-flight entry before it is evicted by the stale-
 /// cleanup pass. Entries older than this are treated as losses: flow control
