@@ -5,27 +5,23 @@
 //! operation that requires storage I/O. This allows `ArrayEngineState` to be
 //! stored in a `tokio::sync::Mutex` inside `NodeDbLite<S: StorageEngine>`
 //! without requiring any synchronous storage trait.
+//!
+//! The read paths (`read_coord`, `slice`, `surrogate_bitmap_scan`) live in
+//! `engine::array::read`. Surrogate binding lives in `engine::array::surrogates`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use roaring;
-
-use nodedb_array::query::ceiling::{CeilingParams, CeilingResult, ceiling_resolve_cell};
-use nodedb_array::query::slice::{DimRange, Slice};
 use nodedb_array::schema::ArraySchema;
-use nodedb_array::segment::extract_cell_bytes;
-use nodedb_array::tile::cell_payload::CellPayload;
-use nodedb_array::tile::sparse_tile::SparseTile;
-use nodedb_array::types::TileId;
 use nodedb_array::types::coord::value::CoordValue;
-use nodedb_array::{TilePayload, tile_id_for_cell};
-use nodedb_types::Surrogate;
 
 use crate::engine::array::catalog::{ArrayCatalog, ArrayCatalogEntry, hash_schema};
 use crate::engine::array::manifest::{ArrayManifest, SegmentRef, load_manifest, save_manifest};
-use crate::engine::array::memtable::{ArrayMemtable, PutCellArgs};
+use crate::engine::array::memtable::{ArrayMemtable, PutCellArgs, encode_coord};
 use crate::engine::array::segments::write_segment;
+use crate::engine::array::surrogates::{
+    CellBindings, FIRST_SURROGATE, hwm_op, load_hwm, next_after_load,
+};
 use crate::error::LiteError;
 use crate::storage::engine::StorageEngine;
 
@@ -38,6 +34,17 @@ pub(crate) struct ArrayState {
     pub manifest: ArrayManifest,
     pub memtable: ArrayMemtable,
     pub audit_retain_ms: Option<i64>,
+    /// Coordinate-to-surrogate bindings of this array.
+    pub(crate) bindings: CellBindings,
+}
+
+/// One cell write passed to `ArrayEngineState::put_cell`.
+pub struct CellWrite {
+    pub coord: Vec<CoordValue>,
+    pub attrs: Vec<nodedb_array::types::cell_value::value::CellValue>,
+    pub system_from_ms: i64,
+    pub valid_from_ms: i64,
+    pub valid_until_ms: i64,
 }
 
 /// Storage-agnostic in-memory state for the array engine.
@@ -49,6 +56,9 @@ pub(crate) struct ArrayState {
 pub struct ArrayEngineState {
     pub(crate) arrays: HashMap<String, ArrayState>,
     flush_threshold: usize,
+    /// Next free surrogate. One counter covers every array, so a surrogate
+    /// names one cell across the database.
+    next_surrogate: u32,
 }
 
 impl Default for ArrayEngineState {
@@ -56,6 +66,7 @@ impl Default for ArrayEngineState {
         Self {
             arrays: HashMap::new(),
             flush_threshold: DEFAULT_FLUSH_THRESHOLD,
+            next_surrogate: FIRST_SURROGATE,
         }
     }
 }
@@ -66,9 +77,13 @@ impl ArrayEngineState {
     }
 
     /// Restore array engine from persistent storage.
+    ///
+    /// The next free surrogate passes both the persisted high-water mark and
+    /// every loaded binding, so a reopen never reuses a surrogate.
     pub async fn open<S: StorageEngine>(storage: &Arc<S>) -> Result<Self, LiteError> {
         let catalog = ArrayCatalog::open(Arc::clone(storage)).await?;
         let mut arrays = HashMap::new();
+        let mut max_bound = 0u32;
 
         for name in catalog.names().map(|s| s.to_owned()).collect::<Vec<_>>() {
             let entry = catalog
@@ -79,6 +94,8 @@ impl ArrayEngineState {
                 .clone();
             let schema = entry.schema()?;
             let manifest = load_manifest(storage, &name).await?;
+            let bindings = CellBindings::load(storage, &name).await?;
+            max_bound = max_bound.max(bindings.max_bound());
             arrays.insert(
                 name,
                 ArrayState {
@@ -87,13 +104,16 @@ impl ArrayEngineState {
                     manifest,
                     memtable: ArrayMemtable::new(),
                     audit_retain_ms: entry.audit_retain_ms,
+                    bindings,
                 },
             );
         }
 
+        let next_surrogate = next_after_load(load_hwm(storage).await?, max_bound)?;
         Ok(Self {
             arrays,
             flush_threshold: DEFAULT_FLUSH_THRESHOLD,
+            next_surrogate,
         })
     }
 
@@ -115,6 +135,12 @@ impl ArrayEngineState {
         if self.arrays.contains_key(name) {
             return Err(LiteError::BadRequest {
                 detail: format!("array '{name}' already exists"),
+            });
+        }
+        // NUL separates the array name from the coordinate in binding keys.
+        if name.contains('\0') {
+            return Err(LiteError::BadRequest {
+                detail: format!("array name {name:?} contains NUL: use a name without NUL"),
             });
         }
         let schema_bytes =
@@ -139,6 +165,7 @@ impl ArrayEngineState {
                 manifest: ArrayManifest::new(),
                 memtable: ArrayMemtable::new(),
                 audit_retain_ms,
+                bindings: CellBindings::default(),
             },
         );
         Ok(())
@@ -156,24 +183,36 @@ impl ArrayEngineState {
             .ok_or_else(|| LiteError::BadRequest {
                 detail: format!("array '{name}' not found"),
             })?;
-        crate::engine::array::manifest::drop_manifest(storage, name, &state.manifest).await?;
+        crate::engine::array::manifest::drop_manifest(
+            storage,
+            name,
+            &state.manifest,
+            state.bindings.delete_ops(name),
+        )
+        .await?;
         let mut catalog = ArrayCatalog::open(Arc::clone(storage)).await?;
         catalog.remove(name).await?;
         Ok(())
     }
 
     /// Write a cell into the array.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// Every put path reaches this function, so it is the one place that binds
+    /// a surrogate. The first write of a coordinate takes the next free
+    /// surrogate. Later writes, and writes after a delete or erase, reuse it.
     pub async fn put_cell<S: StorageEngine>(
         &mut self,
         storage: &Arc<S>,
         name: &str,
-        coord: Vec<CoordValue>,
-        attrs: Vec<nodedb_array::types::cell_value::value::CellValue>,
-        system_from_ms: i64,
-        valid_from_ms: i64,
-        valid_until_ms: i64,
+        write: CellWrite,
     ) -> Result<(), LiteError> {
+        let CellWrite {
+            coord,
+            attrs,
+            system_from_ms,
+            valid_from_ms,
+            valid_until_ms,
+        } = write;
         let state = self
             .arrays
             .get_mut(name)
@@ -181,17 +220,31 @@ impl ArrayEngineState {
                 detail: format!("array '{name}' not found"),
             })?;
 
-        state.memtable.put_cell(
+        let key = encode_coord(&coord)?;
+        let fresh = state.bindings.get(&key).is_none();
+        let surrogate = state
+            .bindings
+            .bind(name, key.clone(), &mut self.next_surrogate)?;
+
+        let put = state.memtable.put_cell(
             &state.schema,
             PutCellArgs {
                 coord,
                 attrs,
-                surrogate: Surrogate::ZERO,
+                surrogate,
                 system_from_ms,
                 valid_from_ms,
                 valid_until_ms,
             },
-        )?;
+        );
+        if let Err(e) = put {
+            if fresh {
+                state
+                    .bindings
+                    .rollback_new(&key, surrogate, &mut self.next_surrogate);
+            }
+            return Err(e);
+        }
 
         if state.memtable.stats().cell_count >= self.flush_threshold {
             let name_owned = name.to_owned();
@@ -241,170 +294,6 @@ impl ArrayEngineState {
         self.flush_memtable(storage, name).await
     }
 
-    /// Read the most recent live payload for `coord` at or before `system_as_of`.
-    /// Returns `None` for NotFound, Tombstoned, or Erased results.
-    pub async fn read_coord<S: StorageEngine>(
-        &self,
-        storage: &Arc<S>,
-        name: &str,
-        coord: &[CoordValue],
-        system_as_of: i64,
-    ) -> Result<Option<CellPayload>, LiteError> {
-        let state = self.arrays.get(name).ok_or_else(|| LiteError::BadRequest {
-            detail: format!("array '{name}' not found"),
-        })?;
-
-        let schema = &state.schema;
-        let seg_ids: Vec<u64> = state.manifest.segments.iter().map(|s| s.id).collect();
-
-        let tile_id =
-            tile_id_for_cell(schema, coord, system_as_of).map_err(|e| LiteError::Storage {
-                detail: format!("tile_id_for_cell: {e}"),
-            })?;
-        let hilbert_prefix = tile_id.hilbert_prefix;
-
-        let mem_versions = state
-            .memtable
-            .iter_cell_versions(hilbert_prefix, system_as_of, coord);
-
-        let seg_versions = cell_versions_from_segments(
-            storage,
-            name,
-            &seg_ids,
-            hilbert_prefix,
-            system_as_of,
-            coord,
-        )
-        .await?;
-
-        let mut all_versions: Vec<(TileId, Vec<u8>)> =
-            mem_versions.into_iter().chain(seg_versions).collect();
-        // ceiling_resolve_cell requires newest-first ordering.
-        all_versions.sort_unstable_by_key(|v| std::cmp::Reverse(v.0.system_from_ms));
-
-        let params = CeilingParams {
-            system_as_of,
-            valid_at_ms: None,
-        };
-        let result = ceiling_resolve_cell(
-            all_versions.iter().map(|(id, b)| (*id, b.as_slice())),
-            coord,
-            &params,
-        )
-        .map_err(|e| LiteError::Storage {
-            detail: format!("ceiling_resolve_cell: {e}"),
-        })?;
-
-        match result {
-            CeilingResult::Live(payload) => Ok(Some(payload)),
-            CeilingResult::Tombstoned | CeilingResult::Erased | CeilingResult::NotFound => Ok(None),
-        }
-    }
-
-    /// Return all live cells whose coordinates fall within `ranges` at or
-    /// before `system_as_of`.
-    pub async fn slice<S: StorageEngine>(
-        &mut self,
-        storage: &Arc<S>,
-        name: &str,
-        ranges: Vec<Option<DimRange>>,
-        system_as_of: i64,
-    ) -> Result<Vec<CellPayload>, LiteError> {
-        let state = self
-            .arrays
-            .get_mut(name)
-            .ok_or_else(|| LiteError::BadRequest {
-                detail: format!("array '{name}' not found"),
-            })?;
-
-        let schema = state.schema.clone();
-        let seg_ids: Vec<u64> = state.manifest.segments.iter().map(|s| s.id).collect();
-        let slice_pred = Slice::new(ranges);
-
-        // coord_key → Vec<(TileId, cell_bytes)>.
-        let mut coord_versions: HashMap<Vec<u8>, Vec<(TileId, Vec<u8>)>> = HashMap::new();
-
-        // Segments (oldest-first iteration, index from end to get newest-first).
-        for &seg_id in &seg_ids {
-            let bytes = crate::engine::array::segments::load_segment(storage, name, seg_id).await?;
-            let reader = crate::engine::array::segments::open_reader(&bytes)?;
-            for idx in (0..reader.tile_count()).rev() {
-                let entry_tile_id = reader.tiles()[idx].tile_id;
-                if entry_tile_id.system_from_ms > system_as_of {
-                    continue;
-                }
-                let payload = reader.read_tile(idx).map_err(|e| LiteError::Storage {
-                    detail: format!("read_tile: {e}"),
-                })?;
-                if let TilePayload::Sparse(tile) = &payload {
-                    collect_tile_into_map(tile, entry_tile_id, &mut coord_versions)?;
-                }
-            }
-        }
-
-        // Memtable.
-        let mem_tiles = state
-            .memtable
-            .drain_all_tiles_read_only(system_as_of, &schema)?;
-        for (tile_id, tile) in &mem_tiles {
-            collect_tile_into_map(tile, *tile_id, &mut coord_versions)?;
-        }
-
-        // Ceiling + slice filter.
-        let mut results = Vec::new();
-        for (coord_key, mut versions) in coord_versions {
-            versions.sort_by_key(|v| std::cmp::Reverse(v.0.system_from_ms));
-
-            let coord: Vec<CoordValue> =
-                zerompk::from_msgpack(&coord_key).map_err(|e| LiteError::Serialization {
-                    detail: format!("decode coord: {e}"),
-                })?;
-
-            let params = CeilingParams {
-                system_as_of,
-                valid_at_ms: None,
-            };
-            let result = ceiling_resolve_cell(
-                versions.iter().map(|(id, b)| (*id, b.as_slice())),
-                &coord,
-                &params,
-            )
-            .map_err(|e| LiteError::Storage {
-                detail: format!("ceiling_resolve_cell: {e}"),
-            })?;
-
-            if let CeilingResult::Live(payload) = result
-                && cell_in_slice(&coord, &slice_pred)
-            {
-                results.push(payload);
-            }
-        }
-
-        Ok(results)
-    }
-
-    /// Return the set of surrogates for all live cells whose coordinates
-    /// fall within `ranges` at or before `system_as_of`.
-    ///
-    /// This is the cross-engine prefilter primitive: the returned bitmap
-    /// gates the HNSW candidate set in the vector search path so only
-    /// vector records whose array-cell counterpart matches the slice
-    /// predicate are considered.
-    pub async fn surrogate_bitmap_scan<S: StorageEngine>(
-        &mut self,
-        storage: &Arc<S>,
-        name: &str,
-        ranges: Vec<Option<DimRange>>,
-        system_as_of: i64,
-    ) -> Result<roaring::RoaringBitmap, LiteError> {
-        let cells = self.slice(storage, name, ranges, system_as_of).await?;
-        let mut bitmap = roaring::RoaringBitmap::new();
-        for payload in cells {
-            bitmap.insert(payload.surrogate.as_u32());
-        }
-        Ok(bitmap)
-    }
-
     /// Flush pending memtable data to a persistent segment.
     pub async fn flush<S: StorageEngine>(
         &mut self,
@@ -446,6 +335,17 @@ impl ArrayEngineState {
             id: new_id,
             byte_len: bytes.len() as u64,
         });
+
+        // The memtable has no WAL. New bindings and the high-water mark land
+        // in one batch after the segment and before the manifest. A crash
+        // before this batch loses the cells and their bindings together. A
+        // crash between this batch and the manifest leaves bindings with no
+        // cell. Those bindings stay valid.
+        let mut binding_ops = state.bindings.dirty_ops(name);
+        binding_ops.push(hwm_op(self.next_surrogate));
+        storage.batch_write(&binding_ops).await?;
+        state.bindings.mark_clean();
+
         save_manifest(storage, name, &state.manifest).await?;
 
         // Retention compaction (only if configured).
@@ -464,122 +364,6 @@ impl ArrayEngineState {
         }
 
         Ok(())
-    }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-async fn cell_versions_from_segments<S: StorageEngine>(
-    storage: &Arc<S>,
-    name: &str,
-    seg_ids: &[u64],
-    hilbert_prefix: u64,
-    system_as_of: i64,
-    coord: &[CoordValue],
-) -> Result<Vec<(TileId, Vec<u8>)>, LiteError> {
-    let tile_payloads = crate::engine::array::segments::collect_tile_versions_across_segments(
-        storage,
-        name,
-        seg_ids,
-        hilbert_prefix,
-        system_as_of,
-    )
-    .await?;
-    let mut out = Vec::new();
-    for (tile_id, payload) in tile_payloads {
-        if let TilePayload::Sparse(tile) = &payload
-            && let Ok(Some(cell_bytes)) = extract_cell_bytes(tile, coord)
-        {
-            out.push((tile_id, cell_bytes));
-        }
-    }
-    Ok(out)
-}
-
-fn collect_tile_into_map(
-    tile: &SparseTile,
-    tile_id: TileId,
-    acc: &mut HashMap<Vec<u8>, Vec<(TileId, Vec<u8>)>>,
-) -> Result<(), LiteError> {
-    let n = tile.row_count();
-    for row in 0..n {
-        let coord = tile_row_coord(tile, row)?;
-        let key = zerompk::to_msgpack_vec(&coord).map_err(|e| LiteError::Serialization {
-            detail: format!("encode coord: {e}"),
-        })?;
-        if let Ok(Some(cell_bytes)) = extract_cell_bytes(tile, &coord) {
-            acc.entry(key).or_default().push((tile_id, cell_bytes));
-        }
-    }
-    Ok(())
-}
-
-fn tile_row_coord(tile: &SparseTile, row: usize) -> Result<Vec<CoordValue>, LiteError> {
-    let arity = tile.dim_dicts.len();
-    let mut coord = Vec::with_capacity(arity);
-    for dim_idx in 0..arity {
-        let dict = tile
-            .dim_dicts
-            .get(dim_idx)
-            .ok_or_else(|| LiteError::Storage {
-                detail: format!("tile_row_coord: dim {dim_idx} missing"),
-            })?;
-        let entry_idx = *dict.indices.get(row).ok_or_else(|| LiteError::Storage {
-            detail: format!("tile_row_coord: row {row} out of range"),
-        })? as usize;
-        let val = dict
-            .values
-            .get(entry_idx)
-            .ok_or_else(|| LiteError::Storage {
-                detail: format!("tile_row_coord: dict entry {entry_idx} missing"),
-            })?;
-        coord.push(val.clone());
-    }
-    Ok(coord)
-}
-
-fn cell_in_slice(coord: &[CoordValue], slice: &Slice) -> bool {
-    use CoordValue::*;
-    use nodedb_array::types::domain::DomainBound;
-    for (i, range) in slice.dim_ranges.iter().enumerate() {
-        let Some(r) = range else { continue };
-        let Some(c) = coord.get(i) else { return false };
-        let in_range = match (&r.lo, c, &r.hi) {
-            (DomainBound::Int64(l), Int64(v), DomainBound::Int64(h)) => l <= v && v <= h,
-            (DomainBound::Float64(l), Float64(v), DomainBound::Float64(h)) => l <= v && v <= h,
-            (DomainBound::String(l), String(v), DomainBound::String(h)) => l <= v && v <= h,
-            _ => false,
-        };
-        if !in_range {
-            return false;
-        }
-    }
-    true
-}
-
-// ── Extension to ArrayMemtable for slice ──────────────────────────────────────
-
-impl ArrayMemtable {
-    /// Read-only snapshot of all tile-version entries at or before
-    /// `system_as_of`, materialised as `SparseTile`s.
-    pub fn drain_all_tiles_read_only(
-        &self,
-        system_as_of: i64,
-        schema: &ArraySchema,
-    ) -> Result<Vec<(TileId, SparseTile)>, LiteError> {
-        // Collect all prefixes in the memtable.
-        let mut prefixes: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        for id in self.tiles_iter() {
-            if id.system_from_ms <= system_as_of {
-                prefixes.insert(id.hilbert_prefix);
-            }
-        }
-        let mut result = Vec::new();
-        for prefix in prefixes {
-            let mut tiles = self.iter_tiles_for_prefix(prefix, system_as_of, schema)?;
-            result.append(&mut tiles);
-        }
-        Ok(result)
     }
 }
 
@@ -658,11 +442,13 @@ mod tests {
             .put_cell(
                 &s,
                 "a",
-                vec![CoordValue::Int64(1)],
-                vec![CellValue::Int64(42)],
-                100,
-                0,
-                OPEN_UPPER,
+                CellWrite {
+                    coord: vec![CoordValue::Int64(1)],
+                    attrs: vec![CellValue::Int64(42)],
+                    system_from_ms: 100,
+                    valid_from_ms: 0,
+                    valid_until_ms: OPEN_UPPER,
+                },
             )
             .await
             .unwrap();
@@ -687,11 +473,13 @@ mod tests {
             .put_cell(
                 &s,
                 "b",
-                vec![CoordValue::Int64(2)],
-                vec![CellValue::Int64(7)],
-                10,
-                0,
-                OPEN_UPPER,
+                CellWrite {
+                    coord: vec![CoordValue::Int64(2)],
+                    attrs: vec![CellValue::Int64(7)],
+                    system_from_ms: 10,
+                    valid_from_ms: 0,
+                    valid_until_ms: OPEN_UPPER,
+                },
             )
             .await
             .unwrap();
@@ -732,11 +520,13 @@ mod tests {
             .put_cell(
                 &s,
                 "bt",
-                vec![CoordValue::Int64(0)],
-                vec![CellValue::Int64(10)],
-                100,
-                0,
-                OPEN_UPPER,
+                CellWrite {
+                    coord: vec![CoordValue::Int64(0)],
+                    attrs: vec![CellValue::Int64(10)],
+                    system_from_ms: 100,
+                    valid_from_ms: 0,
+                    valid_until_ms: OPEN_UPPER,
+                },
             )
             .await
             .unwrap();
@@ -744,11 +534,13 @@ mod tests {
             .put_cell(
                 &s,
                 "bt",
-                vec![CoordValue::Int64(0)],
-                vec![CellValue::Int64(20)],
-                200,
-                0,
-                OPEN_UPPER,
+                CellWrite {
+                    coord: vec![CoordValue::Int64(0)],
+                    attrs: vec![CellValue::Int64(20)],
+                    system_from_ms: 200,
+                    valid_from_ms: 0,
+                    valid_until_ms: OPEN_UPPER,
+                },
             )
             .await
             .unwrap();
@@ -765,5 +557,254 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(r2.attrs[0], CellValue::Int64(20));
+    }
+
+    async fn put_x(
+        engine: &mut ArrayEngineState,
+        s: &Arc<PagedbStorageMem>,
+        name: &str,
+        x: i64,
+        sys: i64,
+    ) {
+        engine
+            .put_cell(
+                s,
+                name,
+                CellWrite {
+                    coord: vec![CoordValue::Int64(x)],
+                    attrs: vec![CellValue::Int64(x * 10)],
+                    system_from_ms: sys,
+                    valid_from_ms: 0,
+                    valid_until_ms: OPEN_UPPER,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn surrogate_of(
+        engine: &ArrayEngineState,
+        s: &Arc<PagedbStorageMem>,
+        name: &str,
+        x: i64,
+    ) -> nodedb_types::Surrogate {
+        engine
+            .read_coord(s, name, &[CoordValue::Int64(x)], i64::MAX - 1)
+            .await
+            .unwrap()
+            .expect("live cell")
+            .surrogate
+    }
+
+    async fn binding_rows(s: &Arc<PagedbStorageMem>, name: &str) -> usize {
+        let mut prefix = b"surrogate\0".to_vec();
+        prefix.extend_from_slice(name.as_bytes());
+        prefix.push(0);
+        s.scan_prefix(nodedb_types::Namespace::Array, &prefix)
+            .await
+            .unwrap()
+            .len()
+    }
+
+    #[tokio::test]
+    async fn overwrite_keeps_the_surrogate() {
+        let s = storage().await;
+        let mut engine = ArrayEngineState::open(&s).await.unwrap();
+        engine
+            .create_array(&s, "ow", schema(), None, None)
+            .await
+            .unwrap();
+        put_x(&mut engine, &s, "ow", 1, 100).await;
+        let first = surrogate_of(&engine, &s, "ow", 1).await;
+        put_x(&mut engine, &s, "ow", 1, 200).await;
+        engine.flush(&s, "ow").await.unwrap();
+        let older = engine
+            .read_coord(&s, "ow", &[CoordValue::Int64(1)], 150)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(first, nodedb_types::Surrogate::ZERO);
+        assert_eq!(older.surrogate, first);
+        assert_eq!(surrogate_of(&engine, &s, "ow", 1).await, first);
+    }
+
+    #[tokio::test]
+    async fn distinct_coordinates_get_distinct_nonzero_surrogates() {
+        let s = storage().await;
+        let mut engine = ArrayEngineState::open(&s).await.unwrap();
+        engine
+            .create_array(&s, "d", schema(), None, None)
+            .await
+            .unwrap();
+        put_x(&mut engine, &s, "d", 1, 100).await;
+        put_x(&mut engine, &s, "d", 2, 100).await;
+        let a = surrogate_of(&engine, &s, "d", 1).await;
+        let b = surrogate_of(&engine, &s, "d", 2).await;
+        assert_ne!(a, nodedb_types::Surrogate::ZERO);
+        assert_ne!(b, nodedb_types::Surrogate::ZERO);
+        assert_ne!(a, b);
+    }
+
+    #[tokio::test]
+    async fn reopen_after_flush_never_reuses_a_surrogate() {
+        let s = storage().await;
+        let (s1, s2) = {
+            let mut engine = ArrayEngineState::open(&s).await.unwrap();
+            engine
+                .create_array(&s, "r", schema(), None, None)
+                .await
+                .unwrap();
+            put_x(&mut engine, &s, "r", 1, 100).await;
+            put_x(&mut engine, &s, "r", 2, 100).await;
+            engine.flush(&s, "r").await.unwrap();
+            (
+                surrogate_of(&engine, &s, "r", 1).await,
+                surrogate_of(&engine, &s, "r", 2).await,
+            )
+        };
+
+        let mut engine = ArrayEngineState::open(&s).await.unwrap();
+        put_x(&mut engine, &s, "r", 3, 200).await;
+        put_x(&mut engine, &s, "r", 1, 200).await;
+        engine.flush(&s, "r").await.unwrap();
+        let s3 = surrogate_of(&engine, &s, "r", 3).await;
+        assert_ne!(s3, s1);
+        assert_ne!(s3, s2);
+        assert_ne!(s3, nodedb_types::Surrogate::ZERO);
+        assert_eq!(surrogate_of(&engine, &s, "r", 1).await, s1);
+        assert_eq!(surrogate_of(&engine, &s, "r", 2).await, s2);
+    }
+
+    #[tokio::test]
+    async fn put_after_delete_reuses_the_surrogate() {
+        let s = storage().await;
+        let mut engine = ArrayEngineState::open(&s).await.unwrap();
+        engine
+            .create_array(&s, "pd", schema(), None, None)
+            .await
+            .unwrap();
+        put_x(&mut engine, &s, "pd", 4, 100).await;
+        let before = surrogate_of(&engine, &s, "pd", 4).await;
+        engine
+            .delete_cell("pd", vec![CoordValue::Int64(4)], 200)
+            .unwrap();
+        engine.flush(&s, "pd").await.unwrap();
+        put_x(&mut engine, &s, "pd", 4, 300).await;
+        assert_eq!(surrogate_of(&engine, &s, "pd", 4).await, before);
+    }
+
+    #[tokio::test]
+    async fn delete_array_removes_binding_keys() {
+        let s = storage().await;
+        let mut engine = ArrayEngineState::open(&s).await.unwrap();
+        engine
+            .create_array(&s, "gone", schema(), None, None)
+            .await
+            .unwrap();
+        put_x(&mut engine, &s, "gone", 1, 100).await;
+        put_x(&mut engine, &s, "gone", 2, 100).await;
+        engine.flush(&s, "gone").await.unwrap();
+        assert_eq!(binding_rows(&s, "gone").await, 2);
+        engine.delete_array(&s, "gone").await.unwrap();
+        assert_eq!(binding_rows(&s, "gone").await, 0);
+    }
+
+    #[tokio::test]
+    async fn surrogate_bitmap_scan_returns_the_bound_ids() {
+        let s = storage().await;
+        let mut engine = ArrayEngineState::open(&s).await.unwrap();
+        engine
+            .create_array(&s, "bm", schema(), None, None)
+            .await
+            .unwrap();
+        put_x(&mut engine, &s, "bm", 1, 100).await;
+        put_x(&mut engine, &s, "bm", 5, 100).await;
+        engine.flush(&s, "bm").await.unwrap();
+        put_x(&mut engine, &s, "bm", 9, 200).await;
+        let mut expected = roaring::RoaringBitmap::new();
+        for x in [1, 5, 9] {
+            expected.insert(surrogate_of(&engine, &s, "bm", x).await.as_u32());
+        }
+        let got = engine
+            .surrogate_bitmap_scan(&s, "bm", vec![None], i64::MAX - 1)
+            .await
+            .unwrap();
+        assert_eq!(got, expected);
+        assert_eq!(got.len(), 3);
+        assert!(!got.contains(0));
+    }
+
+    #[tokio::test]
+    async fn bindings_of_a_exclude_array_a_colon_b() {
+        let s = storage().await;
+        let (in_a, in_ab) = {
+            let mut engine = ArrayEngineState::open(&s).await.unwrap();
+            engine
+                .create_array(&s, "a", schema(), None, None)
+                .await
+                .unwrap();
+            engine
+                .create_array(&s, "a:b", schema(), None, None)
+                .await
+                .unwrap();
+            put_x(&mut engine, &s, "a", 1, 100).await;
+            put_x(&mut engine, &s, "a:b", 1, 100).await;
+            put_x(&mut engine, &s, "a:b", 2, 100).await;
+            engine.flush(&s, "a").await.unwrap();
+            engine.flush(&s, "a:b").await.unwrap();
+            (
+                surrogate_of(&engine, &s, "a", 1).await,
+                surrogate_of(&engine, &s, "a:b", 1).await,
+            )
+        };
+        assert_ne!(in_a, in_ab, "one counter covers every array");
+        assert_eq!(binding_rows(&s, "a").await, 1);
+        assert_eq!(binding_rows(&s, "a:b").await, 2);
+
+        let engine = ArrayEngineState::open(&s).await.unwrap();
+        assert_eq!(surrogate_of(&engine, &s, "a", 1).await, in_a);
+        assert_eq!(surrogate_of(&engine, &s, "a:b", 1).await, in_ab);
+    }
+
+    #[tokio::test]
+    async fn create_array_refuses_a_name_with_nul() {
+        let s = storage().await;
+        let mut engine = ArrayEngineState::open(&s).await.unwrap();
+        assert!(
+            engine
+                .create_array(&s, "a\0b", schema(), None, None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_put_binds_no_surrogate() {
+        let s = storage().await;
+        let mut engine = ArrayEngineState::open(&s).await.unwrap();
+        engine
+            .create_array(&s, "f", schema(), None, None)
+            .await
+            .unwrap();
+        // x = -1 lies below the domain low bound of 0.
+        let err = engine
+            .put_cell(
+                &s,
+                "f",
+                CellWrite {
+                    coord: vec![CoordValue::Int64(-1)],
+                    attrs: vec![CellValue::Int64(1)],
+                    system_from_ms: 100,
+                    valid_from_ms: 0,
+                    valid_until_ms: OPEN_UPPER,
+                },
+            )
+            .await;
+        assert!(err.is_err());
+        put_x(&mut engine, &s, "f", 1, 100).await;
+        assert_eq!(
+            surrogate_of(&engine, &s, "f", 1).await,
+            nodedb_types::Surrogate::new(1)
+        );
     }
 }

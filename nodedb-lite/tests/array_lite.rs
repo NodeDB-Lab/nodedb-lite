@@ -15,6 +15,7 @@ use nodedb_array::types::coord::value::CoordValue;
 use nodedb_array::types::domain::{Domain, DomainBound};
 use nodedb_lite::PagedbStorageMem;
 use nodedb_lite::engine::array::ArrayEngineState;
+use nodedb_lite::engine::array::engine::CellWrite;
 use nodedb_types::OPEN_UPPER;
 use std::sync::Arc;
 
@@ -50,11 +51,13 @@ async fn create_put_slice_roundtrip() {
         .put_cell(
             &storage,
             "grid",
-            vec![CoordValue::Int64(1)],
-            vec![CellValue::Int64(100)],
-            1_000,
-            0,
-            OPEN_UPPER,
+            CellWrite {
+                coord: vec![CoordValue::Int64(1)],
+                attrs: vec![CellValue::Int64(100)],
+                system_from_ms: 1_000,
+                valid_from_ms: 0,
+                valid_until_ms: OPEN_UPPER,
+            },
         )
         .await
         .unwrap();
@@ -62,11 +65,13 @@ async fn create_put_slice_roundtrip() {
         .put_cell(
             &storage,
             "grid",
-            vec![CoordValue::Int64(5)],
-            vec![CellValue::Int64(200)],
-            1_000,
-            0,
-            OPEN_UPPER,
+            CellWrite {
+                coord: vec![CoordValue::Int64(5)],
+                attrs: vec![CellValue::Int64(200)],
+                system_from_ms: 1_000,
+                valid_from_ms: 0,
+                valid_until_ms: OPEN_UPPER,
+            },
         )
         .await
         .unwrap();
@@ -113,11 +118,13 @@ async fn bitemporal_as_of_system_time() {
         .put_cell(
             &storage,
             "bt",
-            vec![CoordValue::Int64(1)],
-            vec![CellValue::Int64(10)],
-            100, // system_from_ms
-            0,
-            OPEN_UPPER,
+            CellWrite {
+                coord: vec![CoordValue::Int64(1)],
+                attrs: vec![CellValue::Int64(10)],
+                system_from_ms: 100,
+                valid_from_ms: 0,
+                valid_until_ms: OPEN_UPPER,
+            },
         )
         .await
         .unwrap();
@@ -127,11 +134,13 @@ async fn bitemporal_as_of_system_time() {
         .put_cell(
             &storage,
             "bt",
-            vec![CoordValue::Int64(1)],
-            vec![CellValue::Int64(20)],
-            200, // system_from_ms
-            0,
-            OPEN_UPPER,
+            CellWrite {
+                coord: vec![CoordValue::Int64(1)],
+                attrs: vec![CellValue::Int64(20)],
+                system_from_ms: 200,
+                valid_from_ms: 0,
+                valid_until_ms: OPEN_UPPER,
+            },
         )
         .await
         .unwrap();
@@ -180,11 +189,13 @@ async fn restart_durability() {
             .put_cell(
                 &storage,
                 "durable",
-                vec![CoordValue::Int64(3)],
-                vec![CellValue::Int64(42)],
-                500,
-                0,
-                OPEN_UPPER,
+                CellWrite {
+                    coord: vec![CoordValue::Int64(3)],
+                    attrs: vec![CellValue::Int64(42)],
+                    system_from_ms: 500,
+                    valid_from_ms: 0,
+                    valid_until_ms: OPEN_UPPER,
+                },
             )
             .await
             .unwrap();
@@ -230,11 +241,13 @@ async fn tombstone_coord_not_found() {
         .put_cell(
             &storage,
             "del",
-            vec![CoordValue::Int64(7)],
-            vec![CellValue::Int64(99)],
-            10,
-            0,
-            OPEN_UPPER,
+            CellWrite {
+                coord: vec![CoordValue::Int64(7)],
+                attrs: vec![CellValue::Int64(99)],
+                system_from_ms: 10,
+                valid_from_ms: 0,
+                valid_until_ms: OPEN_UPPER,
+            },
         )
         .await
         .unwrap();
@@ -280,11 +293,13 @@ async fn gdpr_erasure() {
         .put_cell(
             &storage,
             "gdpr",
-            vec![CoordValue::Int64(2)],
-            vec![CellValue::Int64(55)],
-            100,
-            0,
-            OPEN_UPPER,
+            CellWrite {
+                coord: vec![CoordValue::Int64(2)],
+                attrs: vec![CellValue::Int64(55)],
+                system_from_ms: 100,
+                valid_from_ms: 0,
+                valid_until_ms: OPEN_UPPER,
+            },
         )
         .await
         .unwrap();

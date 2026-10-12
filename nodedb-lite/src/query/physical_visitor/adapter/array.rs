@@ -10,6 +10,7 @@ use nodedb_physical::physical_plan::ArrayOp;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
+use crate::engine::array::engine::CellWrite;
 use crate::engine::array::ops::util::cell::cell_value_to_value;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
@@ -26,6 +27,7 @@ use super::{LitePhysicalFut, execute_surrogate_scan};
 struct PutCellWire {
     coord: Vec<CoordValue>,
     attrs: Vec<CellValue>,
+    // Ignored: `ArrayEngineState::put_cell` binds the surrogate.
     _surrogate: nodedb_types::Surrogate,
     system_from_ms: i64,
     valid_from_ms: i64,
@@ -95,11 +97,13 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                         .put_cell(
                             &storage,
                             &name,
-                            cell.coord,
-                            cell.attrs,
-                            cell.system_from_ms,
-                            cell.valid_from_ms,
-                            cell.valid_until_ms,
+                            CellWrite {
+                                coord: cell.coord,
+                                attrs: cell.attrs,
+                                system_from_ms: cell.system_from_ms,
+                                valid_from_ms: cell.valid_from_ms,
+                                valid_until_ms: cell.valid_until_ms,
+                            },
                         )
                         .await?;
                     rows_affected += 1;
@@ -233,27 +237,21 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             }))
         }
 
-        // Origin stages `DROP ARRAY` reversibly — the store is closed and its
-        // directory renamed to a tombstone — and then compensates across cores
-        // with these two ops. Lite's `DropArray` deletes the manifest and
-        // catalog entry outright, so there is no tombstone here to restore or
-        // to purge, and no planner in this process emits either op.
-        //
-        // Answering `Ok` would report a compensation that did not happen: a
-        // restore would claim recovered data that is gone. If Lite ever gains a
-        // reversible drop, these arms are where it gets wired in.
-        ArrayOp::RestoreArrayDrop { array_id } => Err(LiteError::BadRequest {
-            detail: format!(
-                "restore of a staged array drop is not supported in NodeDB-Lite \
-                 (array '{}'): a Lite drop is immediate and cannot be undone",
-                array_id.name
-            ),
-        }),
-
+        // Origin stages `DROP ARRAY` reversibly and compensates across cores
+        // with `PurgeArrayDrop`. Lite's `DropArray` deletes the manifest and
+        // catalog entry outright, so no tombstone exists to purge. Answering
+        // `Ok` would report a compensation that did not happen.
         ArrayOp::PurgeArrayDrop { array_id } => Err(LiteError::BadRequest {
             detail: format!(
                 "purge of a staged array drop is not supported in NodeDB-Lite \
                  (array '{}'): a Lite drop leaves no tombstone to purge",
+                array_id.name
+            ),
+        }),
+
+        ArrayOp::RekeyArray { array_id, .. } => Err(LiteError::Unsupported {
+            detail: format!(
+                "RekeyArray (MOVE TENANT) is unsupported on the single-node Lite engine (array '{}')",
                 array_id.name
             ),
         }),

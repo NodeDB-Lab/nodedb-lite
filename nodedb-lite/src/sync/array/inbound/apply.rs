@@ -14,7 +14,7 @@ use nodedb_array::sync::op_log::OpLog;
 use nodedb_array::types::coord::value::CoordValue;
 use nodedb_types::Namespace;
 
-use crate::engine::array::engine::ArrayEngineState;
+use crate::engine::array::engine::{ArrayEngineState, CellWrite};
 use crate::storage::engine::StorageEngine;
 use crate::sync::array::op_log_store::KvOpLogStore;
 use crate::sync::array::schema_registry::SchemaRegistry;
@@ -170,11 +170,13 @@ impl<S: StorageEngine> ApplyEngine for &LiteApplyEngine<S> {
                 .put_cell(
                     &storage,
                     &array,
-                    coord,
-                    attrs,
-                    system_from_ms,
-                    valid_from_ms,
-                    valid_until_ms,
+                    CellWrite {
+                        coord,
+                        attrs,
+                        system_from_ms,
+                        valid_from_ms,
+                        valid_until_ms,
+                    },
                 )
                 .await
                 .map_err(|e| ArrayError::SegmentCorruption {

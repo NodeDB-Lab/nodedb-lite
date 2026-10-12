@@ -83,7 +83,7 @@ pub(crate) fn lower_array_slice<'a, S: StorageEngine + 'a>(
         attr_projection: attr_indices,
         limit,
         cell_filter: None,
-        hilbert_range: None,
+        shard_bucket: None,
         system_time,
         valid_at_ms,
     };
@@ -169,7 +169,7 @@ pub(crate) fn lower_array_agg<'a, S: StorageEngine + 'a>(
         group_by_dim: group_by_dim_idx,
         cell_filter: None,
         return_partial: false,
-        hilbert_range: None,
+        shard_bucket: None,
         system_as_of,
         valid_at_ms,
     };

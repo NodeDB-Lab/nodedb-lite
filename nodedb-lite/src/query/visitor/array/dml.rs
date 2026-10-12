@@ -50,6 +50,7 @@ pub(crate) fn lower_insert_array<'a, S: StorageEngine + 'a>(
         cells.push((
             coord,
             attrs,
+            // Unbound placeholder: `ArrayEngineState::put_cell` binds the surrogate.
             nodedb_types::Surrogate::ZERO,
             now,
             now,
@@ -66,6 +67,8 @@ pub(crate) fn lower_insert_array<'a, S: StorageEngine + 'a>(
         cells_msgpack,
         wal_lsn: 0,
         provenance: None,
+        // Single node: one vShard holds every tile.
+        vshard_id: 0,
     };
     let mut phys = LiteDataPlaneVisitor::new(engine);
     let fut = phys.array(&op)?;
@@ -95,6 +98,8 @@ pub(crate) fn lower_delete_array<'a, S: StorageEngine + 'a>(
         coords_msgpack,
         wal_lsn: 0,
         provenance: None,
+        // Single node: one vShard holds every tile.
+        vshard_id: 0,
     };
     let mut phys = LiteDataPlaneVisitor::new(engine);
     let fut = phys.array(&op)?;

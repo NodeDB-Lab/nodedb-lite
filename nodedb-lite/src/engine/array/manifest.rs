@@ -100,13 +100,24 @@ pub async fn load_manifest<S: StorageEngine>(
     }
 }
 
-/// Remove the manifest and all segment blobs for `name` from storage.
-/// Used by `delete_array`.
+/// Remove the manifest and all segments of `name` from storage. Used by
+/// `delete_array`. `extra_ops` join the same batch as the manifest delete.
+///
+/// On a pagedb backend each segment lives in a pagedb segment file. Those
+/// files are tombstoned first, then the KV batch removes any KV blob, the
+/// manifest, and `extra_ops` together.
 pub async fn drop_manifest<S: StorageEngine>(
     storage: &Arc<S>,
     name: &str,
     manifest: &ArrayManifest,
+    extra_ops: Vec<WriteOp>,
 ) -> Result<(), LiteError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(ext) = storage.as_array_segment_ext() {
+        for s in &manifest.segments {
+            ext.delete_array_segment(name, s.id).await?;
+        }
+    }
     let mut ops: Vec<WriteOp> = manifest
         .segments
         .iter()
@@ -119,6 +130,7 @@ pub async fn drop_manifest<S: StorageEngine>(
         ns: Namespace::Array,
         key: manifest_key(name),
     });
+    ops.extend(extra_ops);
     storage.batch_write(&ops).await
 }
 
@@ -165,7 +177,7 @@ mod tests {
             .unwrap();
         save_manifest(&storage, "b", &m).await.unwrap();
 
-        drop_manifest(&storage, "b", &m).await.unwrap();
+        drop_manifest(&storage, "b", &m, Vec::new()).await.unwrap();
 
         assert!(
             load_manifest(&storage, "b")

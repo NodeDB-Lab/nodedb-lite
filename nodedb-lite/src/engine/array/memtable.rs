@@ -22,7 +22,8 @@ use nodedb_types::{OPEN_UPPER, Surrogate};
 
 use crate::error::LiteError;
 
-fn encode_coord(coord: &[CoordValue]) -> Result<Vec<u8>, LiteError> {
+/// The zerompk coordinate key. The memtable and the surrogate binder share it.
+pub(crate) fn encode_coord(coord: &[CoordValue]) -> Result<Vec<u8>, LiteError> {
     zerompk::to_msgpack_vec(&coord.to_vec()).map_err(|e| LiteError::Serialization {
         detail: format!("encode coord: {e}"),
     })
@@ -65,7 +66,7 @@ impl TileBuffer {
                 b.push_row(SparseRow {
                     coord: &coord,
                     attrs: &[],
-                    surrogate: Surrogate::ZERO,
+                    surrogate: None,
                     valid_from_ms: 0,
                     valid_until_ms: OPEN_UPPER,
                     kind: RowKind::Tombstone,
@@ -77,7 +78,7 @@ impl TileBuffer {
                 b.push_row(SparseRow {
                     coord: &coord,
                     attrs: &[],
-                    surrogate: Surrogate::ZERO,
+                    surrogate: None,
                     valid_from_ms: 0,
                     valid_until_ms: OPEN_UPPER,
                     kind: RowKind::GdprErased,
@@ -92,7 +93,7 @@ impl TileBuffer {
                 b.push_row(SparseRow {
                     coord: &coord,
                     attrs: &payload.attrs,
-                    surrogate: payload.surrogate,
+                    surrogate: Some(payload.surrogate),
                     valid_from_ms: payload.valid_from_ms,
                     valid_until_ms: payload.valid_until_ms,
                     kind: RowKind::Live,
@@ -304,7 +305,7 @@ mod tests {
             PutCellArgs {
                 coord: vec![CoordValue::Int64(1)],
                 attrs: vec![CellValue::Int64(10)],
-                surrogate: Surrogate::ZERO,
+                surrogate: Surrogate::new(1),
                 system_from_ms: 100,
                 valid_from_ms: 0,
                 valid_until_ms: OPEN_UPPER,
@@ -323,7 +324,7 @@ mod tests {
             PutCellArgs {
                 coord: vec![CoordValue::Int64(1)],
                 attrs: vec![CellValue::Int64(1)],
-                surrogate: Surrogate::ZERO,
+                surrogate: Surrogate::new(1),
                 system_from_ms: 100,
                 valid_from_ms: 0,
                 valid_until_ms: OPEN_UPPER,
@@ -344,7 +345,7 @@ mod tests {
             PutCellArgs {
                 coord: vec![CoordValue::Int64(2)],
                 attrs: vec![CellValue::Int64(99)],
-                surrogate: Surrogate::ZERO,
+                surrogate: Surrogate::new(1),
                 system_from_ms: 10,
                 valid_from_ms: 0,
                 valid_until_ms: OPEN_UPPER,
@@ -364,7 +365,7 @@ mod tests {
             PutCellArgs {
                 coord: vec![CoordValue::Int64(3)],
                 attrs: vec![CellValue::Int64(7)],
-                surrogate: Surrogate::ZERO,
+                surrogate: Surrogate::new(1),
                 system_from_ms: 1,
                 valid_from_ms: 0,
                 valid_until_ms: OPEN_UPPER,
@@ -387,7 +388,7 @@ mod tests {
                 PutCellArgs {
                     coord: coord.clone(),
                     attrs: vec![CellValue::Int64(sys)],
-                    surrogate: Surrogate::ZERO,
+                    surrogate: Surrogate::new(1),
                     system_from_ms: sys,
                     valid_from_ms: 0,
                     valid_until_ms: OPEN_UPPER,

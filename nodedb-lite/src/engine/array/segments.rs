@@ -249,11 +249,12 @@ mod tests {
     use nodedb_array::schema::ArraySchemaBuilder;
     use nodedb_array::schema::attr_spec::{AttrSpec, AttrType};
     use nodedb_array::schema::dim_spec::{DimSpec, DimType};
-    use nodedb_array::tile::sparse_tile::SparseTileBuilder;
+    use nodedb_array::tile::sparse_tile::{SparseRow, SparseTileBuilder};
     use nodedb_array::types::TileId;
     use nodedb_array::types::cell_value::value::CellValue;
     use nodedb_array::types::coord::value::CoordValue;
     use nodedb_array::types::domain::{Domain, DomainBound};
+    use nodedb_types::{OPEN_UPPER, Surrogate};
     use std::sync::Arc;
 
     fn schema() -> nodedb_array::schema::ArraySchema {
@@ -269,10 +270,18 @@ mod tests {
             .unwrap()
     }
 
+    const STORED_SURROGATE: Surrogate = Surrogate::new(2);
+
     fn make_tile(s: &nodedb_array::schema::ArraySchema) -> SparseTile {
         let mut b = SparseTileBuilder::new(s);
-        b.push(&[CoordValue::Int64(1)], &[CellValue::Int64(42)])
-            .unwrap();
+        b.push_row(SparseRow::live(
+            &[CoordValue::Int64(1)],
+            &[CellValue::Int64(42)],
+            STORED_SURROGATE,
+            0,
+            OPEN_UPPER,
+        ))
+        .unwrap();
         b.build()
     }
 
@@ -357,6 +366,13 @@ mod tests {
         assert_eq!(reader.tile_count(), 1);
         assert_eq!(reader.tiles()[0].tile_id, tile_id);
         assert_eq!(reader.schema_hash(), 0xDEAD);
+
+        // The stored live row keeps its bound surrogate through the round trip.
+        let TilePayload::Sparse(read_back) = reader.read_tile(0).unwrap() else {
+            panic!("expected a sparse tile");
+        };
+        read_back.check_stored_identities().unwrap();
+        assert_eq!(read_back.live_surrogate(0).unwrap(), STORED_SURROGATE);
 
         // The bytes retrieved via load_segment must also be parseable.
         let loaded = load_segment(&storage, "identity_test", 0).await.unwrap();

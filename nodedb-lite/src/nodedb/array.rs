@@ -11,6 +11,7 @@ use nodedb_array::types::coord::value::CoordValue;
 use nodedb_types::OPEN_UPPER;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 
+use crate::engine::array::engine::CellWrite;
 use crate::storage::engine::StorageEngine;
 
 use super::core::NodeDbLite;
@@ -70,11 +71,13 @@ impl<S: StorageEngine> NodeDbLite<S> {
             .put_cell(
                 &self.storage,
                 name,
-                coord,
-                attrs,
-                system_from_ms,
-                valid_from_ms,
-                valid_until_ms,
+                CellWrite {
+                    coord,
+                    attrs,
+                    system_from_ms,
+                    valid_from_ms,
+                    valid_until_ms,
+                },
             )
             .await
             .map_err(NodeDbError::storage)?;

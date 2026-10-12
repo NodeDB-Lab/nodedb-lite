@@ -141,11 +141,12 @@ mod tests {
     use nodedb_array::schema::ArraySchemaBuilder;
     use nodedb_array::schema::attr_spec::{AttrSpec, AttrType};
     use nodedb_array::schema::dim_spec::{DimSpec, DimType};
-    use nodedb_array::tile::sparse_tile::SparseTileBuilder;
+    use nodedb_array::tile::sparse_tile::{SparseRow, SparseTileBuilder};
     use nodedb_array::types::TileId;
     use nodedb_array::types::cell_value::value::CellValue;
     use nodedb_array::types::coord::value::CoordValue;
     use nodedb_array::types::domain::{Domain, DomainBound};
+    use nodedb_types::{OPEN_UPPER, Surrogate};
     use std::sync::Arc;
 
     fn schema() -> ArraySchema {
@@ -163,8 +164,14 @@ mod tests {
 
     fn make_tile(s: &ArraySchema, x: i64, v: i64) -> SparseTile {
         let mut b = SparseTileBuilder::new(s);
-        b.push(&[CoordValue::Int64(x)], &[CellValue::Int64(v)])
-            .unwrap();
+        b.push_row(SparseRow::live(
+            &[CoordValue::Int64(x)],
+            &[CellValue::Int64(v)],
+            Surrogate::new(x as u32 + 1),
+            0,
+            OPEN_UPPER,
+        ))
+        .unwrap();
         b.build()
     }
 
