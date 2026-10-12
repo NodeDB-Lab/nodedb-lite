@@ -88,7 +88,7 @@ async fn array_delta_apply_and_ack() {
     };
 
     // This is the exact call `dispatch_frame` makes.
-    let ack = SyncDelegate::handle_array_delta(lite.as_ref(), &msg);
+    let ack = SyncDelegate::handle_array_delta(lite.as_ref(), &msg).await;
     assert!(ack.is_some(), "Applied outcome must produce ArrayAckMsg");
 
     let ack = ack.unwrap();
@@ -154,11 +154,11 @@ async fn array_delta_idempotent_no_ack() {
     };
 
     // First application — ack expected.
-    let ack1 = SyncDelegate::handle_array_delta(lite.as_ref(), &msg.clone());
+    let ack1 = SyncDelegate::handle_array_delta(lite.as_ref(), &msg.clone()).await;
     assert!(ack1.is_some(), "first apply must produce ack");
 
     // Second application of the identical op — idempotent, no ack.
-    let ack2 = SyncDelegate::handle_array_delta(lite.as_ref(), &msg);
+    let ack2 = SyncDelegate::handle_array_delta(lite.as_ref(), &msg).await;
     assert!(
         ack2.is_none(),
         "idempotent replay must not produce a second ack"
@@ -205,7 +205,7 @@ async fn array_delta_batch_apply_and_ack() {
         op_payloads,
     };
 
-    let ack = SyncDelegate::handle_array_delta_batch(lite.as_ref(), &msg);
+    let ack = SyncDelegate::handle_array_delta_batch(lite.as_ref(), &msg).await;
     assert!(ack.is_some(), "batch apply must produce ack");
 
     let ack = ack.unwrap();

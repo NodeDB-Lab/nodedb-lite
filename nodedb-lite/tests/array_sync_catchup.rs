@@ -1,18 +1,10 @@
-//! Edge-side simulation — does NOT exercise real Origin transport.
-//! All tests here call Lite's inbound/outbound handlers directly, bypassing
-//! the WebSocket connection to a live Origin node.
+//! Catch-up building blocks, in process: `CatchupTracker` state and the
+//! `ArrayInbound` snapshot handlers, driven by hand-built wire messages.
 //!
-//! The real-transport round-trip (Lite → Origin WebSocket → Lite) is not covered
-//! by any test in this file.  See §13 of the release checklist for the decision
-//! record and the placeholder real-transport test in `tests/array_sync_interop.rs`.
-//!
-//! Original note: The CatchupTracker + ArrayInbound snapshot path
-//! (handle_snapshot_header / handle_snapshot_chunk) are exercised in-process.
-//! Phases F/H (Origin catch-up server / WebSocket reconnect) are not yet
-//! validated end-to-end.  Tests here simulate the catch-up scenario by:
-//! 1. Marking an array as needing catch-up via `record_reject_retention_floor`.
-//! 2. Shipping a synthetic snapshot via handle_snapshot_header / handle_snapshot_chunk.
-//! 3. Verifying the engine state after snapshot assembly.
+//! The same flow over a socket lives in `array_sync_catchup_transport.rs`
+//! (mock Origin) and `array_sync_interop.rs` (real Origin). The
+//! `SyncDelegate` apply paths that update the tracker are covered in
+//! `array_sync_catchup_delegate.rs`.
 
 pub mod common;
 

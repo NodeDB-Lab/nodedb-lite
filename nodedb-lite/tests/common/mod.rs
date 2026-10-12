@@ -4,6 +4,7 @@
 //! root makes every helper reachable, so a crate that uses only some helpers
 //! gets no `dead_code` or `unused_imports` warnings for the rest.
 
+pub mod array_wire;
 pub mod clock;
 pub mod harness;
 pub mod mock_delegate;
