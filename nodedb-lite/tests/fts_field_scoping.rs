@@ -260,3 +260,75 @@ async fn sql_text_match_is_scoped_to_named_field() {
 
     assert_eq!(ids, vec!["d1"], "only the document with 'rust' in title");
 }
+
+async fn open_file_db(path: &std::path::Path) -> Arc<NodeDbLite<PagedbStorageDefault>> {
+    let storage = PagedbStorageDefault::open(path, Encryption::Plaintext)
+        .await
+        .expect("open storage");
+    NodeDbLite::open(storage).await.expect("open NodeDbLite")
+}
+
+#[tokio::test]
+async fn deleting_the_only_document_after_a_flush_stays_deleted_after_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("fts_delete_only.db");
+
+    {
+        let db = open_file_db(&path).await;
+        db.document_put(COLLECTION, make_doc("X", &[("text", "alpha zebrafish")]))
+            .await
+            .expect("put X");
+        db.flush().await.expect("first flush");
+        db.document_delete(COLLECTION, "X").await.expect("delete X");
+        db.flush().await.expect("second flush");
+        db.shutdown().await;
+    }
+
+    let db = open_file_db(&path).await;
+    assert!(search_ids(&*db, "text", "zebrafish").await.is_empty());
+}
+
+#[tokio::test]
+async fn deleting_the_only_document_then_compacting_stays_deleted_after_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("fts_delete_compact.db");
+
+    {
+        let db = open_file_db(&path).await;
+        db.document_put(COLLECTION, make_doc("X", &[("text", "alpha zebrafish")]))
+            .await
+            .expect("put X");
+        db.flush().await.expect("first flush");
+        db.document_delete(COLLECTION, "X").await.expect("delete X");
+        db.compact().await.expect("compact");
+        db.flush().await.expect("second flush");
+        db.shutdown().await;
+    }
+
+    let db = open_file_db(&path).await;
+    assert!(search_ids(&*db, "text", "zebrafish").await.is_empty());
+}
+
+#[tokio::test]
+async fn deleting_one_of_two_documents_keeps_the_other_after_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("fts_delete_one_of_two.db");
+
+    {
+        let db = open_file_db(&path).await;
+        db.document_put(COLLECTION, make_doc("X", &[("text", "alpha zebrafish")]))
+            .await
+            .expect("put X");
+        db.document_put(COLLECTION, make_doc("Y", &[("text", "beta wombat")]))
+            .await
+            .expect("put Y");
+        db.flush().await.expect("first flush");
+        db.document_delete(COLLECTION, "X").await.expect("delete X");
+        db.flush().await.expect("second flush");
+        db.shutdown().await;
+    }
+
+    let db = open_file_db(&path).await;
+    assert!(search_ids(&*db, "text", "zebrafish").await.is_empty());
+    assert_eq!(search_ids(&*db, "text", "wombat").await, vec!["Y"]);
+}
