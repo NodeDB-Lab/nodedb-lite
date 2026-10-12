@@ -31,11 +31,9 @@ pub(super) struct OutboundQueues<S: StorageEngine> {
 /// the outbound stream sequence frontier.
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) struct ArraySyncState<S: StorageEngine> {
-    pub(super) array_replica: Arc<crate::sync::array::ReplicaState>,
     pub(super) array_schemas: Arc<crate::sync::array::SchemaRegistry<S>>,
     pub(super) array_outbound: Arc<crate::sync::array::ArrayOutbound<S>>,
     pub(super) array_inbound: Arc<crate::sync::array::ArrayInbound<S>>,
-    pub(super) array_catchup: Arc<crate::sync::array::CatchupTracker<S>>,
     pub(super) stream_seq: Arc<crate::sync::StreamSeqTracker<S>>,
 }
 
@@ -191,18 +189,15 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let array_inbound = Arc::new(crate::sync::array::ArrayInbound::new(
             array_apply_engine,
             Arc::clone(&array_schemas),
-            Arc::clone(&array_replica),
+            array_replica,
             Arc::clone(array_outbound.pending()),
-            Arc::clone(array_outbound.op_log()),
-            Arc::clone(&array_catchup),
+            array_catchup,
         ));
 
         Ok(ArraySyncState {
-            array_replica,
             array_schemas,
             array_outbound,
             array_inbound,
-            array_catchup,
             stream_seq,
         })
     }

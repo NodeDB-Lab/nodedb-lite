@@ -76,10 +76,6 @@ pub struct NodeDbLite<S: StorageEngine> {
     /// `Arc`-wrapped so it can be shared with [`crate::sync::array::LiteApplyEngine`]
     /// for the inbound receive path without borrowing `NodeDbLite`.
     pub(crate) array_state: Arc<tokio::sync::Mutex<crate::engine::array::engine::ArrayEngineState>>,
-    /// Stable per-replica identity + HLC generator for array CRDT sync.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[allow(dead_code)]
-    pub(crate) array_replica: Arc<crate::sync::array::ReplicaState>,
     /// Per-array [`SchemaDoc`] registry (persisted Loro snapshots).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) array_schemas: Arc<crate::sync::array::SchemaRegistry<S>>,
@@ -87,12 +83,10 @@ pub struct NodeDbLite<S: StorageEngine> {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) array_outbound: Arc<crate::sync::array::ArrayOutbound<S>>,
     /// Array CRDT receive path: applies inbound wire messages from Origin.
+    ///
+    /// Owns the shared replica identity and the per-array catch-up tracker.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) array_inbound: Arc<crate::sync::array::ArrayInbound<S>>,
-    /// Per-array last-seen HLC tracker for catch-up requests.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[allow(dead_code)]
-    pub(crate) array_catchup: Arc<crate::sync::array::CatchupTracker<S>>,
     /// Per-stream monotonic sequence frontier for outbound frame stamping.
     ///
     /// Loaded once from `Namespace::Meta` at `open()` and never reset on

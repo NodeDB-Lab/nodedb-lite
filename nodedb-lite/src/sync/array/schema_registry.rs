@@ -12,11 +12,11 @@
 //!
 //! # Cold-start scan
 //!
-//! [`SchemaRegistry::load`] uses `scan_range` starting at the prefix
-//! `b"array.schema_doc:"` and stops when the first key that does not share
-//! that prefix is encountered.
+//! [`SchemaRegistry::load`] reads every key under the prefix
+//! `b"array.schema_doc:"` with one prefix scan.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::{Arc, Mutex};
 
 use nodedb_array::schema::array_schema::ArraySchema;
@@ -52,6 +52,12 @@ pub struct SchemaRegistry<S: StorageEngine> {
     storage: Arc<S>,
     docs: Mutex<HashMap<String, SchemaDoc>>,
     replica: Arc<ReplicaState>,
+    /// Serializes each schema mutation with its snapshot write.
+    ///
+    /// A mutation edits `docs` under a `std::sync` guard, releases it, then
+    /// awaits the storage write. Without this lock two writers to one array
+    /// can reorder their writes, and storage keeps the older snapshot.
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 impl<S: StorageEngine> SchemaRegistry<S> {
@@ -63,24 +69,19 @@ impl<S: StorageEngine> SchemaRegistry<S> {
             storage,
             docs: Mutex::new(HashMap::new()),
             replica,
+            write_lock: tokio::sync::Mutex::new(()),
         }
     }
 
     /// Load all persisted [`SchemaDoc`] snapshots from storage.
     ///
-    /// Scans `Namespace::Meta` starting at `b"array.schema_doc:"` and stops
-    /// at the first key that no longer shares that prefix.
+    /// Reads every `Namespace::Meta` key under `b"array.schema_doc:"`.
     pub async fn load(storage: Arc<S>, replica: Arc<ReplicaState>) -> Result<Self, LiteError> {
         let prefix = SCHEMA_KEY_PREFIX.as_bytes();
-        let pairs = storage
-            .scan_range(Namespace::Meta, prefix, usize::MAX)
-            .await?;
+        let pairs = storage.scan_prefix(Namespace::Meta, prefix).await?;
 
         let mut docs = HashMap::new();
         for (key, value) in pairs {
-            if !key.starts_with(prefix) {
-                break;
-            }
             let name_bytes = &key[prefix.len()..];
             let name = std::str::from_utf8(name_bytes).map_err(|e| LiteError::Storage {
                 detail: format!("schema_registry: non-UTF8 array name in storage: {e}"),
@@ -116,6 +117,7 @@ impl<S: StorageEngine> SchemaRegistry<S> {
             storage,
             docs: Mutex::new(docs),
             replica,
+            write_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -124,27 +126,31 @@ impl<S: StorageEngine> SchemaRegistry<S> {
     /// Persists a Loro snapshot under the schema key so the registry
     /// survives restarts. Returns the freshly minted `schema_hlc`.
     pub async fn put_schema(&self, name: &str, schema: &ArraySchema) -> Result<Hlc, LiteError> {
+        let _write = self.write_lock.lock().await;
         let (schema_hlc, snapshot) = {
             let mut docs = self.docs.lock().map_err(|_| LiteError::LockPoisoned)?;
 
-            let doc = if let Some(existing) = docs.get_mut(name) {
-                existing
-                    .replace_schema(schema, &self.replica.hlc_gen())
+            let doc = match docs.entry(name.to_owned()) {
+                Entry::Occupied(entry) => {
+                    let existing = entry.into_mut();
+                    existing
+                        .replace_schema(schema, &self.replica.hlc_gen())
+                        .map_err(|e| LiteError::Storage {
+                            detail: format!("schema_registry put_schema '{name}': {e}"),
+                        })?;
+                    existing
+                }
+                Entry::Vacant(entry) => {
+                    let new_doc = SchemaDoc::from_schema(
+                        self.replica.replica_id(),
+                        schema,
+                        &self.replica.hlc_gen(),
+                    )
                     .map_err(|e| LiteError::Storage {
-                        detail: format!("schema_registry put_schema '{name}': {e}"),
+                        detail: format!("schema_registry from_schema '{name}': {e}"),
                     })?;
-                existing
-            } else {
-                let new_doc = SchemaDoc::from_schema(
-                    self.replica.replica_id(),
-                    schema,
-                    &self.replica.hlc_gen(),
-                )
-                .map_err(|e| LiteError::Storage {
-                    detail: format!("schema_registry from_schema '{name}': {e}"),
-                })?;
-                docs.insert(name.to_owned(), new_doc);
-                docs.get_mut(name).expect("just inserted")
+                    entry.insert(new_doc)
+                }
             };
 
             let schema_hlc = doc.schema_hlc();
@@ -152,7 +158,7 @@ impl<S: StorageEngine> SchemaRegistry<S> {
                 detail: format!("schema_registry export '{name}': {e}"),
             })?;
             (schema_hlc, snapshot)
-        }; // docs lock released here
+        };
 
         self.persist(name, schema_hlc, snapshot).await?;
         Ok(schema_hlc)
@@ -167,30 +173,32 @@ impl<S: StorageEngine> SchemaRegistry<S> {
     /// Apply a remote Loro snapshot for `name`.
     ///
     /// Creates the entry if absent. Persists the updated snapshot.
-    /// Used by Phase E inbound to ingest schema sync messages.
-    #[allow(clippy::await_holding_lock)]
+    /// The inbound schema-sync handler calls this for each schema message.
     pub async fn import_snapshot(
         &self,
         name: &str,
         snapshot_bytes: &[u8],
         remote_hlc: Hlc,
     ) -> Result<(), LiteError> {
-        let mut docs = self.docs.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let _write = self.write_lock.lock().await;
+        let (schema_hlc, snapshot) = {
+            let mut docs = self.docs.lock().map_err(|_| LiteError::LockPoisoned)?;
 
-        let doc = docs
-            .entry(name.to_owned())
-            .or_insert_with(|| SchemaDoc::new(self.replica.replica_id()));
+            let doc = docs
+                .entry(name.to_owned())
+                .or_insert_with(|| SchemaDoc::new(self.replica.replica_id()));
 
-        doc.import_snapshot(snapshot_bytes, remote_hlc, &self.replica.hlc_gen())
-            .map_err(|e| LiteError::Storage {
-                detail: format!("schema_registry import_snapshot '{name}': {e}"),
+            doc.import_snapshot(snapshot_bytes, remote_hlc, &self.replica.hlc_gen())
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("schema_registry import_snapshot '{name}': {e}"),
+                })?;
+
+            let schema_hlc = doc.schema_hlc();
+            let snapshot = doc.export_snapshot().map_err(|e| LiteError::Storage {
+                detail: format!("schema_registry export after import '{name}': {e}"),
             })?;
-
-        let schema_hlc = doc.schema_hlc();
-        let snapshot = doc.export_snapshot().map_err(|e| LiteError::Storage {
-            detail: format!("schema_registry export after import '{name}': {e}"),
-        })?;
-        drop(docs);
+            (schema_hlc, snapshot)
+        };
 
         self.persist(name, schema_hlc, snapshot).await
     }

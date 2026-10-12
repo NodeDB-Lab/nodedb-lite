@@ -46,6 +46,12 @@ pub struct CatchupTracker<S: StorageEngine> {
     /// Arrays that need a full catchup on next connect.
     /// Set when Origin sends `ArrayRejectMsg::RetentionFloor`.
     catchup_needed: Mutex<std::collections::HashSet<String>>,
+    /// Serializes every mutation with its storage write.
+    ///
+    /// A mutation updates memory under a `std::sync` guard, releases it, then
+    /// awaits the storage write. Without this lock two writers can reorder
+    /// their writes, and storage keeps an older HLC or flag than memory holds.
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 impl<S: StorageEngine> CatchupTracker<S> {
@@ -56,15 +62,10 @@ impl<S: StorageEngine> CatchupTracker<S> {
     /// are stored yet (first run or after a full wipe).
     pub async fn load(storage: Arc<S>) -> Result<Self, LiteError> {
         let prefix = LAST_SEEN_PREFIX.as_bytes();
-        let pairs = storage
-            .scan_range(Namespace::Meta, prefix, usize::MAX)
-            .await?;
+        let pairs = storage.scan_prefix(Namespace::Meta, prefix).await?;
 
         let mut state = HashMap::new();
         for (key, value) in pairs {
-            if !key.starts_with(prefix) {
-                break;
-            }
             let name_bytes = &key[prefix.len()..];
             let name = std::str::from_utf8(name_bytes).map_err(|e| LiteError::Storage {
                 detail: format!("catchup_tracker: non-UTF8 array name in storage: {e}"),
@@ -81,14 +82,9 @@ impl<S: StorageEngine> CatchupTracker<S> {
 
         // Load catchup-needed flags.
         let needed_prefix = CATCHUP_NEEDED_PREFIX.as_bytes();
-        let needed_pairs = storage
-            .scan_range(Namespace::Meta, needed_prefix, usize::MAX)
-            .await?;
+        let needed_pairs = storage.scan_prefix(Namespace::Meta, needed_prefix).await?;
         let mut catchup_needed = std::collections::HashSet::new();
         for (key, _) in needed_pairs {
-            if !key.starts_with(needed_prefix) {
-                break;
-            }
             let name_bytes = &key[needed_prefix.len()..];
             if let Ok(name) = std::str::from_utf8(name_bytes) {
                 catchup_needed.insert(name.to_owned());
@@ -99,6 +95,7 @@ impl<S: StorageEngine> CatchupTracker<S> {
             storage,
             state: Mutex::new(state),
             catchup_needed: Mutex::new(catchup_needed),
+            write_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -107,15 +104,19 @@ impl<S: StorageEngine> CatchupTracker<S> {
     /// Updates both the in-memory map and the durable storage entry.
     /// Only persists if `hlc` is strictly greater than the current last-seen
     /// value (monotonic advancement).
-    #[allow(clippy::await_holding_lock)]
     pub async fn record(&self, array: &str, hlc: Hlc) -> Result<(), LiteError> {
-        let mut state = self.state.lock().map_err(|_| LiteError::LockPoisoned)?;
-        let current = state.get(array).copied().unwrap_or(Hlc::ZERO);
-        if hlc <= current {
+        let _write = self.write_lock.lock().await;
+        let advanced = {
+            let mut state = self.state.lock().map_err(|_| LiteError::LockPoisoned)?;
+            let current = state.get(array).copied().unwrap_or(Hlc::ZERO);
+            if hlc > current {
+                state.insert(array.to_owned(), hlc);
+            }
+            hlc > current
+        };
+        if !advanced {
             return Ok(());
         }
-        state.insert(array.to_owned(), hlc);
-        drop(state);
         self.storage
             .put(Namespace::Meta, &last_seen_key(array), &hlc.to_bytes())
             .await
@@ -167,9 +168,11 @@ impl<S: StorageEngine> CatchupTracker<S> {
     /// Called when Origin sends `ArrayRejectMsg::RetentionFloor`.
     /// Persisted under `Namespace::Meta` `"array.catchup_needed:{array}"`.
     pub async fn record_reject_retention_floor(&self, array: &str) -> Result<(), LiteError> {
-        if let Ok(mut needed) = self.catchup_needed.lock() {
-            needed.insert(array.to_owned());
-        }
+        let _write = self.write_lock.lock().await;
+        self.catchup_needed
+            .lock()
+            .map_err(|_| LiteError::LockPoisoned)?
+            .insert(array.to_owned());
         // Persist flag (value = 1 byte sentinel).
         self.storage
             .put(Namespace::Meta, &catchup_needed_key(array), &[1u8])
@@ -180,9 +183,11 @@ impl<S: StorageEngine> CatchupTracker<S> {
     ///
     /// Called after the snapshot stream has been fully applied.
     pub async fn clear_catchup_needed(&self, array: &str) -> Result<(), LiteError> {
-        if let Ok(mut needed) = self.catchup_needed.lock() {
-            needed.remove(array);
-        }
+        let _write = self.write_lock.lock().await;
+        self.catchup_needed
+            .lock()
+            .map_err(|_| LiteError::LockPoisoned)?
+            .remove(array);
         // Remove the persisted flag.
         self.storage
             .delete(Namespace::Meta, &catchup_needed_key(array))

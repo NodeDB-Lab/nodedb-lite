@@ -93,7 +93,7 @@ pub(crate) async fn make_inbound() -> InboundFixture {
             Arc::clone(&storage),
             Arc::clone(&array_state),
             Arc::clone(&schemas),
-            Arc::clone(&op_log),
+            op_log,
         )
         .await,
     );
@@ -103,7 +103,6 @@ pub(crate) async fn make_inbound() -> InboundFixture {
         Arc::clone(&schemas),
         Arc::clone(&replica),
         Arc::clone(&pending),
-        op_log,
         catchup,
     );
     (inbound, schemas, pending, storage)

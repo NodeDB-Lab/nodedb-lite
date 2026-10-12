@@ -8,8 +8,9 @@
 //!
 //! The leading length byte allows:
 //! - Per-array prefix scans (build `[len, name_bytes]` as prefix).
-//! - Range queries for `scan_range`: iterate from prefix start, break when
-//!   the prefix no longer matches.
+//! - Bounded range reads for `scan_range`: the HLC suffix is big-endian, so
+//!   `[make_key(array, from), successor(make_key(array, to)))` holds exactly
+//!   the array's ops in the HLC range.
 //!
 //! **Name length constraint**: `u8` accommodates names up to 255 bytes.
 //! The array schema validator enforces this upper bound. If a name longer
@@ -102,12 +103,11 @@ fn make_array_prefix(array: &str) -> ArrayResult<Vec<u8>> {
     Ok(prefix)
 }
 
-/// Compute the exclusive upper-bound prefix for a range scan.
+/// Compute the exclusive upper bound for a range scan that ends at `prefix`.
 ///
-/// Increments the last byte of `prefix`, wrapping if necessary. Returns
-/// `None` if `prefix` is all-`0xFF` bytes (no upper bound possible; caller
-/// should scan to the end of namespace).
-#[allow(dead_code)]
+/// Increments the last byte of `prefix`, carrying into earlier bytes. Returns
+/// `None` if `prefix` is all-`0xFF` bytes. The scan then runs to the end of
+/// the namespace.
 fn next_prefix(prefix: &[u8]) -> Option<Vec<u8>> {
     let mut upper = prefix.to_vec();
     for byte in upper.iter_mut().rev() {
@@ -201,17 +201,27 @@ impl<S: StorageEngine> OpLog for KvOpLogStore<S> {
 
     /// Return ops for `array` with `from <= hlc <= to`, in HLC order.
     ///
-    /// Uses a prefix scan on `[name_len][name_bytes]` to avoid decoding ops
-    /// from other arrays.
+    /// Reads only the keys in `[make_key(array, from), make_key(array, to)]`.
+    /// `Hlc::to_bytes` is big-endian in `Ord` field order, so key order
+    /// equals HLC order inside one array prefix.
     fn scan_range<'a>(&'a self, array: &str, from: Hlc, to: Hlc) -> ArrayResult<OpIter<'a>> {
-        let prefix = make_array_prefix(array)?;
+        let start = make_key(array, from)?;
+        if from > to {
+            return Ok(Box::new(std::iter::empty()));
+        }
+        // Every key under one array prefix has the same length. The
+        // successor of the `to` key is the exclusive end of the range.
+        let end = next_prefix(&make_key(array, to)?);
 
-        let pairs = block(
-            self.storage
-                .scan_range(Namespace::ArrayOpLog, &prefix, usize::MAX),
-        )
+        let pairs = block(self.storage.scan_range_bounded(
+            Namespace::ArrayOpLog,
+            Some(&start),
+            end.as_deref(),
+            None,
+        ))
         .map_err(lite_err_to_array)?;
 
+        let prefix = make_array_prefix(array)?;
         let ops: Vec<ArrayResult<ArrayOp>> = pairs
             .into_iter()
             .take_while(|(key, _)| key.starts_with(&prefix))

@@ -74,7 +74,6 @@ impl<S: StorageEngine> NodeDbLite<S> {
         Self::open_with_config(storage, config).await
     }
 
-    #[allow(clippy::await_holding_lock)]
     async fn open_inner(storage: S, config: LiteConfig) -> NodeDbResult<Arc<Self>> {
         config.validate()?;
 
@@ -197,8 +196,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
         let array_state = Arc::new(tokio::sync::Mutex::new(array_engine));
 
         let csr_arc = Arc::new(Mutex::new(csr));
-        #[allow(unused_mut)]
-        let mut query_engine =
+        let query_engine =
             crate::query::LiteQueryEngine::new(crate::query::LiteQueryEngineParams {
                 crdt: Arc::clone(&crdt),
                 strict: Arc::clone(&strict),
@@ -218,33 +216,33 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         // Wire FTS and spatial outbound queues into the query engine so that
         // SQL-path writes (SpatialOp::Insert, FtsIndexOp) also enqueue for sync.
+        // The queues exist only on native targets, so only native rebinds the
+        // engine as mutable.
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(ref q) = fts_outbound_init {
-            query_engine.set_fts_outbound(Arc::clone(q));
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(ref q) = spatial_outbound_init {
-            query_engine.set_spatial_outbound(Arc::clone(q));
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(ref q) = kv_outbound {
-            query_engine.set_kv_outbound(Arc::clone(q));
-        }
+        let query_engine = {
+            let mut query_engine = query_engine;
+            if let Some(ref q) = fts_outbound_init {
+                query_engine.set_fts_outbound(Arc::clone(q));
+            }
+            if let Some(ref q) = spatial_outbound_init {
+                query_engine.set_spatial_outbound(Arc::clone(q));
+            }
+            if let Some(ref q) = kv_outbound {
+                query_engine.set_kv_outbound(Arc::clone(q));
+            }
+            query_engine
+        };
 
         // ── Array CRDT sync state (send path, receive path, stream sequence
         // frontier) — non-wasm only ──
         #[cfg(not(target_arch = "wasm32"))]
         let array_sync = Self::build_array_sync_state(&storage, &array_state).await?;
         #[cfg(not(target_arch = "wasm32"))]
-        let array_replica = array_sync.array_replica;
-        #[cfg(not(target_arch = "wasm32"))]
         let array_schemas = array_sync.array_schemas;
         #[cfg(not(target_arch = "wasm32"))]
         let array_outbound = array_sync.array_outbound;
         #[cfg(not(target_arch = "wasm32"))]
         let array_inbound = array_sync.array_inbound;
-        #[cfg(not(target_arch = "wasm32"))]
-        let array_catchup = array_sync.array_catchup;
         #[cfg(not(target_arch = "wasm32"))]
         let stream_seq = array_sync.stream_seq;
 
@@ -267,15 +265,11 @@ impl<S: StorageEngine> NodeDbLite<S> {
             timeseries,
             array_state,
             #[cfg(not(target_arch = "wasm32"))]
-            array_replica,
-            #[cfg(not(target_arch = "wasm32"))]
             array_schemas,
             #[cfg(not(target_arch = "wasm32"))]
             array_outbound,
             #[cfg(not(target_arch = "wasm32"))]
             array_inbound,
-            #[cfg(not(target_arch = "wasm32"))]
-            array_catchup,
             #[cfg(not(target_arch = "wasm32"))]
             stream_seq,
             #[cfg(not(target_arch = "wasm32"))]
@@ -360,12 +354,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // Rebuild spatial indices if restore produced empty trees.
         // The R-tree checkpoint only stores bounding boxes, not doc IDs.
         // A full rebuild from CRDT documents ensures doc_to_entry is correct.
-        {
-            let spatial = db.spatial.lock_or_recover();
-            if spatial.is_empty() {
-                drop(spatial);
-                db.rebuild_spatial_indices();
-            }
+        let spatial_empty = db.spatial.lock_or_recover().is_empty();
+        if spatial_empty {
+            db.rebuild_spatial_indices();
         }
 
         // Rewrite any edges left over from the legacy pre-EdgeId batch-insert
@@ -380,12 +371,12 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // previous process exited. Pass 1 reads CRDT edge documents; Pass 2
         // scans the durable Namespace::Graph KV edge store; Pass 3 reads
         // Namespace::GraphHistory for bitemporal collections.
-        {
-            let csr = db.csr.lock_or_recover();
-            if csr.is_empty() {
-                drop(csr);
-                db.rebuild_graph_indices().await;
-            }
+        // The guard is a statement temporary, so it is released before the
+        // rebuild awaits. `db` is not shared yet, so the emptiness check
+        // cannot go stale before the rebuild runs.
+        let csr_empty = db.csr.lock_or_recover().is_empty();
+        if csr_empty {
+            db.rebuild_graph_indices().await;
         }
 
         // ── Spawn the background maintenance tasks the config asked for ──

@@ -90,7 +90,6 @@ impl SyncHarness {
             Arc::clone(&schemas),
             Arc::clone(&replica),
             Arc::clone(&pending),
-            Arc::clone(&op_log),
             Arc::clone(&catchup),
         );
 
