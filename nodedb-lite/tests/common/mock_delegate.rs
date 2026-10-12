@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use nodedb_lite::LiteError;
 use nodedb_lite::engine::crdt::engine::PendingDelta;
 use nodedb_lite::nodedb::CollectionMeta;
+use nodedb_lite::sync::array::PendingArrayOp;
 use nodedb_lite::sync::{
     PendingColumnarBatch, PendingFtsDelete, PendingFtsIndex, PendingKvWrite, PendingSpatialDelete,
     PendingSpatialInsert, PendingTimeseriesBatch, PendingVectorDelete, PendingVectorInsert,
@@ -32,9 +33,8 @@ pub struct MockDelegate {
     kv_retired: std::sync::Mutex<Vec<u64>>,
     stream_acks: std::sync::Mutex<Vec<(u64, u64)>>,
     in_flight_clears: AtomicU64,
-    array_catchups: std::sync::Mutex<Vec<nodedb_types::sync::wire::ArrayCatchupRequestMsg>>,
-    array_catchup_rounds: AtomicU64,
-    array_snapshot_frames: std::sync::Mutex<Vec<String>>,
+    /// Array catch-up, snapshot, and push-queue state.
+    pub array: super::mock_array::MockArrayState,
 }
 
 impl Default for MockDelegate {
@@ -66,32 +66,8 @@ impl MockDelegate {
             kv_retired: std::sync::Mutex::new(Vec::new()),
             stream_acks: std::sync::Mutex::new(Vec::new()),
             in_flight_clears: AtomicU64::new(0),
-            array_catchups: std::sync::Mutex::new(Vec::new()),
-            array_catchup_rounds: AtomicU64::new(0),
-            array_snapshot_frames: std::sync::Mutex::new(Vec::new()),
+            array: super::mock_array::MockArrayState::default(),
         }
-    }
-
-    /// Requests `begin_array_catchup` returns on every session.
-    pub fn set_array_catchups(
-        &self,
-        requests: Vec<nodedb_types::sync::wire::ArrayCatchupRequestMsg>,
-    ) {
-        *self.array_catchups.lock().expect("array_catchups lock") = requests;
-    }
-
-    /// How many times `begin_array_catchup` was invoked.
-    pub fn array_catchup_rounds(&self) -> u64 {
-        self.array_catchup_rounds.load(Ordering::Relaxed)
-    }
-
-    /// Snapshot frames routed to the delegate, in order: `header:{array}` and
-    /// `chunk:{array}:{index}`.
-    pub fn array_snapshot_frames(&self) -> Vec<String> {
-        self.array_snapshot_frames
-            .lock()
-            .expect("array_snapshot_frames lock")
-            .clone()
     }
 
     /// Make `apply_remote_row` refuse every row with a serialization error.
@@ -264,41 +240,43 @@ impl SyncDelegate for MockDelegate {
         &self,
         msg: &nodedb_types::sync::wire::ArrayRejectMsg,
     ) -> Option<nodedb_types::sync::wire::ArrayCatchupRequestMsg> {
-        (msg.reason == nodedb_types::sync::wire::ArrayRejectReason::RetentionFloor).then(|| {
-            nodedb_types::sync::wire::ArrayCatchupRequestMsg {
-                array: msg.array.clone(),
-                from_hlc_bytes: [0u8; 18],
-            }
-        })
+        self.array.reject(msg)
     }
     async fn handle_array_snapshot(&self, msg: &nodedb_types::sync::wire::ArraySnapshotMsg) {
-        self.array_snapshot_frames
-            .lock()
-            .expect("array_snapshot_frames lock")
-            .push(format!("header:{}", msg.array));
+        self.array.record_header(msg);
     }
     async fn handle_array_snapshot_chunk(
         &self,
         msg: &nodedb_types::sync::wire::ArraySnapshotChunkMsg,
     ) -> Option<nodedb_types::sync::wire::ArrayAckMsg> {
-        self.array_snapshot_frames
-            .lock()
-            .expect("array_snapshot_frames lock")
-            .push(format!("chunk:{}:{}", msg.array, msg.chunk_index));
-        (msg.chunk_index + 1 == msg.total_chunks).then(|| nodedb_types::sync::wire::ArrayAckMsg {
-            array: msg.array.clone(),
-            replica_id: 1,
-            ack_hlc_bytes: msg.snapshot_hlc_bytes,
-            applied_seq: 0,
-            status: nodedb_types::sync::wire::AckStatus::Applied,
-        })
+        self.array.record_chunk(msg)
     }
     fn begin_array_catchup(&self) -> Vec<nodedb_types::sync::wire::ArrayCatchupRequestMsg> {
-        self.array_catchup_rounds.fetch_add(1, Ordering::Relaxed);
-        self.array_catchups
-            .lock()
-            .expect("array_catchups lock")
-            .clone()
+        self.array.begin_catchup()
+    }
+    async fn pending_array_ops(
+        &self,
+        after: Option<nodedb_array::sync::hlc::Hlc>,
+        limit: usize,
+    ) -> Result<Vec<PendingArrayOp>, LiteError> {
+        Ok(self.array.pending_after(after, limit))
+    }
+    async fn persist_array_op_seq(&self, op: &PendingArrayOp) -> Result<(), LiteError> {
+        self.array.persist_seq(op);
+        Ok(())
+    }
+    async fn retire_array_ops(
+        &self,
+        hlcs: &[nodedb_array::sync::hlc::Hlc],
+    ) -> Result<(), LiteError> {
+        self.array.retire(hlcs);
+        Ok(())
+    }
+    fn array_schema_announce(
+        &self,
+        array: &str,
+    ) -> Result<Option<nodedb_types::sync::wire::ArraySchemaSyncMsg>, LiteError> {
+        Ok(self.array.schema(array))
     }
 
     async fn pending_columnar_batches(&self) -> Vec<(Vec<u8>, PendingColumnarBatch)> {

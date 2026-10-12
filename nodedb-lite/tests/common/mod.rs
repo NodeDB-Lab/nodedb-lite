@@ -7,6 +7,7 @@
 pub mod array_wire;
 pub mod clock;
 pub mod harness;
+pub mod mock_array;
 pub mod mock_delegate;
 pub mod ops;
 pub mod origin;

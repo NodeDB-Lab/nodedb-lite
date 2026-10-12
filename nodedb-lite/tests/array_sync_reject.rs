@@ -1,13 +1,10 @@
-//! Edge-side simulation — does NOT exercise real Origin transport.
-//! All tests here call Lite's inbound/outbound handlers directly, bypassing
-//! the WebSocket connection to a live Origin node.
+//! Reject handling in Lite's inbound array handler, without a transport.
 //!
-//! The real-transport round-trip (Lite → Origin WebSocket → Lite) is not covered
-//! by any test in this file.  See §13 of the release checklist for the decision
-//! record and the placeholder real-transport test in `tests/array_sync_interop.rs`.
-//!
-//! Original note: "Rejection" is synthesised by delivering an ArrayRejectMsg
-//! directly to the inbound handler — matching what Origin would send over the wire.
+//! Each test delivers an `ArrayRejectMsg` straight to the inbound handler,
+//! in the shape Origin sends it. The push-loop side of a reject (schema
+//! re-send, park until the next session) is covered by
+//! `tests/array_sync_push_transport.rs`. The real-transport round trip is in
+//! `tests/array_sync_interop.rs`.
 
 pub mod common;
 
@@ -32,10 +29,10 @@ async fn enqueue_and_get_hlc_bytes(harness: &common::SyncHarness, array: &str) -
     op.header.hlc.to_bytes()
 }
 
-/// Origin rejects an op with `ArrayUnknown`; the op is removed from the
-/// pending queue and the outcome is `RejectAcknowledged`.
+/// Origin rejects an op with `ArrayUnknown`; the op stays queued for the
+/// re-send that follows the schema announce.
 #[tokio::test(flavor = "multi_thread")]
-async fn reject_array_unknown_drops_from_pending() {
+async fn reject_array_unknown_keeps_the_op_queued() {
     let harness = common::SyncHarness::new_in_memory().await;
     harness.create_array("rej_arr").await;
 
@@ -63,7 +60,35 @@ async fn reject_array_unknown_drops_from_pending() {
     );
 
     let after = harness.pending.len().await.expect("len");
-    assert_eq!(after, 0, "rejected op must be removed from pending queue");
+    assert_eq!(after, 1, "the op waits for a schema re-send");
+}
+
+/// Origin rejects an op with `ShapeInvalid`; Origin can never accept it, so
+/// the op is removed from the pending queue.
+#[tokio::test(flavor = "multi_thread")]
+async fn reject_shape_invalid_drops_from_pending() {
+    let harness = common::SyncHarness::new_in_memory().await;
+    harness.create_array("rej_shape").await;
+
+    let hlc_bytes = enqueue_and_get_hlc_bytes(&harness, "rej_shape").await;
+    let reject_msg = ArrayRejectMsg {
+        array: "rej_shape".into(),
+        op_hlc_bytes: hlc_bytes,
+        reason: ArrayRejectReason::ShapeInvalid,
+        detail: "shape validation failed".into(),
+    };
+
+    let outcome = harness
+        .inbound
+        .handle_reject(&reject_msg)
+        .await
+        .expect("handle_reject");
+    assert_eq!(outcome, InboundOutcome::RejectAcknowledged);
+    assert_eq!(
+        harness.pending.len().await.expect("len"),
+        0,
+        "a permanently refused op is dropped"
+    );
 }
 
 /// Rejection with `RetentionFloor` marks the array as needing a full catch-up.

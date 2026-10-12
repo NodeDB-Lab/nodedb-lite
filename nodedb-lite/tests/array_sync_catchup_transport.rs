@@ -136,7 +136,7 @@ async fn catchup_requests_are_sent_after_every_handshake() {
     let origin = MockOrigin::bind().await;
     let client = make_client(&origin);
     let mock = Arc::new(MockDelegate::new());
-    mock.set_array_catchups(vec![
+    mock.array.set_catchups(vec![
         catchup("alpha", Hlc::ZERO),
         catchup("beta", remote_hlc(700)),
     ]);
@@ -156,7 +156,7 @@ async fn catchup_requests_are_sent_after_every_handshake() {
         next_catchup(&mut ws).await,
         catchup("beta", remote_hlc(700))
     );
-    assert_eq!(mock.array_catchup_rounds(), 2, "one round per session");
+    assert_eq!(mock.array.catchup_rounds(), 2, "one round per session");
 }
 
 #[tokio::test]
@@ -200,7 +200,7 @@ async fn snapshot_frames_reach_the_delegate_and_the_last_chunk_is_acked() {
 
     let mut expected = vec![format!("header:{ARRAY}")];
     expected.extend((0..chunks.len()).map(|i| format!("chunk:{ARRAY}:{i}")));
-    assert_eq!(mock.array_snapshot_frames(), expected);
+    assert_eq!(mock.array.snapshot_frames(), expected);
 }
 
 // ── Convergence, with a real replica ────────────────────────────────────────

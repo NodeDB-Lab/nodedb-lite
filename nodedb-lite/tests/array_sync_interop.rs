@@ -3,9 +3,10 @@
 //! - Catch-up: a Lite replica that missed array ops while disconnected
 //!   converges after it reconnects, through `ArrayCatchupRequest` and the
 //!   `ArrayDeltaBatch` stream Origin's catch-up server answers with.
-//! - Put round trip: `#[ignore]`d. Lite's sync transport does not push
-//!   outbound array ops (`ArraySchema`, `ArrayDelta`) to Origin, so a Lite
-//!   write never reaches Origin's fan-out.
+//! - Put round trip: a cell written on one Lite replica reaches Origin
+//!   through the push loop (`ArraySchema`, then `ArrayDelta` frames closed
+//!   by a barrier ping), and a second replica through Origin's catch-up
+//!   stream.
 //!
 //! The catch-up test seeds Origin through a raw sync session that sends the
 //! frames a writing replica sends: the array's schema snapshot, then its ops.
@@ -23,6 +24,7 @@ use futures::{SinkExt, StreamExt};
 use nodedb_array::sync::hlc::Hlc;
 use nodedb_array::sync::op::ArrayOp;
 use nodedb_array::types::cell_value::value::CellValue;
+use nodedb_array::types::coord::value::CoordValue;
 use nodedb_lite::sync::{SyncClient, SyncConfig, SyncDelegate, SyncState, run_sync_loop};
 use nodedb_lite::{NodeDbLite, PagedbStorageMem};
 use nodedb_types::sync::wire::array::{
@@ -215,22 +217,55 @@ async fn replica_that_missed_ops_while_disconnected_converges_after_reconnect() 
     await_converged(&lite, 5).await;
 }
 
-/// Smoke test: Lite pushes an array put op to Origin over WebSocket;
-/// Origin applies it and echoes a delta back; Lite receives and applies it.
-///
-/// Ignored until Lite's sync transport pushes outbound array ops: the
-/// pending queue `ArrayOutbound` fills is never drained onto the socket.
-#[test]
-#[ignore = "Lite's sync transport does not push outbound array ops; see module doc"]
-fn array_interop_put_roundtrip() {
-    let Some(_origin) = common::origin::OriginServer::try_spawn() else {
+/// Poll until `lite`'s array pending queue is empty. The push loop retires
+/// an op only after Origin's pong proves Origin applied it.
+async fn await_pushed(lite: &NodeDbLite<PagedbStorageMem>) {
+    let deadline = tokio::time::Instant::now() + SYNC_DEADLINE;
+    loop {
+        let queued = SyncDelegate::pending_array_ops(lite, None, usize::MAX)
+            .await
+            .expect("read the array pending queue");
+        if queued.is_empty() {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{} array ops still queued after {SYNC_DEADLINE:?}",
+            queued.len()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn array_interop_put_roundtrip() {
+    let Some(_origin) = OriginServer::try_spawn() else {
         return skip();
     };
-    // Once unignored this test does:
-    // 1. Connect a Lite sync client to Origin.
-    // 2. Subscribe to an array shape.
-    // 3. Emit a put op via the outbound path.
-    // 4. Assert Lite receives an ArrayDelta frame back from Origin.
-    // 5. Assert the local array engine reflects the applied cell.
-    todo!("implement once Lite's sync transport pushes outbound array ops");
+
+    // Origin has never seen the array: the writer's schema announce defines it.
+    let writer = open_lite_with_array(ARRAY).await;
+    for x in 1..=3 {
+        writer
+            .array_put_cell(
+                ARRAY,
+                vec![CoordValue::Int64(x)],
+                vec![CellValue::Float64(x as f64 * 10.0)],
+                x * 1_000,
+                0,
+                i64::MAX,
+            )
+            .await
+            .expect("array_put_cell");
+    }
+    // The reader defines the same array after the writer, so its local schema
+    // HLC is not older than the one the writer's ops carry.
+    let reader = open_lite_with_array(ARRAY).await;
+
+    let _writer_session = start_sync(&writer).await;
+    await_pushed(&writer).await;
+
+    // The reader's catch-up request streams the writer's ops from Origin.
+    let _reader_session = start_sync(&reader).await;
+    await_converged(&reader, 3).await;
 }
