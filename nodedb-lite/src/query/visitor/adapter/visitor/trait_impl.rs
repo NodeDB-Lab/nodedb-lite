@@ -7,7 +7,6 @@
 //! function for exhaustive coverage.
 
 use nodedb_sql::PlanVisitor;
-use nodedb_sql::fts_types::FtsQuery;
 use nodedb_sql::temporal::TemporalScope;
 use nodedb_sql::types::SqlValue;
 use nodedb_sql::types::filter::Filter;
@@ -18,8 +17,9 @@ use nodedb_sql::{
     HybridSearchTripleVisitArgs, HybridSearchVisitArgs, InsertVisitArgs, JoinVisitArgs,
     LateralLoopVisitArgs, LateralTopKVisitArgs, MergeVisitArgs, RecursiveScanVisitArgs,
     RecursiveValueVisitArgs, ScanVisitArgs, SpatialScanVisitArgs, SubqueryVisitArgs,
-    TimeseriesScanVisitArgs, UpdateFromVisitArgs, UpsertVisitArgs, VectorPrimaryDeleteVisitArgs,
-    VectorPrimaryInsertVisitArgs, VectorPrimaryUpdateVisitArgs, VectorSearchVisitArgs,
+    TextSearchVisitArgs, TimeseriesScanVisitArgs, UpdateFromVisitArgs, UpsertVisitArgs,
+    VectorPrimaryDeleteVisitArgs, VectorPrimaryInsertVisitArgs, VectorPrimaryUpdateVisitArgs,
+    VectorSearchVisitArgs,
 };
 
 use crate::error::LiteError;
@@ -129,24 +129,8 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         reads_search::vector_search(self.engine, args)
     }
 
-    fn text_search(
-        &mut self,
-        collection: &str,
-        field: Option<&str>,
-        query: &FtsQuery,
-        top_k: usize,
-        filters: &[Filter],
-        score_alias: Option<&str>,
-    ) -> Result<LiteFut<'a>, LiteError> {
-        reads_search::text_search(
-            self.engine,
-            collection,
-            field,
-            query,
-            top_k,
-            filters,
-            score_alias,
-        )
+    fn text_search(&mut self, args: TextSearchVisitArgs<'_>) -> Result<LiteFut<'a>, LiteError> {
+        reads_search::text_search(self.engine, args)
     }
 
     fn document_index_lookup(

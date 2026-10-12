@@ -56,10 +56,18 @@ mod tests {
     #[tokio::test]
     async fn stage_and_flush_indexes() {
         let q = make_queue().await;
-        q.stage_index("docs", "d1", "hello world".to_string())
-            .unwrap();
-        q.stage_index("docs", "d2", "rust rocks".to_string())
-            .unwrap();
+        q.stage_index(
+            "docs",
+            "d1",
+            vec![("body".to_string(), "hello world".to_string())],
+        )
+        .unwrap();
+        q.stage_index(
+            "docs",
+            "d2",
+            vec![("body".to_string(), "rust rocks".to_string())],
+        )
+        .unwrap();
 
         // Before flush, durable queue is empty.
         assert_eq!(q.pending_index_count().await.unwrap(), 0);
@@ -88,9 +96,12 @@ mod tests {
     async fn durable_cap_returns_backpressure() {
         let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
         let q = FtsOutbound::open_with_cap(storage, 2).await.unwrap();
-        q.stage_index("docs", "a", "foo".to_string()).unwrap();
-        q.stage_index("docs", "b", "bar".to_string()).unwrap();
-        q.stage_index("docs", "c", "baz".to_string()).unwrap();
+        q.stage_index("docs", "a", vec![("body".to_string(), "foo".to_string())])
+            .unwrap();
+        q.stage_index("docs", "b", vec![("body".to_string(), "bar".to_string())])
+            .unwrap();
+        q.stage_index("docs", "c", vec![("body".to_string(), "baz".to_string())])
+            .unwrap();
         // Durable capacity admits a and b. The next entry remains staged.
         let err = q.flush_staging().await.unwrap_err();
         assert!(matches!(err, LiteError::Backpressure { .. }));
@@ -103,12 +114,18 @@ mod tests {
         let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
         {
             let q = FtsOutbound::open(Arc::clone(&storage)).await.unwrap();
-            q.stage_index("docs", "v1", "text".to_string()).unwrap();
+            q.stage_index("docs", "v1", vec![("body".to_string(), "text".to_string())])
+                .unwrap();
             q.flush_staging().await.unwrap();
         }
         let q = FtsOutbound::open(Arc::clone(&storage)).await.unwrap();
         assert_eq!(q.pending_index_count().await.unwrap(), 1);
-        q.stage_index("docs", "v2", "text2".to_string()).unwrap();
+        q.stage_index(
+            "docs",
+            "v2",
+            vec![("body".to_string(), "text2".to_string())],
+        )
+        .unwrap();
         q.flush_staging().await.unwrap();
         assert_eq!(q.pending_index_count().await.unwrap(), 2);
     }
@@ -120,7 +137,9 @@ mod tests {
         let storage = Arc::new(InterruptedStorage::new().await);
         let queue = FtsOutbound::open(Arc::clone(&storage)).await.unwrap();
         for id in ["prefix", "front", "tail"] {
-            queue.stage_index("docs", id, id.into()).unwrap();
+            queue
+                .stage_index("docs", id, vec![("body".to_string(), id.to_string())])
+                .unwrap();
         }
         *storage.rule.lock_or_recover() = Some(PutRule {
             namespace: Namespace::FtsIndexPending,
@@ -154,7 +173,9 @@ mod tests {
             let storage = Arc::new(InterruptedStorage::new().await);
             let queue = Arc::new(FtsOutbound::open(Arc::clone(&storage)).await.unwrap());
             for id in ["front", "tail"] {
-                queue.stage_index("docs", id, id.into()).unwrap();
+                queue
+                    .stage_index("docs", id, vec![("body".to_string(), id.to_string())])
+                    .unwrap();
             }
             *storage.rule.lock_or_recover() = Some(PutRule {
                 namespace: Namespace::FtsIndexPending,
@@ -175,7 +196,9 @@ mod tests {
             assert_eq!(queue.pending_index_count().await.unwrap(), u64::from(after));
             task.abort();
             assert!(task.await.unwrap_err().is_cancelled());
-            queue.stage_index("docs", "new", "new".into()).unwrap();
+            queue
+                .stage_index("docs", "new", vec![("body".to_string(), "new".to_string())])
+                .unwrap();
             queue.flush_staging().await.unwrap();
             let rows = queue.drain_indexes(10).await.unwrap();
             assert_eq!(rows.len(), 3);
@@ -198,7 +221,13 @@ mod tests {
         let queue = FtsOutbound::open_with_cap(Arc::clone(&storage), 1)
             .await
             .unwrap();
-        queue.stage_index("docs", "front", "alpha".into()).unwrap();
+        queue
+            .stage_index(
+                "docs",
+                "front",
+                vec![("body".to_string(), "alpha".to_string())],
+            )
+            .unwrap();
         *storage.rule.lock_or_recover() = Some(PutRule {
             namespace: Namespace::FtsIndexPending,
             skip: 0,
@@ -230,8 +259,20 @@ mod tests {
     async fn index_backpressure_does_not_block_delete_spill_or_ack_retry() {
         let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
         let queue = FtsOutbound::open_with_cap(storage, 1).await.unwrap();
-        queue.stage_index("docs", "first", "first".into()).unwrap();
-        queue.stage_index("docs", "next", "next".into()).unwrap();
+        queue
+            .stage_index(
+                "docs",
+                "first",
+                vec![("body".to_string(), "first".to_string())],
+            )
+            .unwrap();
+        queue
+            .stage_index(
+                "docs",
+                "next",
+                vec![("body".to_string(), "next".to_string())],
+            )
+            .unwrap();
         queue.stage_delete("docs", "removed").unwrap();
         assert!(matches!(
             queue.flush_staging().await,

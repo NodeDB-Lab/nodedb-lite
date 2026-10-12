@@ -4,6 +4,7 @@
 
 use crate::engine::fts::LiteFtsIndex;
 use crate::error::LiteError;
+use nodedb_fts::IndexScope;
 use nodedb_mem::{EngineId, MemoryGovernor, ReservationToken, ScopedMemory};
 use nodedb_types::{DatabaseId, Surrogate, TenantId};
 use std::collections::HashMap;
@@ -118,18 +119,22 @@ impl RetainedIndex {
     ) -> Self {
         let mut bytes = 1024usize.saturating_add(key.len().saturating_mul(4));
         let mut row_estimated_bytes: HashMap<u32, usize> = HashMap::new();
-        let prefix = format!("0:0:{key}:");
-        let per_token = prefix.len().saturating_mul(2).saturating_add(320);
-        for term in index.memtable().terms() {
-            let normalized = term.strip_prefix(&prefix).unwrap_or(&term);
-            for posting in index.memtable().get_postings(&term) {
+        // Same per-occurrence charge as `estimate_row`.
+        let per_token = key
+            .len()
+            .saturating_add(5)
+            .saturating_mul(2)
+            .saturating_add(320);
+        let scope = IndexScope::document(key);
+        for term in index.memtable().terms(0, 0, scope) {
+            for posting in index.memtable().get_postings(0, 0, scope, &term) {
                 let occurrences = if posting.positions.is_empty() {
                     posting.term_freq as usize
                 } else {
                     posting.positions.len()
                 };
                 let cost = per_token
-                    .saturating_add(normalized.len().saturating_mul(4))
+                    .saturating_add(term.len().saturating_mul(4))
                     .saturating_mul(occurrences);
                 let row = row_estimated_bytes.entry(posting.doc_id.0).or_default();
                 *row = row.saturating_add(cost);

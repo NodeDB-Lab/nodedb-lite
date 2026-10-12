@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use nodedb_fts::IndexScope;
 use nodedb_fts::posting::QueryMode as FtsQueryMode;
 use nodedb_types::Surrogate;
 use nodedb_types::text_search::TextSearchParams;
@@ -17,13 +18,14 @@ type TermPositions = HashMap<Surrogate, Vec<u32>>;
 
 /// Postings of `term` in the resolved index, as document → positions.
 ///
-/// The memtable key scope is `{database_id}:{tenant}:{collection}:{term}`;
-/// Lite is single-database/single-tenant, so both ids are 0.
+/// The resolved index key is the memtable collection, with the
+/// whole-document scope. Lite is single-database and single-tenant, so both
+/// ids are 0.
 fn term_positions(index: &Resolved<'_>, term: &str) -> TermPositions {
     index
         .idx
         .memtable()
-        .get_postings(&format!("0:0:{}:{term}", index.key))
+        .get_postings(0, 0, IndexScope::document(&index.key), term)
         .into_iter()
         .map(|p| (p.doc_id, p.positions))
         .collect()

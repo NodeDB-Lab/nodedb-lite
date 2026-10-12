@@ -9,7 +9,7 @@ use crate::{
 };
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex, atomic::Ordering},
+    sync::{Arc, Mutex},
 };
 
 const STAGING_CAP: usize = 4096;
@@ -96,7 +96,9 @@ impl<T> Staging<T> {
 
 impl<S: StorageEngine> FtsOutbound<S> {
     fn next_batch_id(&self) -> Result<u64, LiteError> {
-        self.ids.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1)).map_err(|_| LiteError::Backpressure { detail: "FTS batch counter exhausted: drain and acknowledge pending entries before reopening the queue".into() })
+        crate::sync::outbound::queue::take_next(&self.ids).ok_or_else(|| LiteError::Backpressure {
+            detail: "FTS batch counter exhausted: drain and acknowledge pending entries before reopening the queue".into(),
+        })
     }
 
     /// Stage an index entry atomically. Local source mutation can precede this error.
@@ -104,7 +106,7 @@ impl<S: StorageEngine> FtsOutbound<S> {
         &self,
         collection: &str,
         doc_id: &str,
-        text: String,
+        fields: Vec<(String, String)>,
     ) -> Result<(), LiteError> {
         self.staging_indexes
             .admit(|| {
@@ -112,7 +114,7 @@ impl<S: StorageEngine> FtsOutbound<S> {
                     batch_id: self.next_batch_id()?,
                     collection: collection.into(),
                     doc_id: doc_id.into(),
-                    text,
+                    fields,
                     seq: 0,
                 })
             })

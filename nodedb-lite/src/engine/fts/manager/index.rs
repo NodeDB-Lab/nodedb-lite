@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use nodedb_fts::IndexScope;
 use nodedb_fts::backend::FtsBackend;
 use nodedb_types::Surrogate;
 use nodedb_types::value::Value;
@@ -30,25 +31,29 @@ impl FtsCollectionManager {
     /// carries as a string stops matching. A field with an empty name has no
     /// key of its own and is searchable through the whole-document index only.
     ///
-    /// Returns the whole-document text it indexed.
+    /// Returns the indexed `(field, text)` pairs sorted by field name, without
+    /// empty field names. The list is empty when the document holds no
+    /// indexable string field.
     pub fn index_document_fields(
         &mut self,
         collection: &str,
         doc_id: &str,
         fields: &HashMap<String, Value>,
-    ) -> Result<String, LiteError> {
+    ) -> Result<Vec<(String, String)>, LiteError> {
         let texts = super::fields::selected_texts(fields, self.declaration_for(collection));
         let text = super::fields::joined_text(&texts);
         self.index_document(collection, doc_id, &text)?;
 
         let whole = index_key(collection, "");
         let mut indexed: HashSet<String> = HashSet::new();
+        let mut pairs = Vec::with_capacity(texts.len());
         for (field, value) in texts {
             if field.is_empty() {
                 continue;
             }
             self.index_field(collection, field, doc_id, value)?;
             indexed.insert(index_key(collection, field));
+            pairs.push((field.to_owned(), value.to_owned()));
         }
 
         let system = index_key(collection, "_geohash");
@@ -57,7 +62,7 @@ impl FtsCollectionManager {
                 self.retract(collection, &key, doc_id)?;
             }
         }
-        Ok(text)
+        Ok(pairs)
     }
 
     /// Remove a document from every index of `collection`: the
@@ -185,7 +190,7 @@ impl FtsCollectionManager {
         };
         let held = idx
             .backend()
-            .read_doc_length(0, 0, key, surrogate)
+            .read_doc_length(0, 0, IndexScope::document(key), surrogate)
             .map_err(|e| fts_err(collection, e))?
             .is_some();
         if held {

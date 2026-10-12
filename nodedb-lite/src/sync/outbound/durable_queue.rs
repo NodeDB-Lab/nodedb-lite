@@ -20,7 +20,7 @@
 //! survive a crash and are re-drained on the next connect.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 
 use nodedb_types::Namespace;
 
@@ -92,10 +92,9 @@ impl<S: StorageEngine> DurableOutboundQueue<S> {
 
     /// Reserve a stable key without awaiting persistence.
     pub(crate) fn reserve_key(&self) -> Result<[u8; 8], LiteError> {
-        self.next_id
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        super::queue::take_next(&self.next_id)
             .map(u64::to_be_bytes)
-            .map_err(|_| Self::exhausted())
+            .ok_or_else(Self::exhausted)
     }
 
     fn exhausted() -> LiteError {
@@ -188,6 +187,7 @@ impl<S: StorageEngine> DurableOutboundQueue<S> {
 mod tests {
     use super::*;
     use crate::storage::pagedb_storage::PagedbStorageMem;
+    use std::sync::atomic::Ordering;
 
     async fn make_queue() -> DurableOutboundQueue<PagedbStorageMem> {
         let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());

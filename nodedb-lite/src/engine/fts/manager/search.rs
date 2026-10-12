@@ -5,10 +5,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use nodedb_fts::FtsSearchParams;
 use nodedb_fts::TextSearchResult;
 use nodedb_fts::backend::FtsBackend;
 use nodedb_fts::posting::QueryMode as FtsQueryMode;
+use nodedb_fts::{FtsSearchParams, IndexScope};
 use nodedb_types::text_search::{QueryMode, TextSearchParams};
 
 use super::registry::{FtsCollectionManager, FtsResult, index_key, read_err, search_err};
@@ -17,10 +17,7 @@ use crate::error::LiteError;
 
 /// Map the public query mode onto the index's boolean mode.
 pub(super) fn fts_mode(mode: QueryMode) -> FtsQueryMode {
-    match mode {
-        QueryMode::And => FtsQueryMode::And,
-        _ => FtsQueryMode::Or,
-    }
+    FtsQueryMode::from(mode)
 }
 
 /// An index resolved for one read: its key and the index itself.
@@ -172,13 +169,17 @@ impl FtsCollectionManager {
 
     /// Return every document the `field` index of `collection` holds, with
     /// its BM25 score against `query`. Documents outside the BM25 hit set
-    /// score `0.0`. This powers `TextOp::BM25ScoreScan`.
+    /// score `0.0`. This powers the score columns of text reads.
+    ///
+    /// `allowed` restricts the documents to the named ones. The query's
+    /// AND-mode fallback is then decided over those documents only.
     pub fn scan_all_with_scores(
         &self,
         collection: &str,
         field: &str,
         query: &str,
         params: &TextSearchParams,
+        allowed: Option<&HashSet<String>>,
     ) -> Result<Vec<(String, f32)>, LiteError> {
         let Some(index) = self.resolve(collection, field)? else {
             return Ok(Vec::new());
@@ -187,10 +188,18 @@ impl FtsCollectionManager {
         // An index holds a document exactly when it records its length.
         let mut members: Vec<(u32, &str)> = Vec::new();
         for (&sur, doc_id) in &self.surrogate_to_id {
+            if allowed.is_some_and(|ids| !ids.contains(doc_id)) {
+                continue;
+            }
             let held = index
                 .idx
                 .backend()
-                .read_doc_length(0, 0, &index.key, nodedb_types::Surrogate(sur))
+                .read_doc_length(
+                    0,
+                    0,
+                    IndexScope::document(&index.key),
+                    nodedb_types::Surrogate(sur),
+                )
                 .map_err(|e| read_err(collection, e))?
                 .is_some();
             if held {
@@ -201,15 +210,24 @@ impl FtsCollectionManager {
             return Ok(Vec::new());
         }
 
+        let prefilter: Option<nodedb_types::SurrogateBitmap> = allowed.map(|_| {
+            members
+                .iter()
+                .map(|&(sur, _)| nodedb_types::Surrogate(sur))
+                .collect()
+        });
         // The member count bounds the hit set; `usize::MAX` would overflow
         // the result heap allocation.
-        let hits: HashMap<u32, f32> = Self::bm25(
+        let hits: HashMap<u32, f32> = Self::bm25_query(
             collection,
             &index,
-            query,
-            members.len(),
-            params.fuzzy,
-            fts_mode(params.mode),
+            FtsSearchParams {
+                query,
+                top_k: members.len(),
+                fuzzy_enabled: params.fuzzy,
+                mode: fts_mode(params.mode),
+                prefilter: prefilter.as_ref(),
+            },
         )?
         .into_iter()
         .map(|r| (r.doc_id.0, r.score))
@@ -248,7 +266,7 @@ mod tests {
             .expect("index update must succeed");
 
         let scored = mgr
-            .scan_all_with_scores("col", "", "quick", &default_params())
+            .scan_all_with_scores("col", "", "quick", &default_params(), None)
             .expect("scan must succeed");
         let score_of = |id: &str| scored.iter().find(|(d, _)| d == id).map(|(_, s)| *s);
 
@@ -275,7 +293,7 @@ mod tests {
             .expect("removal must succeed");
 
         let ids: Vec<String> = mgr
-            .scan_all_with_scores("col", "", "quick", &default_params())
+            .scan_all_with_scores("col", "", "quick", &default_params(), None)
             .expect("scan must succeed")
             .into_iter()
             .map(|(id, _)| id)
@@ -326,7 +344,7 @@ mod tests {
                 .is_empty()
         );
         assert!(
-            mgr.scan_all_with_scores("nothing", "", "query", &default_params())
+            mgr.scan_all_with_scores("nothing", "", "query", &default_params(), None)
                 .expect("scan must succeed")
                 .is_empty()
         );
@@ -345,7 +363,7 @@ mod tests {
         assert!(matches!(err, LiteError::FtsQueryInvalid { .. }), "{err:?}");
 
         let err = mgr
-            .scan_all_with_scores("col", "", "NOT python", &default_params())
+            .scan_all_with_scores("col", "", "NOT python", &default_params(), None)
             .expect_err("a negation-only query must fail the scan");
         assert!(matches!(err, LiteError::FtsQueryInvalid { .. }), "{err:?}");
     }

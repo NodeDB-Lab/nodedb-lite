@@ -84,7 +84,8 @@ pub(super) struct FtsSurrogateState {
 /// Matches `CompactPosting` fields: `(doc_id, term_freq, fieldnorm, positions)`.
 pub(super) type SerPosting = (u32, u32, u8, Vec<u32>);
 
-/// All postings of one index: `(scoped_term, postings)` pairs.
+/// All postings of one index: `(scoped_term, postings)` pairs. Each
+/// `scoped_term` starts with [`scoped_term_prefix`].
 pub(super) type PostingsBlob = Vec<(String, Vec<SerPosting>)>;
 
 pub(super) fn compact_to_ser(p: &CompactPosting) -> SerPosting {
@@ -113,4 +114,10 @@ pub(super) fn meta_key(index_key: &str, subkey: &str) -> String {
 /// Prefix of the legacy per-term posting keys of `index_key`.
 pub(super) fn postings_prefix(index_key: &str) -> String {
     format!("fts:{index_key}:mt:")
+}
+
+/// Prefix of every stored term of `index_key`. The checkpoint stores terms
+/// as `"{DB}:{TID}:{index_key}:{term}"`. The memtable holds bare terms.
+pub(super) fn scoped_term_prefix(index_key: &str) -> String {
+    format!("{DB}:{TID}:{index_key}:")
 }

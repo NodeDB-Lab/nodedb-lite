@@ -3,9 +3,9 @@
 //! Search family: vector_search/text_search/multi_vector_search/
 //! sparse_search/hybrid_search/hybrid_search_triple.
 
-use nodedb_sql::fts_types::FtsQuery;
-use nodedb_sql::types::filter::Filter;
-use nodedb_sql::{HybridSearchTripleVisitArgs, HybridSearchVisitArgs, VectorSearchVisitArgs};
+use nodedb_sql::{
+    HybridSearchTripleVisitArgs, HybridSearchVisitArgs, TextSearchVisitArgs, VectorSearchVisitArgs,
+};
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
@@ -34,7 +34,16 @@ pub(super) fn vector_search<'a, S: StorageEngine + 'a>(
         ann_options,
         skip_payload_fetch,
         payload_filters,
+        pk_prefilter,
     } = args;
+    if pk_prefilter.is_some() {
+        return Err(LiteError::Unsupported {
+            detail: format!(
+                "vector search on '{collection}' with a primary-key prefilter (pk_prefilter): \
+                 Lite ranks every row of the vector index"
+            ),
+        });
+    }
     lower_vector_search(
         engine,
         collection,
@@ -53,22 +62,9 @@ pub(super) fn vector_search<'a, S: StorageEngine + 'a>(
 
 pub(super) fn text_search<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
-    collection: &str,
-    field: Option<&str>,
-    query: &FtsQuery,
-    top_k: usize,
-    filters: &[Filter],
-    score_alias: Option<&str>,
+    args: TextSearchVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
-    lower_text_search(
-        engine,
-        collection,
-        field,
-        query,
-        top_k,
-        filters,
-        score_alias,
-    )
+    lower_text_search(engine, args)
 }
 
 pub(super) fn multi_vector_search<'a, S: StorageEngine + 'a>(
@@ -95,58 +91,12 @@ pub(super) fn hybrid_search<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     args: HybridSearchVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
-    let HybridSearchVisitArgs {
-        collection,
-        query_vector,
-        query_text,
-        top_k,
-        ef_search,
-        vector_weight,
-        fuzzy,
-        score_alias,
-    } = args;
-    lower_hybrid_search(
-        engine,
-        collection,
-        query_vector,
-        query_text,
-        top_k,
-        ef_search,
-        vector_weight,
-        fuzzy,
-        score_alias,
-    )
+    lower_hybrid_search(engine, args)
 }
 
 pub(super) fn hybrid_search_triple<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     args: HybridSearchTripleVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
-    let HybridSearchTripleVisitArgs {
-        collection,
-        query_vector,
-        query_text,
-        graph_seed_id,
-        graph_depth,
-        graph_edge_label,
-        top_k,
-        ef_search,
-        fuzzy,
-        rrf_k,
-        score_alias,
-    } = args;
-    lower_hybrid_search_triple(
-        engine,
-        collection,
-        query_vector,
-        query_text,
-        graph_seed_id,
-        graph_depth,
-        graph_edge_label,
-        top_k,
-        ef_search,
-        fuzzy,
-        rrf_k,
-        score_alias,
-    )
+    lower_hybrid_search_triple(engine, args)
 }

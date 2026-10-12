@@ -9,11 +9,13 @@ use nodedb_physical::physical_plan::{SpatialOp, TextOp};
 use nodedb_sql::types::filter::Filter;
 use nodedb_sql::types::query::Projection;
 use nodedb_sql::types::query::SpatialPredicate as SqlSpatialPredicate;
+use nodedb_sql::{HybridSearchTripleVisitArgs, HybridSearchVisitArgs};
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::filter_convert::sql_filters_to_metadata;
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
+use crate::query::scan_filter_convert::encode_scan_filters;
 use crate::storage::engine::StorageEngine;
 
 use super::adapter::LiteFut;
@@ -102,33 +104,43 @@ pub(super) fn lower_sparse_search<'a, S: StorageEngine + 'a>(
 // ── HybridSearch ─────────────────────────────────────────────────────────────
 
 /// Lower `SqlPlan::HybridSearch` to `TextOp::HybridSearch`.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn lower_hybrid_search<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
-    collection: &str,
-    query_vector: &[f32],
-    query_text: &str,
-    top_k: usize,
-    ef_search: usize,
-    vector_weight: f32,
-    fuzzy: bool,
-    score_alias: Option<&str>,
+    args: HybridSearchVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
+    let HybridSearchVisitArgs {
+        collection,
+        vector_field,
+        query_vector,
+        text_field,
+        query_text,
+        filters,
+        top_k,
+        ef_search,
+        vector_weight,
+        mode,
+        fuzzy,
+        score_alias,
+    } = args;
     let op = TextOp::HybridSearch {
         // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
         collection: nodedb_types::QualifiedCollection::new(
             nodedb_types::DatabaseId::DEFAULT,
             collection,
         ),
+        vector_field: vector_field.to_string(),
         query_vector: query_vector.to_vec(),
+        text_field: text_field.map(str::to_string),
         query_text: query_text.to_string(),
+        filters: encode_scan_filters(filters)?,
         top_k,
         ef_search,
+        mode,
         fuzzy,
         vector_weight,
         filter_bitmap: None,
         rls_filters: Vec::new(),
-        score_alias: score_alias.map(|s| s.to_string()),
+        score_alias: score_alias.map(str::to_string),
     };
     let mut phys = LiteDataPlaneVisitor::new(engine);
     let fut = phys.text(&op)?;
@@ -138,39 +150,49 @@ pub(super) fn lower_hybrid_search<'a, S: StorageEngine + 'a>(
 // ── HybridSearchTriple ────────────────────────────────────────────────────────
 
 /// Lower `SqlPlan::HybridSearchTriple` to `TextOp::HybridSearchTriple`.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn lower_hybrid_search_triple<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
-    collection: &str,
-    query_vector: &[f32],
-    query_text: &str,
-    graph_seed_id: &str,
-    graph_depth: usize,
-    graph_edge_label: Option<&str>,
-    top_k: usize,
-    ef_search: usize,
-    fuzzy: bool,
-    rrf_k: (f64, f64, f64),
-    score_alias: Option<&str>,
+    args: HybridSearchTripleVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
+    let HybridSearchTripleVisitArgs {
+        collection,
+        vector_field,
+        query_vector,
+        text_field,
+        query_text,
+        filters,
+        graph_seed_id,
+        graph_depth,
+        graph_edge_label,
+        top_k,
+        ef_search,
+        mode,
+        fuzzy,
+        rrf_k,
+        score_alias,
+    } = args;
     let op = TextOp::HybridSearchTriple {
         // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
         collection: nodedb_types::QualifiedCollection::new(
             nodedb_types::DatabaseId::DEFAULT,
             collection,
         ),
+        vector_field: vector_field.to_string(),
         query_vector: query_vector.to_vec(),
+        text_field: text_field.map(str::to_string),
         query_text: query_text.to_string(),
+        filters: encode_scan_filters(filters)?,
         graph_seed_id: graph_seed_id.to_string(),
         graph_depth,
-        graph_edge_label: graph_edge_label.map(|s| s.to_string()),
+        graph_edge_label: graph_edge_label.map(str::to_string),
         top_k,
         ef_search,
+        mode,
         fuzzy,
         rrf_k,
         filter_bitmap: None,
         rls_filters: Vec::new(),
-        score_alias: score_alias.map(|s| s.to_string()),
+        score_alias: score_alias.map(str::to_string),
     };
     let mut phys = LiteDataPlaneVisitor::new(engine);
     let fut = phys.text(&op)?;
@@ -287,14 +309,20 @@ mod tests {
         let engine = make_engine().await;
         let result = super::lower_hybrid_search(
             &engine,
-            "test_col",
-            &[0.1f32, 0.2, 0.3],
-            "hello world",
-            5,
-            50,
-            0.5,
-            false,
-            None,
+            nodedb_sql::HybridSearchVisitArgs {
+                collection: "test_col",
+                vector_field: "",
+                query_vector: &[0.1f32, 0.2, 0.3],
+                text_field: None,
+                query_text: "hello world",
+                filters: &[],
+                top_k: 5,
+                ef_search: 50,
+                vector_weight: 0.5,
+                mode: nodedb_types::text_search::QueryMode::Or,
+                fuzzy: false,
+                score_alias: None,
+            },
         );
         // Collection doesn't exist; expect a result (possibly empty or error from engine).
         // The lowering itself must not panic or return a LiteError at plan time.
@@ -324,17 +352,23 @@ mod tests {
         let engine = make_engine().await;
         let result = super::lower_hybrid_search_triple(
             &engine,
-            "test_col",
-            &[0.1f32, 0.2],
-            "some query",
-            "node-1",
-            2,
-            None,
-            5,
-            40,
-            false,
-            (60.0, 60.0, 60.0),
-            Some("score"),
+            nodedb_sql::HybridSearchTripleVisitArgs {
+                collection: "test_col",
+                vector_field: "",
+                query_vector: &[0.1f32, 0.2],
+                text_field: None,
+                query_text: "some query",
+                filters: &[],
+                graph_seed_id: "node-1",
+                graph_depth: 2,
+                graph_edge_label: None,
+                top_k: 5,
+                ef_search: 40,
+                mode: nodedb_types::text_search::QueryMode::Or,
+                fuzzy: false,
+                rrf_k: (60.0, 60.0, 60.0),
+                score_alias: Some("score"),
+            },
         );
         assert!(result.is_ok());
     }

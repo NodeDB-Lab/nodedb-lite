@@ -5,9 +5,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use nodedb_fts::FtsIndex;
 use nodedb_fts::backend::FtsBackend;
 use nodedb_fts::backend::memory::MemoryBackend;
+use nodedb_fts::{FtsIndex, IndexScope};
 use nodedb_mem::MemoryGovernor;
 use nodedb_types::Namespace;
 use nodedb_types::Surrogate;
@@ -15,7 +15,8 @@ use nodedb_types::error::{NodeDbError, NodeDbResult};
 
 use super::format::{
     COLLECTIONS_KEY, DB, FtsSurrogateState, LAYOUT_KEY, LAYOUT_PER_FIELD, META_SUBKEYS,
-    SURROGATES_KEY, SerPosting, TID, doclens_key, meta_key, postings_prefix, ser_to_compact,
+    SURROGATES_KEY, SerPosting, TID, doclens_key, meta_key, postings_prefix, scoped_term_prefix,
+    ser_to_compact,
 };
 use crate::engine::fts::manager::resident_index;
 use crate::storage::engine::StorageEngine;
@@ -43,11 +44,17 @@ fn backend_err(index_key: &str, e: impl std::fmt::Display) -> NodeDbError {
 
 /// Load the postings of `index_key` into `idx`: from its pagedb segment when
 /// one exists, else from the legacy per-term KV entries.
+///
+/// Stored terms carry the [`scoped_term_prefix`] of `index_key`. The
+/// memtable holds bare terms, so the prefix is stripped on insert.
 async fn restore_postings<S: StorageEngine>(
     storage: &S,
     index_key: &str,
     idx: &FtsIndex<MemoryBackend>,
 ) -> NodeDbResult<()> {
+    let scope = IndexScope::document(index_key);
+    let term_scope = scoped_term_prefix(index_key);
+
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(seg_ext) = storage.as_fts_segment_ext()
         && let Some(blob) = seg_ext
@@ -58,18 +65,23 @@ async fn restore_postings<S: StorageEngine>(
         let entries = zerompk::from_msgpack::<super::format::PostingsBlob>(&blob)
             .map_err(|e| decode_err(&format!("segment of '{index_key}'"), e))?;
         for (scoped_term, postings) in entries {
+            // A segment belongs to one index, so a term without the prefix
+            // is already bare.
+            let term = scoped_term
+                .strip_prefix(term_scope.as_str())
+                .unwrap_or(&scoped_term);
             for sp in postings {
-                idx.memtable().insert(&scoped_term, ser_to_compact(sp));
+                idx.memtable()
+                    .insert(DB, TID, scope, term, ser_to_compact(sp));
             }
         }
         return Ok(());
     }
 
-    // A posting key holds a memtable term scoped to this index. Keys of an
-    // index whose name extends this one (`"{key}:mt…"`) share the prefix and
-    // are skipped.
+    // A posting key holds a term scoped to this index. Keys of an index
+    // whose name extends this one (`"{key}:mt…"`) share the key prefix but
+    // not the term prefix, and are skipped.
     let prefix = postings_prefix(index_key);
-    let term_scope = format!("{DB}:{TID}:{index_key}:");
     for (raw_key, value) in storage
         .scan_prefix(Namespace::Fts, prefix.as_bytes())
         .await?
@@ -84,13 +96,14 @@ async fn restore_postings<S: StorageEngine>(
                     "not a UTF-8 term key",
                 )
             })?;
-        if !scoped_term.starts_with(&term_scope) {
+        let Some(term) = scoped_term.strip_prefix(term_scope.as_str()) else {
             continue;
-        }
+        };
         let postings = zerompk::from_msgpack::<Vec<SerPosting>>(&value)
             .map_err(|e| decode_err(&format!("postings of '{scoped_term}'"), e))?;
         for sp in postings {
-            idx.memtable().insert(scoped_term, ser_to_compact(sp));
+            idx.memtable()
+                .insert(DB, TID, scope, term, ser_to_compact(sp));
         }
     }
     Ok(())
@@ -153,6 +166,7 @@ where
         HashMap::with_capacity(index_keys.len());
 
     for index_key in &index_keys {
+        let scope = IndexScope::document(index_key);
         let idx = resident_index(Arc::clone(&governor));
         restore_postings(storage, index_key, &idx).await?;
 
@@ -165,10 +179,10 @@ where
                 .map_err(|e| decode_err(&format!("doc lengths of '{index_key}'"), e))?;
             for (s, len) in pairs {
                 idx.backend()
-                    .write_doc_length(DB, TID, index_key, Surrogate(s), len)
+                    .write_doc_length(DB, TID, scope, Surrogate(s), len)
                     .map_err(|e| backend_err(index_key, e))?;
                 idx.backend()
-                    .increment_stats(DB, TID, index_key, len)
+                    .increment_stats(DB, TID, scope, len)
                     .map_err(|e| backend_err(index_key, e))?;
             }
         }
@@ -180,7 +194,7 @@ where
                 .await?
             {
                 idx.backend()
-                    .write_meta(DB, TID, index_key, subkey, &data)
+                    .write_meta(DB, TID, scope, subkey, &data)
                     .map_err(|e| backend_err(index_key, e))?;
             }
         }

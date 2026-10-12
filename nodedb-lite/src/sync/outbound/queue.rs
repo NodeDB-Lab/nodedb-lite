@@ -48,6 +48,22 @@ impl Default for BatchIdGen {
     }
 }
 
+/// Return the current value of `counter` and advance it by one.
+///
+/// Returns `None` when the counter is at `u64::MAX`; the counter is left
+/// unchanged.
+pub(crate) fn take_next(counter: &AtomicU64) -> Option<u64> {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        let advanced = current.checked_add(1)?;
+        match counter.compare_exchange_weak(current, advanced, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(previous) => return Some(previous),
+            Err(observed) => current = observed,
+        }
+    }
+}
+
 /// Mutex-wrapped pending queue. `T` is the engine-specific pending entry
 /// (e.g. `PendingVectorInsert`).
 #[derive(Debug)]
@@ -139,6 +155,14 @@ mod tests {
         let b = g.next();
         let c = g.next();
         assert!(a > 0 && b > a && c > b);
+    }
+
+    #[test]
+    fn take_next_stops_at_the_counter_limit() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(take_next(&counter), Some(u64::MAX - 1));
+        assert_eq!(take_next(&counter), None);
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
     }
 
     #[test]

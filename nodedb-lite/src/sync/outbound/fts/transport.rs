@@ -161,9 +161,19 @@ mod tests {
         let queue = FtsOutbound::open_with_cap(Arc::clone(&storage), 1)
             .await
             .unwrap();
-        queue.stage_index("docs", "first", "first".into()).unwrap();
         queue
-            .stage_index("docs", "blocked", "blocked".into())
+            .stage_index(
+                "docs",
+                "first",
+                vec![("body".to_string(), "first".to_string())],
+            )
+            .unwrap();
+        queue
+            .stage_index(
+                "docs",
+                "blocked",
+                vec![("body".to_string(), "blocked".to_string())],
+            )
             .unwrap();
         queue.stage_delete("docs", "removed").unwrap();
         *storage.rule.lock_or_recover() = Some(PutRule {
@@ -193,9 +203,19 @@ mod tests {
         let queue = FtsOutbound::open_with_cap(Arc::clone(&storage), 1)
             .await
             .unwrap();
-        queue.stage_index("docs", "first", "first".into()).unwrap();
         queue
-            .stage_index("docs", "blocked", "blocked".into())
+            .stage_index(
+                "docs",
+                "first",
+                vec![("body".to_string(), "first".to_string())],
+            )
+            .unwrap();
+        queue
+            .stage_index(
+                "docs",
+                "blocked",
+                vec![("body".to_string(), "blocked".to_string())],
+            )
             .unwrap();
         queue.stage_delete("docs", "removed").unwrap();
         *storage.rule.lock_or_recover() = Some(PutRule {
@@ -233,8 +253,14 @@ mod tests {
     #[tokio::test]
     async fn ack_index_keys_removes_entries() {
         let q = make_queue().await;
-        q.stage_index("docs", "d1", "text".to_string()).unwrap();
-        q.stage_index("docs", "d2", "text2".to_string()).unwrap();
+        q.stage_index("docs", "d1", vec![("body".to_string(), "text".to_string())])
+            .unwrap();
+        q.stage_index(
+            "docs",
+            "d2",
+            vec![("body".to_string(), "text2".to_string())],
+        )
+        .unwrap();
         q.flush_staging().await.unwrap();
 
         let pairs = q.drain_indexes(1).await.unwrap();

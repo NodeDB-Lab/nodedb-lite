@@ -11,6 +11,7 @@ use nodedb_types::sync::wire::{EngineKind, SyncFrame, SyncMessageType, stream_id
 
 use super::send::send_binary;
 use crate::sync::client::SyncClient;
+use crate::sync::outbound::fts::PendingFtsIndex;
 use crate::sync::transport::delegate::SyncDelegate;
 
 pub(super) async fn push<S>(
@@ -52,19 +53,11 @@ where
             }
         }
         let seq = entry.seq;
-        let msg = nodedb_types::sync::wire::FtsIndexMsg {
-            lite_id: lite_id.clone(),
-            collection: entry.collection,
-            doc_id: entry.doc_id,
-            text: entry.text,
-            batch_id: entry.batch_id,
-            producer_id,
-            epoch,
-            seq,
-        };
+        let batch_id = entry.batch_id;
+        let msg = index_msg(&lite_id, producer_id, epoch, seq, entry);
         let Some(frame) = SyncFrame::try_encode(SyncMessageType::FtsIndex, &msg) else {
             tracing::error!(
-                collection = %msg.collection, doc_id = %msg.doc_id, batch_id = entry.batch_id,
+                collection = %msg.collection, doc_id = %msg.doc_id, batch_id,
                 "failed to encode FtsIndex frame; dropping entry"
             );
             delegate.acknowledge_fts_index(durable_key).await;
@@ -72,17 +65,17 @@ where
         };
         if let Err(e) = send_binary(sink, frame).await {
             tracing::warn!(
-                collection = %msg.collection, doc_id = %msg.doc_id, batch_id = entry.batch_id, error = %e,
+                collection = %msg.collection, doc_id = %msg.doc_id, batch_id, error = %e,
                 "FtsIndex send failed; durable entry retained for re-send on reconnect"
             );
             return ControlFlow::Break(());
         }
         // Mark in-flight: durable entry survives until Origin ack.
         delegate
-            .mark_fts_index_in_flight(entry.batch_id, durable_key)
+            .mark_fts_index_in_flight(batch_id, durable_key)
             .await;
         tracing::debug!(
-            collection = %msg.collection, doc_id = %msg.doc_id, batch_id = entry.batch_id,
+            collection = %msg.collection, doc_id = %msg.doc_id, batch_id,
             "sent FtsIndex to Origin; awaiting ack before deleting durable entry"
         );
     }
@@ -143,6 +136,25 @@ where
     ControlFlow::Continue(())
 }
 
+fn index_msg(
+    lite_id: &str,
+    producer_id: u64,
+    epoch: u64,
+    seq: u64,
+    entry: PendingFtsIndex,
+) -> nodedb_types::sync::wire::FtsIndexMsg {
+    nodedb_types::sync::wire::FtsIndexMsg {
+        lite_id: lite_id.to_owned(),
+        collection: entry.collection,
+        doc_id: entry.doc_id,
+        fields: entry.fields,
+        batch_id: entry.batch_id,
+        producer_id,
+        epoch,
+        seq,
+    }
+}
+
 fn pending_batch<T>(
     result: Result<Vec<T>, crate::error::LiteError>,
     operation: &str,
@@ -158,7 +170,7 @@ fn pending_batch<T>(
 
 #[cfg(test)]
 mod tests {
-    use super::pending_batch;
+    use super::{PendingFtsIndex, index_msg, pending_batch};
     use crate::error::LiteError;
     use std::ops::ControlFlow;
 
@@ -180,6 +192,32 @@ mod tests {
                 ControlFlow::Break(())
             ));
         }
+    }
+
+    #[test]
+    fn index_message_carries_per_field_text() {
+        let entry = PendingFtsIndex {
+            batch_id: 9,
+            collection: "docs".into(),
+            doc_id: "d1".into(),
+            fields: vec![
+                ("body".into(), "alpha beta".into()),
+                ("title".into(), "gamma".into()),
+            ],
+            seq: 4,
+        };
+        let msg = index_msg("lite-1", 7, 2, 4, entry);
+        assert_eq!(
+            msg.fields,
+            vec![
+                ("body".to_string(), "alpha beta".to_string()),
+                ("title".to_string(), "gamma".to_string()),
+            ]
+        );
+        assert_eq!(msg.collection, "docs");
+        assert_eq!(msg.doc_id, "d1");
+        assert_eq!(msg.batch_id, 9);
+        assert_eq!(msg.seq, 4);
     }
 
     #[test]
