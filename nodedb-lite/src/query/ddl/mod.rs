@@ -11,10 +11,12 @@ pub mod htap;
 pub mod kv;
 pub mod parser;
 pub(crate) mod search_index;
+pub(crate) mod sorted_index;
 pub mod strict;
 #[cfg(test)]
 mod tests;
 pub mod timeseries;
+mod tokens;
 
 pub(in crate::query) use convert::default_convert_schema;
 pub(crate) use parser::describe_strict_collection;

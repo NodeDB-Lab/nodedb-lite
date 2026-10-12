@@ -6,8 +6,8 @@ use std::collections::HashSet;
 
 use nodedb_fts::index::analyzer_config::analyzer_exists;
 
-use super::tokens::{Token, tokenize};
 use crate::error::LiteError;
+use crate::query::ddl::tokens::{Token, tokenize};
 
 #[derive(Debug, PartialEq)]
 pub(in crate::query) enum SearchIndexStatement {
@@ -46,7 +46,7 @@ fn leading_word(sql: &str) -> Option<(&str, &str)> {
 }
 
 fn parse(sql: &str) -> Result<SearchIndexStatement, LiteError> {
-    let tokens = tokenize(sql)?;
+    let tokens = tokenize(sql, "SEARCH INDEX")?;
     let mut parser = Parser {
         tokens,
         offset: 0,

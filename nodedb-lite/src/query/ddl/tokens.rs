@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! SQL token boundaries for SEARCH INDEX declarations.
+//! SQL token boundaries for the Lite-parsed statement families
+//! (`SEARCH INDEX`, `SORTED INDEX`).
 
 use crate::error::LiteError;
 
 #[derive(Debug, PartialEq)]
-pub(super) enum Token<'a> {
+pub(in crate::query::ddl) enum Token<'a> {
     Bare(&'a str),
     Identifier(&'a str),
     String(String),
@@ -16,12 +17,17 @@ pub(super) enum Token<'a> {
 }
 
 impl Token<'_> {
-    pub(super) fn keyword(&self, keyword: &str) -> bool {
+    pub(in crate::query::ddl) fn keyword(&self, keyword: &str) -> bool {
         matches!(self, Self::Bare(value) if value.eq_ignore_ascii_case(keyword))
     }
 }
 
-pub(super) fn tokenize(sql: &str) -> Result<Vec<Token<'_>>, LiteError> {
+/// Split `sql` into tokens. `statement` names the statement family in the
+/// error an unterminated quoted token returns.
+pub(in crate::query::ddl) fn tokenize<'a>(
+    sql: &'a str,
+    statement: &str,
+) -> Result<Vec<Token<'a>>, LiteError> {
     let mut tokens = Vec::new();
     let mut offset = 0;
     while offset < sql.len() {
@@ -42,7 +48,7 @@ pub(super) fn tokenize(sql: &str) -> Result<Vec<Token<'_>>, LiteError> {
             tokens.push(token);
             offset += ch.len_utf8();
         } else if ch == '\'' || ch == '"' {
-            let end = quoted_end(sql, offset, ch)?;
+            let end = quoted_end(sql, offset, ch, statement)?;
             let raw = &sql[offset..end];
             tokens.push(if ch == '"' {
                 Token::Identifier(raw)
@@ -63,7 +69,7 @@ pub(super) fn tokenize(sql: &str) -> Result<Vec<Token<'_>>, LiteError> {
     Ok(tokens)
 }
 
-fn quoted_end(sql: &str, start: usize, quote: char) -> Result<usize, LiteError> {
+fn quoted_end(sql: &str, start: usize, quote: char, statement: &str) -> Result<usize, LiteError> {
     let mut offset = start + 1;
     while offset < sql.len() {
         let rest = &sql[offset..];
@@ -78,7 +84,7 @@ fn quoted_end(sql: &str, start: usize, quote: char) -> Result<usize, LiteError> 
         }
     }
     Err(LiteError::Query(format!(
-        "SEARCH INDEX parse error at '{}': close the quoted token",
+        "{statement} parse error at '{}': close the quoted token",
         &sql[start..]
     )))
 }
@@ -90,7 +96,7 @@ mod tests {
     #[test]
     fn attached_punctuation_and_escaped_quotes_keep_token_boundaries() {
         assert_eq!(
-            tokenize("ON\t\"Case\"(body,'a''b');").expect("tokens"),
+            tokenize("ON\t\"Case\"(body,'a''b');", "TEST").expect("tokens"),
             vec![
                 Token::Bare("ON"),
                 Token::Identifier("\"Case\""),
@@ -107,7 +113,7 @@ mod tests {
     #[test]
     fn incomplete_quoted_tokens_return_errors() {
         for sql in ["'abc", "\"abc", "'abc''", "\"abc\"\""] {
-            assert!(tokenize(sql).is_err(), "{sql}");
+            assert!(tokenize(sql, "TEST").is_err(), "{sql}");
         }
     }
 }

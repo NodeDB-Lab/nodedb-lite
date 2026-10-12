@@ -70,6 +70,12 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 Err(error) => Err(error),
             });
         }
+        if let Some(statement) = super::sorted_index::parse_sorted_index_sql(sql) {
+            return Some(match statement {
+                Ok(statement) => self.handle_sorted_index(statement).await,
+                Err(error) => Err(error),
+            });
+        }
         let upper = sql.trim().to_uppercase();
 
         // ── Forms with no typed representation in the shared DDL parser ──

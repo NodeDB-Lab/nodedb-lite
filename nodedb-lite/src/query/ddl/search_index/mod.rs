@@ -4,6 +4,5 @@
 
 mod execute;
 mod parser;
-mod tokens;
 
 pub(in crate::query) use parser::{SearchIndexStatement, parse_search_index_ddl};
