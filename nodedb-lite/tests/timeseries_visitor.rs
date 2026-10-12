@@ -7,7 +7,13 @@
 //! that the bucketed-scan / bitemporal-cutoff logic holds for the engine
 //! primitives used by the scan handler.
 
+use nodedb_lite::error::LiteError;
+use nodedb_lite::query::timeseries_ops::reads::{
+    BucketScanParams, bucket_scan, reject_unsupported_gap_fill,
+};
+use nodedb_types::result::QueryResult;
 use nodedb_types::timeseries::{MetricSample, TimeRange};
+use nodedb_types::value::Value;
 
 /// Build a minimal `TimeseriesEngine` and populate it.
 fn ingest_samples(
@@ -96,4 +102,99 @@ fn ts_scan_system_as_of_cutoff() {
     assert_eq!(filtered.len(), 1, "only sample at t=1000 should survive");
     assert_eq!(filtered[0].0, 1000);
     assert!((filtered[0].1 - 1.0).abs() < 1e-9);
+}
+
+// ── Gap-fill strategies ───────────────────────────────────────────────────────
+
+/// Bucketed scan over data at 1000, 2000, 4000 with a 1000 ms bucket.
+fn gap_fill_scan(gap_fill: &str) -> Result<QueryResult, LiteError> {
+    let eng = ingest_samples("metrics", &[(1000, 10.0), (2000, 20.0), (4000, 40.0)]);
+    bucket_scan(
+        &eng,
+        "metrics",
+        &BucketScanParams {
+            range: TimeRange::new(0, 5000),
+            bucket_ms: 1000,
+            aggregates: &[],
+            gap_fill,
+            projection: &[],
+            limit: 0,
+        },
+    )
+}
+
+fn bucket_row(result: &QueryResult, bucket: i64) -> Vec<Value> {
+    result
+        .rows
+        .iter()
+        .find(|row| row[0] == Value::Integer(bucket))
+        .unwrap_or_else(|| panic!("no row for bucket {bucket}"))
+        .clone()
+}
+
+fn unsupported_detail(result: Result<QueryResult, LiteError>) -> String {
+    match result {
+        Err(LiteError::Unsupported { detail }) => detail,
+        Err(other) => panic!("expected Unsupported, got {other}"),
+        Ok(_) => panic!("expected Unsupported, got rows"),
+    }
+}
+
+#[test]
+fn gap_fill_linear_is_refused_naming_the_strategy() {
+    let detail = unsupported_detail(gap_fill_scan("linear"));
+    assert!(detail.contains("'linear'"), "detail: {detail}");
+    assert!(matches!(
+        reject_unsupported_gap_fill("linear"),
+        Err(LiteError::Unsupported { .. })
+    ));
+}
+
+#[test]
+fn gap_fill_next_is_refused_naming_the_strategy() {
+    let detail = unsupported_detail(gap_fill_scan("next"));
+    assert!(detail.contains("'next'"), "detail: {detail}");
+    assert!(matches!(
+        reject_unsupported_gap_fill("next"),
+        Err(LiteError::Unsupported { .. })
+    ));
+}
+
+#[test]
+fn gap_fill_unknown_strategy_is_refused_naming_the_strategy() {
+    let detail = unsupported_detail(gap_fill_scan("cubic"));
+    assert!(detail.contains("'cubic'"), "detail: {detail}");
+}
+
+#[test]
+fn gap_fill_prev_carries_the_last_bucket_forward() {
+    let result = gap_fill_scan("prev").expect("prev scan");
+    let filled = bucket_row(&result, 3000);
+    let previous = bucket_row(&result, 2000);
+    assert_eq!(filled[1..], previous[1..]);
+    assert_eq!(filled[1], Value::Integer(1));
+}
+
+#[test]
+fn gap_fill_null_and_none_emit_null_for_missing_buckets() {
+    for strategy in ["null", "none", ""] {
+        let result = gap_fill_scan(strategy).expect("scan");
+        let filled = bucket_row(&result, 3000);
+        assert!(
+            filled[1..].iter().all(|v| *v == Value::Null),
+            "strategy {strategy:?} filled with {filled:?}"
+        );
+        let present = bucket_row(&result, 2000);
+        assert_eq!(present[1], Value::Integer(1));
+    }
+}
+
+#[test]
+fn gap_fill_numeric_literal_fills_missing_buckets() {
+    let result = gap_fill_scan("7.5").expect("numeric scan");
+    let filled = bucket_row(&result, 3000);
+    assert!(
+        filled[1..].iter().all(|v| *v == Value::Float(7.5)),
+        "filled with {filled:?}"
+    );
 }

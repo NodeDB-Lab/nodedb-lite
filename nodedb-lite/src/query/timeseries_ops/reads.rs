@@ -50,6 +50,8 @@ pub fn scan<S: StorageEngine>(
         valid_at_ms,
     } = params;
 
+    reject_unsupported_gap_fill(&gap_fill)?;
+
     let range = TimeRange::new(time_range.0, time_range.1);
 
     let ts_engine = engine
@@ -93,12 +95,14 @@ pub fn scan<S: StorageEngine>(
         bucket_scan(
             &ts_engine,
             collection,
-            range,
-            bucket_interval_ms,
-            &aggregates,
-            &gap_fill,
-            &projection,
-            limit,
+            &BucketScanParams {
+                range,
+                bucket_ms: bucket_interval_ms,
+                aggregates: &aggregates,
+                gap_fill: &gap_fill,
+                projection: &projection,
+                limit,
+            },
         )
     } else {
         raw_scan(raw, &projection, limit)
@@ -107,17 +111,67 @@ pub fn scan<S: StorageEngine>(
 
 // ── Bucketed scan ─────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
-fn bucket_scan(
+/// Parameters of a bucketed scan.
+pub struct BucketScanParams<'a> {
+    pub range: TimeRange,
+    pub bucket_ms: i64,
+    pub aggregates: &'a [(String, String)],
+    pub gap_fill: &'a str,
+    pub projection: &'a [String],
+    pub limit: usize,
+}
+
+/// A gap-fill strategy Lite implements.
+enum GapFill {
+    Null,
+    Prev,
+    Literal(f64),
+}
+
+fn parse_gap_fill(gap_fill: &str) -> Result<GapFill, LiteError> {
+    match gap_fill {
+        "" | "null" | "none" => Ok(GapFill::Null),
+        "prev" => Ok(GapFill::Prev),
+        "linear" | "next" => Err(LiteError::Unsupported {
+            detail: format!(
+                "gap_fill = '{gap_fill}' is not supported on the timeseries engine in Lite; \
+                 use 'prev', 'null', or a numeric literal"
+            ),
+        }),
+        literal => match literal.parse::<f64>() {
+            Ok(v) if v.is_finite() => Ok(GapFill::Literal(v)),
+            _ => Err(LiteError::Unsupported {
+                detail: format!(
+                    "gap_fill = '{gap_fill}' is not a known strategy on the timeseries \
+                     engine in Lite; use 'prev', 'null', or a numeric literal"
+                ),
+            }),
+        },
+    }
+}
+
+/// Refuse a gap-fill strategy Lite cannot apply.
+///
+/// Accepts `""`, `"null"`, `"none"`, `"prev"`, and a finite numeric literal.
+pub fn reject_unsupported_gap_fill(gap_fill: &str) -> Result<(), LiteError> {
+    parse_gap_fill(gap_fill).map(|_| ())
+}
+
+/// Aggregate the samples of `collection` into buckets and fill empty buckets.
+pub fn bucket_scan(
     ts_engine: &TimeseriesEngine,
     collection: &str,
-    range: TimeRange,
-    bucket_ms: i64,
-    aggregates: &[(String, String)],
-    gap_fill: &str,
-    projection: &[String],
-    limit: usize,
+    params: &BucketScanParams<'_>,
 ) -> Result<QueryResult, LiteError> {
+    let BucketScanParams {
+        range,
+        bucket_ms,
+        aggregates,
+        gap_fill,
+        projection,
+        limit,
+    } = *params;
+    let gap_fill = parse_gap_fill(gap_fill)?;
     // aggregate_by_bucket returns (bucket_start, count, sum, min, max).
     let buckets = ts_engine.aggregate_by_bucket(collection, &range, bucket_ms);
 
@@ -186,28 +240,16 @@ fn bucket_scan(
             r
         } else {
             // Gap bucket — apply gap-fill strategy.
-            let gap_vals: Vec<Value> = match gap_fill {
-                "" | "null" | "none" => agg_ops.iter().map(|_| Value::Null).collect(),
-                "prev" => {
+            let gap_vals: Vec<Value> = match &gap_fill {
+                GapFill::Null => agg_ops.iter().map(|_| Value::Null).collect(),
+                GapFill::Prev => {
                     if let Some(prev) = &prev_row {
                         prev[1..].to_vec()
                     } else {
                         agg_ops.iter().map(|_| Value::Null).collect()
                     }
                 }
-                "linear" | "next" => {
-                    // For simplicity, emit null; true linear/next interpolation
-                    // requires a forward pass. The current engine is single-pass.
-                    agg_ops.iter().map(|_| Value::Null).collect()
-                }
-                literal => {
-                    // Try to parse as a numeric literal for all agg columns.
-                    let v = literal
-                        .parse::<f64>()
-                        .map(Value::Float)
-                        .unwrap_or_else(|_| Value::String(literal.to_string()));
-                    agg_ops.iter().map(|_| v.clone()).collect()
-                }
+                GapFill::Literal(v) => agg_ops.iter().map(|_| Value::Float(*v)).collect(),
             };
             let mut r = vec![Value::Integer(*bucket_start)];
             r.extend(gap_vals);

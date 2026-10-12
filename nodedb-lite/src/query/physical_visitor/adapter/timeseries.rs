@@ -59,6 +59,10 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                 SystemTimeScope::AsOf(ms) => Some(*ms),
                 _ => None,
             };
+            // Lite's bucketed scan fills gaps in a single pass. Interpolating
+            // strategies need a forward pass, so they are refused up front
+            // rather than answered with NULL buckets.
+            timeseries_ops::reads::reject_unsupported_gap_fill(gap_fill)?;
             let col = collection.clone();
             let tr = *time_range;
             let proj = projection.clone();
