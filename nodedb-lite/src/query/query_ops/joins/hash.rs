@@ -5,7 +5,7 @@
 //! Bitmap sub-plans are executed first when present; post-aggregates and
 //! projection are applied after the join.
 
-use nodedb_physical::physical_plan::query::{AggregateSpec, JoinProjection};
+use nodedb_physical::physical_plan::query::AggregateSpec;
 use nodedb_query::expr::GroupKeySpec;
 use nodedb_types::result::QueryResult;
 
@@ -16,43 +16,33 @@ use crate::storage::engine::StorageEngine;
 use super::common::{
     apply_filters, apply_projection, decode_filters, hash_join, maps_to_result, scan_collection,
 };
+use super::spec::{CollectionSide, JoinSpec, PostAggregate};
 use crate::query::query_ops::aggregate::execute_aggregate;
 
-#[allow(clippy::too_many_arguments)]
 pub async fn execute_hash_join<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
-    left_collection: &str,
-    right_collection: &str,
-    left_alias: Option<&str>,
-    right_alias: Option<&str>,
-    on: &[(String, String)],
-    join_type: &str,
-    limit: usize,
-    post_group_by: &[String],
-    post_aggregates: &[(String, String)],
-    projection: &[JoinProjection],
-    post_filters: &[u8],
+    left: CollectionSide<'_>,
+    right: CollectionSide<'_>,
+    spec: &JoinSpec<'_>,
+    post: &PostAggregate<'_>,
 ) -> Result<QueryResult, LiteError> {
-    let left_rows = scan_collection(engine, left_collection).await?;
-    let right_rows = scan_collection(engine, right_collection).await?;
+    let left_rows = scan_collection(engine, left.collection).await?;
+    let right_rows = scan_collection(engine, right.collection).await?;
 
-    let left_keys: Vec<String> = on.iter().map(|(l, _)| l.clone()).collect();
-    let right_keys: Vec<String> = on.iter().map(|(_, r)| r.clone()).collect();
-
-    let effective_limit = if limit == 0 { usize::MAX } else { limit };
+    let (left_keys, right_keys) = spec.split_keys();
 
     let joined = hash_join(
         right_rows,
         left_rows,
         &right_keys,
         &left_keys,
-        join_type,
-        right_alias,
-        effective_limit,
+        spec.join_type,
+        right.alias,
+        spec.effective_limit(),
     );
 
     // Apply left alias prefix to left columns (post-join).
-    let joined = if let Some(alias) = left_alias {
+    let joined = if let Some(alias) = left.alias {
         joined
             .into_iter()
             .map(|row| {
@@ -72,13 +62,14 @@ pub async fn execute_hash_join<S: StorageEngine>(
         joined
     };
 
-    let pf = decode_filters(post_filters)?;
+    let pf = decode_filters(spec.post_filters)?;
     let joined = apply_filters(joined, &pf)?;
 
-    let joined = apply_projection(joined, projection);
+    let joined = apply_projection(joined, spec.projection);
 
-    if !post_group_by.is_empty() || !post_aggregates.is_empty() {
-        let agg_specs: Vec<AggregateSpec> = post_aggregates
+    if !post.group_by.is_empty() || !post.aggregates.is_empty() {
+        let agg_specs: Vec<AggregateSpec> = post
+            .aggregates
             .iter()
             .map(|(func, field)| AggregateSpec {
                 function: func.clone(),
@@ -90,7 +81,7 @@ pub async fn execute_hash_join<S: StorageEngine>(
             .collect();
         // Post-join grouping is by bare output column name, so the lift is lossless.
         let group_specs: Vec<GroupKeySpec> =
-            post_group_by.iter().map(GroupKeySpec::column).collect();
+            post.group_by.iter().map(GroupKeySpec::column).collect();
         return execute_aggregate(joined, &group_specs, &agg_specs, &[], &[], &[], &[]);
     }
 

@@ -4,9 +4,10 @@
 
 use nodedb_physical::PhysicalTaskVisitor;
 use nodedb_physical::physical_plan::TimeseriesOp;
+use nodedb_sql::TimeseriesScanVisitArgs;
 use nodedb_sql::temporal::TemporalScope;
 use nodedb_sql::types::filter::Filter;
-use nodedb_sql::types::query::{AggregateExpr, Projection, SortKey};
+use nodedb_sql::types::query::AggregateExpr;
 use nodedb_sql::types_expr::SqlExpr;
 use nodedb_sql::types_expr::SqlValue;
 
@@ -56,22 +57,24 @@ fn convert_aggregates(aggregates: &[AggregateExpr]) -> Vec<(String, String)> {
 // ── TimeseriesScan ────────────────────────────────────────────────────────────
 
 /// Lower `SqlPlan::TimeseriesScan` to `TimeseriesOp::Scan`.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn lower_timeseries_scan<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
-    collection: &str,
-    time_range: (i64, i64),
-    bucket_interval_ms: i64,
-    group_by: &[String],
-    aggregates: &[AggregateExpr],
-    filters: &[Filter],
-    projection: &[Projection],
-    gap_fill: &str,
-    limit: usize,
-    _tiered: bool,
-    temporal: &TemporalScope,
-    sort_keys: &[SortKey],
+    args: TimeseriesScanVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
+    let TimeseriesScanVisitArgs {
+        collection,
+        time_range,
+        bucket_interval_ms,
+        group_by,
+        aggregates,
+        filters,
+        projection,
+        gap_fill,
+        limit,
+        sort_keys,
+        temporal,
+        ..
+    } = args;
     let filter_bytes = encode_filters(filters)?;
     let proj_cols = projection_names(projection, "timeseries scan")?;
     let agg_pairs = convert_aggregates(aggregates);
@@ -270,18 +273,20 @@ mod tests {
         let engine = make_engine().await;
         let result = super::lower_timeseries_scan(
             &engine,
-            "metrics",
-            (0, i64::MAX),
-            0,
-            &[],
-            &[],
-            &[],
-            &[],
-            "",
-            100,
-            false,
-            &TemporalScope::default(),
-            &[],
+            nodedb_sql::TimeseriesScanVisitArgs {
+                collection: "metrics",
+                time_range: (0, i64::MAX),
+                bucket_interval_ms: 0,
+                group_by: &[],
+                aggregates: &[],
+                filters: &[],
+                projection: &[],
+                gap_fill: "",
+                limit: 100,
+                sort_keys: &[],
+                tiered: false,
+                temporal: &TemporalScope::default(),
+            },
         );
         assert!(result.is_ok());
     }

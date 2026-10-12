@@ -7,13 +7,14 @@
 use nodedb_array::query::slice::{DimRange, Slice};
 use nodedb_array::schema::dim_spec::DimType;
 use nodedb_array::types::domain::DomainBound;
-use nodedb_sql::types::filter::Filter;
-use nodedb_sql::types::plan::{ArrayPrefilter, VectorAnnOptions};
+use nodedb_sql::VectorSearchVisitArgs;
+use nodedb_sql::types::plan::ArrayPrefilter;
 use nodedb_sql::types_array::ArrayCoordLiteral;
-use nodedb_sql::types_expr::SqlPayloadAtom;
 use nodedb_types::result::QueryResult;
-use nodedb_types::vector_distance::DistanceMetric;
 
+use crate::engine::vector::search::{
+    AnnTuning, SearchFilter, VectorSearchRequest, run_vector_search,
+};
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::filter_convert::sql_filters_to_metadata;
@@ -100,21 +101,32 @@ async fn build_prefilter_bitmap<S: StorageEngine>(
     Ok(Some(bitmap))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn lower_vector_search<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
-    collection: &str,
-    field: &str,
-    query_vector: &[f32],
-    top_k: usize,
-    ef_search: usize,
-    metric: DistanceMetric,
-    filters: &[Filter],
-    array_prefilter: Option<&ArrayPrefilter>,
-    ann_options: &VectorAnnOptions,
-    skip_payload_fetch: bool,
-    payload_filters: &[SqlPayloadAtom],
+    args: VectorSearchVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
+    let VectorSearchVisitArgs {
+        collection,
+        field,
+        query_vector,
+        top_k,
+        ef_search,
+        metric,
+        filters,
+        array_prefilter,
+        ann_options,
+        skip_payload_fetch,
+        payload_filters,
+        pk_prefilter,
+    } = args;
+    if pk_prefilter.is_some() {
+        return Err(LiteError::Unsupported {
+            detail: format!(
+                "vector search on '{collection}' with a primary-key prefilter (pk_prefilter): \
+                 Lite ranks every row of the vector index"
+            ),
+        });
+    }
     let prefilter = array_prefilter.cloned();
     // Complex QExpr predicates from FilterExpr::Expr are not serializable to the
     // vector search pre-filter; only the primitive MetadataFilter is pushed down.
@@ -146,20 +158,26 @@ pub(super) fn lower_vector_search<'a, S: StorageEngine + 'a>(
                     })?,
                 )
             };
-        let results = crate::engine::vector::search::run_vector_search(
+        let results = run_vector_search(
             &engine.vector_state,
             &engine.crdt,
-            &index_key,
-            &collection,
-            &query_vector,
-            top_k,
-            metadata_filter.as_ref(),
-            &[],
-            prefilter_bitmap.as_ref(),
-            Some(&ann_options),
-            skip_payload_fetch,
-            Some(metric),
-            Some(ef_search),
+            VectorSearchRequest {
+                index_key: &index_key,
+                collection: &collection,
+                query: &query_vector,
+                k: top_k,
+                filter: SearchFilter {
+                    metadata: metadata_filter.as_ref(),
+                    exclude_fields: &[],
+                    prefilter_bitmap: prefilter_bitmap.as_ref(),
+                },
+                tuning: AnnTuning {
+                    options: Some(&ann_options),
+                    metric: Some(metric),
+                    ef_search: Some(ef_search),
+                },
+                skip_payload_fetch,
+            },
         )
         .await
         .map_err(|e| LiteError::Query(e.to_string()))?;

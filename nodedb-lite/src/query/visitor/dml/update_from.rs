@@ -5,10 +5,8 @@
 use std::collections::HashMap;
 
 use nodedb_physical::physical_plan::document::types::UpdateValue;
+use nodedb_sql::UpdateFromVisitArgs;
 use nodedb_sql::types::SqlPlan;
-use nodedb_sql::types::filter::Filter;
-use nodedb_sql::types::query::EngineType;
-use nodedb_sql::types_expr::SqlExpr;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
@@ -34,19 +32,19 @@ use super::rows::result_to_maps;
 /// fields readable by their qualified name. Every post-image is resolved
 /// before the first write, so an assignment that fails leaves every row
 /// unchanged.
-#[allow(clippy::too_many_arguments)]
 pub(in crate::query::visitor) fn lower_update_from<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     permit: &'a crate::engine::fts::coordinator::TextMutationPermit,
-    collection: &str,
-    _engine_type: EngineType,
-    source: &SqlPlan,
-    target_join_col: &str,
-    source_join_col: &str,
-    assignments: &[(String, SqlExpr)],
-    _target_filters: &[Filter],
-    _returning: bool,
+    args: UpdateFromVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
+    let UpdateFromVisitArgs {
+        collection,
+        source,
+        target_join_col,
+        source_join_col,
+        assignments,
+        ..
+    } = args;
     let target = collection.to_string();
     let source_refs = source_refs(source);
     let source_alias = source_refs.first().cloned().unwrap_or_default();

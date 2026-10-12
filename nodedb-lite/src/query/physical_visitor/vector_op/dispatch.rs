@@ -13,7 +13,9 @@ use nodedb_physical::physical_plan::VectorOp;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
-use crate::engine::vector::search::run_vector_search;
+use crate::engine::vector::search::{
+    AnnTuning, SearchFilter, VectorSearchRequest, run_vector_search,
+};
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
 use crate::query::payload_filter::{and_metadata, payload_atoms_to_metadata};
@@ -88,17 +90,22 @@ where
                 let results = run_vector_search(
                     &vector_state,
                     &crdt,
-                    &index_key,
-                    collection.as_str(),
-                    &query,
-                    k,
-                    metadata_filter.as_ref(),
-                    &[],
-                    None,
-                    None,
-                    skip_payload_fetch,
-                    Some(metric),
-                    Some(ef),
+                    VectorSearchRequest {
+                        index_key: &index_key,
+                        collection: collection.as_str(),
+                        query: &query,
+                        k,
+                        filter: SearchFilter {
+                            metadata: metadata_filter.as_ref(),
+                            ..SearchFilter::default()
+                        },
+                        tuning: AnnTuning {
+                            metric: Some(metric),
+                            ef_search: Some(ef),
+                            ..AnnTuning::default()
+                        },
+                        skip_payload_fetch,
+                    },
                 )
                 .await
                 .map_err(|e| LiteError::Query(e.to_string()))?;

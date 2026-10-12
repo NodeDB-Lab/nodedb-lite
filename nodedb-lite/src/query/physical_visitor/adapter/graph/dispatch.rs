@@ -219,7 +219,7 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             fusion_match::rag_fusion(
                 engine,
                 collection.as_str(),
-                fusion_match::RagFusionArgs {
+                crate::query::graph_ops::fusion::RagFusionSpec {
                     query_vector,
                     vector_top_k: *vector_top_k,
                     edge_label: edge_label.as_deref(),

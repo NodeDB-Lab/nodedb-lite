@@ -24,23 +24,51 @@ use nodedb_sql::types::SqlPlan;
 use crate::query::query_ops::lateral_top_k::{execute_nested_plan, prefix_row};
 use crate::storage::engine::StorageEngine;
 
+/// Inputs of a LATERAL nested-loop join over a SQL inner plan.
+pub(crate) struct LateralLoopSqlSpec<'a> {
+    pub outer_alias: &'a str,
+    pub inner_sql: &'a SqlPlan,
+    pub correlation_predicates: &'a [(String, String)],
+    pub lateral_alias: &'a str,
+    pub projection: &'a [JoinProjection],
+    pub left_join: bool,
+    pub outer_row_cap: usize,
+}
+
+/// Inputs of a LATERAL nested-loop join over an inner collection.
+///
+/// `inner_filters` holds msgpack-encoded `MetadataFilter` bytes. An empty
+/// slice means no filter.
+pub struct LateralLoopSpec<'a> {
+    pub outer_alias: &'a str,
+    pub inner_collection: &'a str,
+    pub inner_filters: &'a [u8],
+    pub correlation_predicates: &'a [(String, String)],
+    pub lateral_alias: &'a str,
+    pub projection: &'a [JoinProjection],
+    pub left_join: bool,
+    pub outer_row_cap: usize,
+}
+
 /// SQL-plan-aware entry for `LiteVisitor::lateral_loop`.
 ///
 /// Executes `outer_sql` via `engine.execute_plan`, then for each outer row
 /// re-executes `inner_sql` with correlated equality filters injected.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_lateral_loop_sql<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     permit: Option<&crate::engine::fts::coordinator::TextMutationPermit>,
     outer_sql: &SqlPlan,
-    outer_alias: &str,
-    inner_sql: &SqlPlan,
-    correlation_predicates: &[(String, String)],
-    lateral_alias: &str,
-    projection: &[JoinProjection],
-    left_join: bool,
-    outer_row_cap: usize,
+    spec: LateralLoopSqlSpec<'_>,
 ) -> Result<QueryResult, LiteError> {
+    let LateralLoopSqlSpec {
+        outer_alias,
+        inner_sql,
+        correlation_predicates,
+        lateral_alias,
+        projection,
+        left_join,
+        outer_row_cap,
+    } = spec;
     use crate::query::query_ops::joins::common::rows_to_maps;
 
     let outer_result = engine.execute_plan_admitted(outer_sql, permit).await?;
@@ -102,19 +130,21 @@ pub(crate) async fn execute_lateral_loop_sql<S: StorageEngine>(
 /// filters from `correlation_predicates` and scans `inner_collection`.
 /// Emits every matching inner row merged with the outer row.  Supports LEFT
 /// join semantics.
-#[allow(clippy::too_many_arguments)]
 pub async fn execute_lateral_loop<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     outer_plan: &PhysicalPlan,
-    outer_alias: &str,
-    inner_collection: &str,
-    inner_filters: &[u8],
-    correlation_predicates: &[(String, String)],
-    lateral_alias: &str,
-    projection: &[JoinProjection],
-    left_join: bool,
-    outer_row_cap: usize,
+    spec: LateralLoopSpec<'_>,
 ) -> Result<QueryResult, LiteError> {
+    let LateralLoopSpec {
+        outer_alias,
+        inner_collection,
+        inner_filters,
+        correlation_predicates,
+        lateral_alias,
+        projection,
+        left_join,
+        outer_row_cap,
+    } = spec;
     let outer_rows = execute_nested_plan(engine, outer_plan).await?;
 
     if outer_row_cap > 0 && outer_rows.len() > outer_row_cap {

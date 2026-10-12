@@ -18,22 +18,38 @@ use crate::query::query_ops::joins::common::{
 };
 use crate::storage::engine::StorageEngine;
 
+/// Inputs of a recursive collection scan.
+///
+/// The filter fields hold msgpack-encoded `MetadataFilter` bytes. An empty
+/// slice means no filter.
+pub struct RecursiveScanSpec<'a> {
+    pub collection: &'a str,
+    pub base_filters: &'a [u8],
+    pub recursive_filters: &'a [u8],
+    pub join_link: Option<&'a (String, String)>,
+    pub max_iterations: usize,
+    pub distinct: bool,
+    pub limit: usize,
+}
+
 /// Iterative fixed-point CTE scan over a collection.
 ///
 /// Executes the base query once, then repeatedly extends the working set by
 /// joining the collection against it via `join_link`, stopping when no new
 /// rows emerge, the iteration cap is hit, or the `limit` is reached.
-#[allow(clippy::too_many_arguments)]
 pub async fn execute_recursive_scan<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
-    collection: &str,
-    base_filters: &[u8],
-    recursive_filters: &[u8],
-    join_link: Option<&(String, String)>,
-    max_iterations: usize,
-    distinct: bool,
-    limit: usize,
+    spec: RecursiveScanSpec<'_>,
 ) -> Result<QueryResult, LiteError> {
+    let RecursiveScanSpec {
+        collection,
+        base_filters,
+        recursive_filters,
+        join_link,
+        max_iterations,
+        distinct,
+        limit,
+    } = spec;
     let base_parsed = decode_filters(base_filters)?;
     let rec_parsed = decode_filters(recursive_filters)?;
 

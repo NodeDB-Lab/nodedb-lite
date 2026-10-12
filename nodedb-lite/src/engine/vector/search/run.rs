@@ -21,34 +21,74 @@ use super::filter::allowed_nodes;
 use super::hydrate::Hydration;
 use super::lazy_load;
 
-/// Run a vector similarity search against the named HNSW index.
+/// Metadata and node-set restrictions applied to a vector search.
+///
+/// `exclude_fields` names the vector-internal row fields: they never reach
+/// result metadata or the metadata filter.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SearchFilter<'a> {
+    pub metadata: Option<&'a MetadataFilter>,
+    pub exclude_fields: &'a [&'a str],
+    pub prefilter_bitmap: Option<&'a roaring::RoaringBitmap>,
+}
+
+/// Search-time ANN tuning.
+///
+/// `ef_search` is the caller-supplied dynamic-list size for the HNSW search.
+/// `None` falls through to the engine default. `options.ef_search_override`
+/// (if set) takes precedence over both.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct AnnTuning<'a> {
+    pub options: Option<&'a nodedb_types::VectorAnnOptions>,
+    pub metric: Option<nodedb_types::vector_distance::DistanceMetric>,
+    pub ef_search: Option<usize>,
+}
+
+/// One vector similarity search.
 ///
 /// `index_key` is the HNSW bucket key (e.g. `"collection"` or
 /// `"collection:field_name"`). `collection` is the CRDT collection name
-/// used to fetch metadata. `exclude_fields` names the vector-internal row
-/// fields: they never reach result metadata or the metadata filter.
-#[allow(clippy::too_many_arguments)]
+/// used to fetch metadata.
+pub(crate) struct VectorSearchRequest<'a> {
+    pub index_key: &'a str,
+    pub collection: &'a str,
+    pub query: &'a [f32],
+    pub k: usize,
+    pub filter: SearchFilter<'a>,
+    pub tuning: AnnTuning<'a>,
+    pub skip_payload_fetch: bool,
+}
+
+/// Run a vector similarity search against the HNSW index named by
+/// `request.index_key`.
 pub(crate) async fn run_vector_search<S>(
     vector_state: &Arc<VectorState<S>>,
     crdt: &Arc<Mutex<CrdtEngine>>,
-    index_key: &str,
-    collection: &str,
-    query: &[f32],
-    k: usize,
-    filter: Option<&MetadataFilter>,
-    exclude_fields: &[&str],
-    prefilter_bitmap: Option<&roaring::RoaringBitmap>,
-    ann_options: Option<&nodedb_types::VectorAnnOptions>,
-    skip_payload_fetch: bool,
-    metric: Option<nodedb_types::vector_distance::DistanceMetric>,
-    // Caller-supplied dynamic-list size for the HNSW search. `None` falls
-    // through to the engine default. `ann_options.ef_search_override` (if
-    // set) takes precedence over both.
-    ef_search_caller: Option<usize>,
+    request: VectorSearchRequest<'_>,
 ) -> NodeDbResult<Vec<SearchResult>>
 where
     S: StorageEngine,
 {
+    let VectorSearchRequest {
+        index_key,
+        collection,
+        query,
+        k,
+        filter:
+            SearchFilter {
+                metadata: filter,
+                exclude_fields,
+                prefilter_bitmap,
+            },
+        tuning:
+            AnnTuning {
+                options: ann_options,
+                metric,
+                ef_search: ef_search_caller,
+            },
+        skip_payload_fetch,
+    } = request;
+
     // ── ANN option validation + scaling ──────────────────────────────────────
 
     let default_opts;

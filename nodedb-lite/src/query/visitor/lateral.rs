@@ -3,10 +3,10 @@
 //! LateralTopK, LateralLoop.
 
 use nodedb_physical::physical_plan::SortKeySpec;
-use nodedb_sql::types::SqlPlan;
 use nodedb_sql::types::filter::Filter;
-use nodedb_sql::types::query::{Projection, SortKey};
+use nodedb_sql::types::query::SortKey;
 use nodedb_sql::types_expr::SqlExpr;
+use nodedb_sql::{LateralLoopVisitArgs, LateralTopKVisitArgs};
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
@@ -64,21 +64,23 @@ fn sort_key_to_spec(k: &SortKey) -> SortKeySpec {
 /// materialises the outer rows by calling `engine.execute_physical_plan(outer_plan)`,
 /// which dispatches to `LiteDataPlaneVisitor`. To close the loop, we produce
 /// the physical outer plan by visiting the SQL outer plan here.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn lower_lateral_top_k<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     permit: Option<&'a crate::engine::fts::coordinator::TextMutationPermit>,
-    outer: &SqlPlan,
-    outer_alias: Option<&str>,
-    inner_collection: &str,
-    inner_filters: &[Filter],
-    inner_order_by: &[SortKey],
-    inner_limit: usize,
-    correlation_keys: &[(String, String)],
-    lateral_alias: &str,
-    projection: &[Projection],
-    left_join: bool,
+    args: LateralTopKVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
+    let LateralTopKVisitArgs {
+        outer,
+        outer_alias,
+        inner_collection,
+        inner_filters,
+        inner_order_by,
+        inner_limit,
+        correlation_keys,
+        lateral_alias,
+        projection,
+        left_join,
+    } = args;
     let outer_sql = outer.clone();
     let outer_alias_str = outer_alias.unwrap_or("outer").to_string();
     let inner_col = inner_collection.to_string();
@@ -91,20 +93,22 @@ pub(super) fn lower_lateral_top_k<'a, S: StorageEngine + 'a>(
     let lj = left_join;
 
     Ok(Box::pin(async move {
-        use crate::query::query_ops::lateral_top_k::execute_lateral_top_k_sql;
+        use crate::query::query_ops::lateral_top_k::{LateralTopKSpec, execute_lateral_top_k_sql};
         execute_lateral_top_k_sql(
             engine,
             permit,
             &outer_sql,
-            &outer_alias_str,
-            &inner_col,
-            &inner_filt_bytes,
-            &inner_ob,
-            inner_lim,
-            &corr_keys,
-            &lat_alias,
-            &proj,
-            lj,
+            LateralTopKSpec {
+                outer_alias: &outer_alias_str,
+                inner_collection: &inner_col,
+                inner_filters: &inner_filt_bytes,
+                inner_order_by: &inner_ob,
+                inner_limit: inner_lim,
+                correlation_keys: &corr_keys,
+                lateral_alias: &lat_alias,
+                projection: &proj,
+                left_join: lj,
+            },
         )
         .await
     }))
@@ -113,19 +117,21 @@ pub(super) fn lower_lateral_top_k<'a, S: StorageEngine + 'a>(
 // ── LateralLoop ───────────────────────────────────────────────────────────────
 
 /// Lower `SqlPlan::LateralLoop` to `QueryOp::LateralLoop`.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn lower_lateral_loop<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     permit: Option<&'a crate::engine::fts::coordinator::TextMutationPermit>,
-    outer: &SqlPlan,
-    outer_alias: Option<&str>,
-    inner: &SqlPlan,
-    correlation_predicates: &[(String, String)],
-    lateral_alias: &str,
-    projection: &[Projection],
-    outer_row_cap: usize,
-    left_join: bool,
+    args: LateralLoopVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
+    let LateralLoopVisitArgs {
+        outer,
+        outer_alias,
+        inner,
+        correlation_predicates,
+        lateral_alias,
+        projection,
+        outer_row_cap,
+        left_join,
+    } = args;
     let outer_sql = outer.clone();
     let outer_alias_str = outer_alias.unwrap_or("outer").to_string();
     let inner_sql = inner.clone();
@@ -136,18 +142,20 @@ pub(super) fn lower_lateral_loop<'a, S: StorageEngine + 'a>(
     let lj = left_join;
 
     Ok(Box::pin(async move {
-        use crate::query::query_ops::lateral_loop::execute_lateral_loop_sql;
+        use crate::query::query_ops::lateral_loop::{LateralLoopSqlSpec, execute_lateral_loop_sql};
         execute_lateral_loop_sql(
             engine,
             permit,
             &outer_sql,
-            &outer_alias_str,
-            &inner_sql,
-            &corr_preds,
-            &lat_alias,
-            &proj,
-            lj,
-            cap,
+            LateralLoopSqlSpec {
+                outer_alias: &outer_alias_str,
+                inner_sql: &inner_sql,
+                correlation_predicates: &corr_preds,
+                lateral_alias: &lat_alias,
+                projection: &proj,
+                left_join: lj,
+                outer_row_cap: cap,
+            },
         )
         .await
     }))
@@ -159,6 +167,7 @@ mod tests {
 
     use nodedb_sql::types::SqlPlan;
     use nodedb_sql::types::query::EngineType;
+    use nodedb_sql::{LateralLoopVisitArgs, LateralTopKVisitArgs};
 
     use crate::PagedbStorageMem;
     use crate::query::engine::{LiteQueryEngine, LiteQueryEngineParams};
@@ -242,16 +251,18 @@ mod tests {
         let result = super::lower_lateral_top_k(
             &engine,
             None,
-            &outer,
-            Some("u"),
-            "orders",
-            &[],
-            &[],
-            3,
-            &[("id".to_string(), "user_id".to_string())],
-            "o",
-            &[],
-            false,
+            LateralTopKVisitArgs {
+                outer: &outer,
+                outer_alias: Some("u"),
+                inner_collection: "orders",
+                inner_filters: &[],
+                inner_order_by: &[],
+                inner_limit: 3,
+                correlation_keys: &[("id".to_string(), "user_id".to_string())],
+                lateral_alias: "o",
+                projection: &[],
+                left_join: false,
+            },
         );
         assert!(result.is_ok());
     }
@@ -264,14 +275,16 @@ mod tests {
         let result = super::lower_lateral_loop(
             &engine,
             None,
-            &outer,
-            Some("d"),
-            &inner,
-            &[("id".to_string(), "dept_id".to_string())],
-            "e",
-            &[],
-            1000,
-            false,
+            LateralLoopVisitArgs {
+                outer: &outer,
+                outer_alias: Some("d"),
+                inner: &inner,
+                correlation_predicates: &[("id".to_string(), "dept_id".to_string())],
+                lateral_alias: "e",
+                projection: &[],
+                outer_row_cap: 1000,
+                left_join: false,
+            },
         );
         assert!(result.is_ok());
     }

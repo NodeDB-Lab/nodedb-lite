@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use nodedb_graph::params::{AlgoParams, GraphAlgorithm};
 use nodedb_mem::ScopedMemory;
 use nodedb_types::Namespace;
+use nodedb_types::id::EdgeId;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
@@ -49,6 +50,24 @@ fn parse_edge_key(edge_key: &str) -> Option<(&str, &str, &str)> {
     Some((src, dst, label))
 }
 
+/// Parse a history edge key into owned `(src, dst, label)`.
+///
+/// History rows carry one of two edge-key forms. The `NodeDb` trait and
+/// batch paths write the `EdgeId` display form. The SQL path writes
+/// `{src}->{dst}:{label}`. The `EdgeId` form is length-prefixed, so it is
+/// tried first.
+fn parse_history_edge_key(edge_key: &str) -> Option<(String, String, String)> {
+    if let Ok(id) = edge_key.parse::<EdgeId>() {
+        return Some((
+            id.src.as_str().to_owned(),
+            id.dst.as_str().to_owned(),
+            id.label,
+        ));
+    }
+    parse_edge_key(edge_key)
+        .map(|(src, dst, label)| (src.to_owned(), dst.to_owned(), label.to_owned()))
+}
+
 /// Build a snapshot CSR from history at `system_as_of_ms`.
 ///
 /// Reads all edge history for `collection` and materialises the set of
@@ -71,14 +90,13 @@ async fn build_temporal_snapshot<S: StorageEngine>(
 
     let mut snapshot = CsrIndex::new(memory.clone());
 
-    // Group by edge key (strip the collection prefix and trailing 8-byte timestamp).
+    // Group by edge key (strip the collection prefix, the `:` separator, and
+    // the trailing 8-byte timestamp).
     // Key layout: `{collection}:{edge_key}:{system_from_8be}`.
     // We need to find the most recent version of each edge that is visible at as_of.
 
     struct EdgeVersion {
         system_from: i64,
-        #[allow(dead_code)]
-        system_to: i64,
         src: String,
         dst: String,
         label: String,
@@ -88,11 +106,17 @@ async fn build_temporal_snapshot<S: StorageEngine>(
 
     for (raw_key, raw_val) in &entries {
         // Raw key is bytes. Skip the collection prefix (len + 1 for ':').
+        // The rest is `{edge_key}:{system_from_8be}`: a non-empty edge key,
+        // one `:` separator, then the 8-byte timestamp.
         let key_after_prefix = &raw_key[collection.len() + 1..];
-        if key_after_prefix.len() < TRAILER_LEN + 1 {
+        if key_after_prefix.len() < TRAILER_LEN + 2 {
             continue;
         }
-        let edge_key_bytes = &key_after_prefix[..key_after_prefix.len() - TRAILER_LEN];
+        let separator_at = key_after_prefix.len() - TRAILER_LEN - 1;
+        if key_after_prefix[separator_at] != b':' {
+            continue;
+        }
+        let edge_key_bytes = &key_after_prefix[..separator_at];
         let from_bytes: [u8; 8] = key_after_prefix[key_after_prefix.len() - TRAILER_LEN..]
             .try_into()
             .unwrap_or([0; 8]);
@@ -116,13 +140,12 @@ async fn build_temporal_snapshot<S: StorageEngine>(
             .get(&edge_key_str)
             .is_none_or(|ev| system_from > ev.system_from);
 
-        if keep && let Some((src, dst, label)) = parse_edge_key(&edge_key_str) {
+        if keep && let Some((src, dst, label)) = parse_history_edge_key(&edge_key_str) {
             let ev = EdgeVersion {
                 system_from,
-                system_to,
-                src: src.to_string(),
-                dst: dst.to_string(),
-                label: label.to_string(),
+                src,
+                dst,
+                label,
             };
             edge_map.insert(edge_key_str, ev);
         }
@@ -163,7 +186,7 @@ pub async fn temporal_neighbors<S: StorageEngine>(
     } = params;
 
     // When no as_of is provided, fall back to current-state neighbors.
-    if system_as_of_ms.is_none() {
+    let Some(as_of) = system_as_of_ms else {
         return super::traversal::neighbors(
             csr_map,
             collection,
@@ -171,9 +194,8 @@ pub async fn temporal_neighbors<S: StorageEngine>(
             edge_label.as_slice(),
             direction,
         );
-    }
+    };
 
-    let as_of = system_as_of_ms.unwrap();
     let snapshot = build_temporal_snapshot(storage, collection, as_of, memory).await?;
 
     let nbrs = snapshot.neighbors(node_id, edge_label.as_slice(), direction);
@@ -205,11 +227,10 @@ pub async fn temporal_algorithm<S: StorageEngine>(
     system_as_of_ms: Option<i64>,
 ) -> Result<QueryResult, LiteError> {
     // When no as_of is provided, run against current-state CSR.
-    if system_as_of_ms.is_none() {
+    let Some(as_of) = system_as_of_ms else {
         return algorithms::run_algo(csr_map, algorithm, params);
-    }
+    };
 
-    let as_of = system_as_of_ms.unwrap();
     let snapshot = build_temporal_snapshot(storage, &params.collection, as_of, memory).await?;
 
     // Wrap snapshot in a temporary map so run_algo can borrow it.
@@ -234,6 +255,68 @@ mod tests {
     #[test]
     fn parse_edge_key_no_arrow() {
         assert!(parse_edge_key("alice_bob_KNOWS").is_none());
+    }
+
+    #[test]
+    fn parse_history_edge_key_reads_both_forms() {
+        let arrow = parse_history_edge_key("alice->bob:KNOWS").unwrap();
+        assert_eq!(arrow, ("alice".into(), "bob".into(), "KNOWS".into()));
+
+        let id = EdgeId::try_first(
+            nodedb_types::id::NodeId::from_validated("carol".to_string()),
+            nodedb_types::id::NodeId::from_validated("dave".to_string()),
+            "LIKES",
+        )
+        .unwrap();
+        let display = parse_history_edge_key(&id.to_string()).unwrap();
+        assert_eq!(display, ("carol".into(), "dave".into(), "LIKES".into()));
+    }
+
+    /// History keys end in `:{system_from_8be}`. The snapshot must strip the
+    /// separator with the timestamp, or every label reads as empty and every
+    /// destination keeps a `:label` suffix.
+    #[tokio::test]
+    async fn snapshot_strips_separator_and_reads_both_key_forms() {
+        use crate::config::LiteConfig;
+        use crate::engine::graph::history;
+        use crate::storage::pagedb_storage::PagedbStorageMem;
+
+        let storage = Arc::new(PagedbStorageMem::open_in_memory().await.unwrap());
+        let governor = Arc::new(
+            nodedb_mem::MemoryGovernor::new(LiteConfig::default().to_governor_config()).unwrap(),
+        );
+        let memory = ScopedMemory::new(
+            governor,
+            nodedb_types::DatabaseId::DEFAULT,
+            nodedb_types::TenantId::new(0),
+            nodedb_mem::EngineId::Graph,
+        );
+
+        history::record_edge_insert(&*storage, "social", "alice->bob:KNOWS", &Value::Null, 1_000)
+            .await
+            .unwrap();
+        let id = EdgeId::try_first(
+            nodedb_types::id::NodeId::from_validated("carol".to_string()),
+            nodedb_types::id::NodeId::from_validated("dave".to_string()),
+            "LIKES",
+        )
+        .unwrap();
+        history::record_edge_insert(&*storage, "social", &id.to_string(), &Value::Null, 1_000)
+            .await
+            .unwrap();
+
+        let snapshot = build_temporal_snapshot(&storage, "social", 2_000, &memory)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            snapshot.neighbors("alice", &[], nodedb_graph::Direction::Out),
+            vec![("KNOWS".to_string(), "bob".to_string())]
+        );
+        assert_eq!(
+            snapshot.neighbors("carol", &[], nodedb_graph::Direction::Out),
+            vec![("LIKES".to_string(), "dave".to_string())]
+        );
     }
 
     #[test]

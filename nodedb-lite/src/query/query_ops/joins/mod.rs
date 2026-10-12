@@ -6,3 +6,4 @@ pub mod inline_hash;
 pub mod nested_loop;
 pub mod shuffle;
 pub mod sort_merge;
+pub mod spec;

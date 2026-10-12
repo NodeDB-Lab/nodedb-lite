@@ -9,13 +9,13 @@ use nodedb_physical::physical_plan::SortKeySpec;
 use nodedb_physical::physical_plan::document::DocumentOp;
 use nodedb_physical::physical_plan::query::AggregateSpec;
 use nodedb_query::expr::GroupKeySpec;
-use nodedb_sql::SubqueryVisitArgs;
-use nodedb_sql::temporal::TemporalScope;
 use nodedb_sql::types::SqlPlan;
 use nodedb_sql::types::filter::Filter;
-use nodedb_sql::types::query::EngineType;
-use nodedb_sql::types::query::{AggregateExpr, JoinType, Projection, SortKey, WindowSpec};
+use nodedb_sql::types::query::{AggregateExpr, Projection, SortKey, WindowSpec};
 use nodedb_sql::types_expr::{SqlExpr, SqlValue};
+use nodedb_sql::{
+    AggregateVisitArgs, DocumentIndexLookupVisitArgs, JoinVisitArgs, SubqueryVisitArgs,
+};
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
@@ -26,6 +26,7 @@ use crate::query::filter_convert::{sql_filters_to_metadata, sql_value_to_value};
 use crate::query::physical_visitor::LiteDataPlaneVisitor;
 use crate::query::query_ops::aggregate::execute_aggregate;
 use crate::query::query_ops::joins::inline_hash::execute_inline_hash_join;
+use crate::query::query_ops::joins::spec::JoinSpec;
 use crate::storage::engine::StorageEngine;
 
 use super::adapter::LiteFut;
@@ -129,18 +130,20 @@ fn encode_result_msgpack(result: &QueryResult) -> Result<Vec<u8>, LiteError> {
 
 // ── Aggregate ────────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn lower_aggregate<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     permit: Option<&'a crate::engine::fts::coordinator::TextMutationPermit>,
-    input: &SqlPlan,
-    group_by: &[SqlExpr],
-    aggregates: &[AggregateExpr],
-    having: &[Filter],
-    _limit: usize,
-    grouping_sets: Option<&[Vec<usize>]>,
-    sort_keys: &[SortKey],
+    args: AggregateVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
+    let AggregateVisitArgs {
+        input,
+        group_by,
+        aggregates,
+        having,
+        grouping_sets,
+        sort_keys,
+        ..
+    } = args;
     let input = input.clone();
     // A bare column groups by field extraction; anything else is a computed key
     // (e.g. `GROUP BY date_trunc('day', ts)`) that must be evaluated per row.
@@ -190,19 +193,21 @@ pub(super) fn lower_aggregate<'a, S: StorageEngine + 'a>(
 
 // ── Join ─────────────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn lower_join<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     permit: Option<&'a crate::engine::fts::coordinator::TextMutationPermit>,
-    left: &SqlPlan,
-    right: &SqlPlan,
-    on: &[(String, String)],
-    join_type: JoinType,
-    _condition: Option<&SqlExpr>,
-    limit: Option<usize>,
-    projection: &[Projection],
-    filters: &[Filter],
+    args: JoinVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
+    let JoinVisitArgs {
+        left,
+        right,
+        on,
+        join_type,
+        limit,
+        projection,
+        filters,
+        ..
+    } = args;
     let left = left.clone();
     let right = right.clone();
     let on = on.to_vec();
@@ -223,35 +228,36 @@ pub(super) fn lower_join<'a, S: StorageEngine + 'a>(
             &left_bytes,
             &right_bytes,
             None,
-            &on,
-            &join_type_str,
-            limit,
-            &proj,
-            &post_filters_bytes,
+            &JoinSpec {
+                on: &on,
+                join_type: &join_type_str,
+                limit,
+                projection: &proj,
+                post_filters: &post_filters_bytes,
+            },
         )
     }))
 }
 
 // ── DocumentIndexLookup ──────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn lower_document_index_lookup<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
-    collection: &str,
-    _alias: Option<&str>,
-    _engine_type: EngineType,
-    field: &str,
-    value: &SqlValue,
-    filters: &[Filter],
-    projection: &[Projection],
-    sort_keys: &[SortKey],
-    limit: Option<usize>,
-    offset: usize,
-    distinct: bool,
-    window_functions: &[WindowSpec],
-    _case_insensitive: bool,
-    _temporal: &TemporalScope,
+    args: DocumentIndexLookupVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
+    let DocumentIndexLookupVisitArgs {
+        collection,
+        field,
+        value,
+        filters,
+        projection,
+        sort_keys,
+        limit,
+        offset,
+        distinct,
+        window_functions,
+        ..
+    } = args;
     let collection = collection.to_string();
     let field = field.to_string();
     // The planner already lowercased the value for a case-insensitive index.

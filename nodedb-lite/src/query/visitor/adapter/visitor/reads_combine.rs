@@ -17,19 +17,7 @@ pub(super) fn join<'a, S: StorageEngine + 'a>(
     permit: Option<&'a crate::engine::fts::coordinator::TextMutationPermit>,
     args: JoinVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
-    let JoinVisitArgs {
-        left,
-        right,
-        on,
-        join_type,
-        condition,
-        limit,
-        projection,
-        filters,
-    } = args;
-    lower_join(
-        engine, permit, left, right, on, join_type, condition, limit, projection, filters,
-    )
+    lower_join(engine, permit, args)
 }
 
 pub(super) fn aggregate<'a, S: StorageEngine + 'a>(
@@ -37,26 +25,7 @@ pub(super) fn aggregate<'a, S: StorageEngine + 'a>(
     permit: Option<&'a crate::engine::fts::coordinator::TextMutationPermit>,
     args: AggregateVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
-    let AggregateVisitArgs {
-        input,
-        group_by,
-        aggregates,
-        having,
-        limit,
-        grouping_sets,
-        sort_keys,
-    } = args;
-    lower_aggregate(
-        engine,
-        permit,
-        input,
-        group_by,
-        aggregates,
-        having,
-        limit,
-        grouping_sets,
-        sort_keys,
-    )
+    lower_aggregate(engine, permit, args)
 }
 
 pub(super) fn union<'a, S: StorageEngine + 'a>(

@@ -17,6 +17,9 @@ use crate::engine::vector::row::{
     EMBEDDING_DIM_FIELD, VECTOR_FIELD_TAG, VECTOR_ROW_FIELDS, VectorSlot, detach_vector_row,
     is_vector_primary,
 };
+use crate::engine::vector::search::{
+    AnnTuning, SearchFilter, VectorSearchRequest, run_vector_search,
+};
 use crate::nodedb::LockExt;
 use crate::nodedb::NodeDbLite;
 use crate::nodedb::convert::value_to_loro;
@@ -28,6 +31,21 @@ pub(super) const INTERNAL_FIELDS_BASE: &[&str] = &[EMBEDDING_DIM_FIELD];
 /// (adds `__field` which records which named vector the row belongs to).
 pub(super) const INTERNAL_FIELDS_NAMED: &[&str] = VECTOR_ROW_FIELDS;
 
+/// One search issued through the `NodeDb` trait.
+///
+/// `index_key` names the HNSW index. `collection` names the CRDT collection
+/// that holds the row metadata. `exclude_fields` lists the vector-internal row
+/// fields that never reach result metadata.
+pub(super) struct TraitVectorSearch<'a> {
+    pub index_key: &'a str,
+    pub collection: &'a str,
+    pub query: &'a [f32],
+    pub k: usize,
+    pub filter: Option<&'a MetadataFilter>,
+    pub exclude_fields: &'a [&'a str],
+    pub allowed_ids: Option<&'a HashSet<String>>,
+}
+
 impl<S: StorageEngine> NodeDbLite<S> {
     /// Shared vector search implementation.
     ///
@@ -35,19 +53,19 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// `RoaringBitmap` of the nodes they hold in `index_key`'s index and
     /// passes it as the `prefilter_bitmap`, so only documents from the allowed
     /// set are returned. Nodes of any other index never enter the bitmap.
-    // Cohesive set of search parameters mirroring `run_vector_search`, which
-    // carries the same allow for the same reason.
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn vector_search_internal(
         &self,
-        index_key: &str,
-        collection: &str,
-        query: &[f32],
-        k: usize,
-        filter: Option<&MetadataFilter>,
-        exclude_fields: &[&str],
-        allowed_ids: Option<&HashSet<String>>,
+        search: TraitVectorSearch<'_>,
     ) -> NodeDbResult<Vec<SearchResult>> {
+        let TraitVectorSearch {
+            index_key,
+            collection,
+            query,
+            k,
+            filter,
+            exclude_fields,
+            allowed_ids,
+        } = search;
         let prefilter = allowed_ids.map(|ids| {
             let id_map = self.vector_state.vector_id_map.lock_or_recover();
             let mut bm = roaring::RoaringBitmap::new();
@@ -56,20 +74,22 @@ impl<S: StorageEngine> NodeDbLite<S> {
             }
             bm
         });
-        crate::engine::vector::search::run_vector_search(
+        run_vector_search(
             &self.vector_state,
             &self.crdt,
-            index_key,
-            collection,
-            query,
-            k,
-            filter,
-            exclude_fields,
-            prefilter.as_ref(),
-            None,
-            false,
-            None,
-            None,
+            VectorSearchRequest {
+                index_key,
+                collection,
+                query,
+                k,
+                filter: SearchFilter {
+                    metadata: filter,
+                    exclude_fields,
+                    prefilter_bitmap: prefilter.as_ref(),
+                },
+                tuning: AnnTuning::default(),
+                skip_payload_fetch: false,
+            },
         )
         .await
     }

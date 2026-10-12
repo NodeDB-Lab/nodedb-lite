@@ -8,9 +8,8 @@ use std::collections::HashSet;
 use nodedb_physical::physical_plan::document::merge_types::{
     MergeActionOp, MergeClauseKind, MergeClauseOp,
 };
-use nodedb_sql::types::SqlPlan;
+use nodedb_sql::MergeVisitArgs;
 use nodedb_sql::types::plan::{MergeClauseKind as SqlMergeKind, MergePlanAction, MergePlanClause};
-use nodedb_sql::types::query::EngineType;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
@@ -35,19 +34,20 @@ use super::rows::{extract_id, result_to_maps};
 /// fields readable as `<source_alias>.<field>`. Every arm's write is
 /// resolved before the first one applies, so an assignment that fails
 /// leaves every row unchanged.
-#[allow(clippy::too_many_arguments)]
 pub(in crate::query::visitor) fn lower_merge<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     permit: &'a crate::engine::fts::coordinator::TextMutationPermit,
-    target: &str,
-    _engine_type: EngineType,
-    source: &SqlPlan,
-    target_join_col: &str,
-    source_join_col: &str,
-    source_alias: &str,
-    clauses: &[MergePlanClause],
-    _returning: bool,
+    args: MergeVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
+    let MergeVisitArgs {
+        target,
+        source,
+        target_join_col,
+        source_join_col,
+        source_alias,
+        clauses,
+        ..
+    } = args;
     let target = target.to_string();
     let source = source.clone();
     let t_join = target_join_col.to_string();

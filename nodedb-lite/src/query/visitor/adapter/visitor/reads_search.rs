@@ -22,42 +22,7 @@ pub(super) fn vector_search<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     args: VectorSearchVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
-    let VectorSearchVisitArgs {
-        collection,
-        field,
-        query_vector,
-        top_k,
-        ef_search,
-        metric,
-        filters,
-        array_prefilter,
-        ann_options,
-        skip_payload_fetch,
-        payload_filters,
-        pk_prefilter,
-    } = args;
-    if pk_prefilter.is_some() {
-        return Err(LiteError::Unsupported {
-            detail: format!(
-                "vector search on '{collection}' with a primary-key prefilter (pk_prefilter): \
-                 Lite ranks every row of the vector index"
-            ),
-        });
-    }
-    lower_vector_search(
-        engine,
-        collection,
-        field,
-        query_vector,
-        top_k,
-        ef_search,
-        metric,
-        filters,
-        array_prefilter,
-        ann_options,
-        skip_payload_fetch,
-        payload_filters,
-    )
+    lower_vector_search(engine, args)
 }
 
 pub(super) fn text_search<'a, S: StorageEngine + 'a>(

@@ -7,9 +7,8 @@ use nodedb_physical::physical_plan::VectorOp;
 use nodedb_physical::physical_plan::spatial::SpatialPredicate as PhysSpatialPredicate;
 use nodedb_physical::physical_plan::{SpatialOp, TextOp};
 use nodedb_sql::types::filter::Filter;
-use nodedb_sql::types::query::Projection;
 use nodedb_sql::types::query::SpatialPredicate as SqlSpatialPredicate;
-use nodedb_sql::{HybridSearchTripleVisitArgs, HybridSearchVisitArgs};
+use nodedb_sql::{HybridSearchTripleVisitArgs, HybridSearchVisitArgs, SpatialScanVisitArgs};
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
@@ -202,18 +201,20 @@ pub(super) fn lower_hybrid_search_triple<'a, S: StorageEngine + 'a>(
 // ── SpatialScan ───────────────────────────────────────────────────────────────
 
 /// Lower `SqlPlan::SpatialScan` to `SpatialOp::Scan`.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn lower_spatial_scan<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
-    collection: &str,
-    field: &str,
-    predicate: &SqlSpatialPredicate,
-    query_geometry: &nodedb_types::geometry::Geometry,
-    distance_meters: f64,
-    attribute_filters: &[Filter],
-    limit: usize,
-    projection: &[Projection],
+    args: SpatialScanVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
+    let SpatialScanVisitArgs {
+        collection,
+        field,
+        predicate,
+        query_geometry,
+        distance_meters,
+        attribute_filters,
+        limit,
+        projection,
+    } = args;
     let attr_bytes = encode_attribute_filters(attribute_filters)?;
     let proj_cols = projection_names(projection, "spatial scan")?;
 
@@ -335,14 +336,16 @@ mod tests {
         let point = Geometry::point(0.0, 0.0);
         let result = super::lower_spatial_scan(
             &engine,
-            "geo_col",
-            "location",
-            &SqlSpatialPredicate::DWithin,
-            &point,
-            1000.0,
-            &[],
-            10,
-            &[],
+            nodedb_sql::SpatialScanVisitArgs {
+                collection: "geo_col",
+                field: "location",
+                predicate: &SqlSpatialPredicate::DWithin,
+                query_geometry: &point,
+                distance_meters: 1000.0,
+                attribute_filters: &[],
+                limit: 10,
+                projection: &[],
+            },
         );
         assert!(result.is_ok());
     }

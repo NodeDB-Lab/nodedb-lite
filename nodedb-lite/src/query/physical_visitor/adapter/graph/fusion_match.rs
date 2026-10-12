@@ -3,34 +3,16 @@
 
 use std::sync::Arc;
 
-use nodedb_graph::Direction;
-
 use crate::query::engine::LiteQueryEngine;
 use crate::query::graph_ops::{fusion, match_engine};
 use crate::storage::engine::StorageEngine;
 
 use super::dispatch::GraphFut;
 
-/// Grouped tail fields of `GraphOp::RagFusion`, kept out of the function
-/// signature so it stays under clippy's argument-count lint.
-pub(super) struct RagFusionArgs<'a> {
-    pub query_vector: &'a [f32],
-    pub vector_top_k: usize,
-    pub edge_label: Option<&'a str>,
-    pub direction: Direction,
-    pub expansion_depth: usize,
-    pub final_top_k: usize,
-    pub rrf_k: (f64, f64),
-    pub rrf_k_triple: Option<(f64, f64, f64)>,
-    pub vector_field: &'a str,
-    pub bm25_query: Option<&'a str>,
-    pub bm25_field: Option<&'a str>,
-}
-
 pub(super) fn rag_fusion<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     collection: &str,
-    args: RagFusionArgs<'_>,
+    args: fusion::RagFusionSpec<'_>,
 ) -> GraphFut<'a> {
     let vector_state = Arc::clone(&engine.vector_state);
     let crdt = Arc::clone(&engine.crdt);
@@ -55,17 +37,19 @@ pub(super) fn rag_fusion<'a, S: StorageEngine + 'a>(
             &fts_state,
             &csr_map,
             collection.as_str(),
-            &query_vector,
-            &vector_field,
-            vector_top_k,
-            edge_label.as_deref(),
-            direction,
-            expansion_depth,
-            final_top_k,
-            rrf_k,
-            rrf_k_triple,
-            bm25_query.as_deref(),
-            bm25_field.as_deref(),
+            fusion::RagFusionSpec {
+                query_vector: &query_vector,
+                vector_field: &vector_field,
+                vector_top_k,
+                edge_label: edge_label.as_deref(),
+                direction,
+                expansion_depth,
+                final_top_k,
+                rrf_k,
+                rrf_k_triple,
+                bm25_query: bm25_query.as_deref(),
+                bm25_field: bm25_field.as_deref(),
+            },
         )
         .await
     })

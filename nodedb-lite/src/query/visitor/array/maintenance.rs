@@ -71,15 +71,17 @@ mod tests {
         let engine = make_engine().await;
         lower_create_array(
             &engine,
-            "arr_fl",
-            &dim1_ast(),
-            &attr1_ast(),
-            &[4],
-            Cell::Hilbert,
-            Tile::Hilbert,
-            0,
-            None,
-            None,
+            nodedb_sql::CreateArrayVisitArgs {
+                name: "arr_fl",
+                dims: &dim1_ast(),
+                attrs: &attr1_ast(),
+                tile_extents: &[4],
+                cell_order: Cell::Hilbert,
+                tile_order: Tile::Hilbert,
+                prefix_bits: 0,
+                audit_retain_ms: None,
+                minimum_audit_retain_ms: None,
+            },
         )
         .unwrap()
         .await
@@ -95,15 +97,17 @@ mod tests {
         let engine = make_engine().await;
         lower_create_array(
             &engine,
-            "arr_cmp",
-            &dim1_ast(),
-            &attr1_ast(),
-            &[4],
-            Cell::Hilbert,
-            Tile::Hilbert,
-            0,
-            None,
-            None,
+            nodedb_sql::CreateArrayVisitArgs {
+                name: "arr_cmp",
+                dims: &dim1_ast(),
+                attrs: &attr1_ast(),
+                tile_extents: &[4],
+                cell_order: Cell::Hilbert,
+                tile_order: Tile::Hilbert,
+                prefix_bits: 0,
+                audit_retain_ms: None,
+                minimum_audit_retain_ms: None,
+            },
         )
         .unwrap()
         .await

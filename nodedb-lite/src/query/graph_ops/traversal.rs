@@ -31,18 +31,40 @@ fn max_visited(options: &GraphTraversalOptions) -> usize {
     }
 }
 
+/// Parameters of a `GraphOp::Hop` BFS traversal.
+pub struct HopSpec<'a> {
+    pub start_nodes: &'a [String],
+    pub edge_labels: &'a [&'a str],
+    pub direction: Direction,
+    pub depth: usize,
+    pub options: &'a GraphTraversalOptions,
+    pub frontier_bitmap: Option<&'a SurrogateBitmap>,
+}
+
+/// Parameters of a `GraphOp::Path` shortest-path search.
+pub struct PathSpec<'a> {
+    pub src: &'a str,
+    pub dst: &'a str,
+    pub edge_labels: &'a [&'a str],
+    pub max_depth: usize,
+    pub options: &'a GraphTraversalOptions,
+    pub frontier_bitmap: Option<&'a SurrogateBitmap>,
+}
+
 /// Handle `GraphOp::Hop` — BFS traversal from start nodes.
-#[allow(clippy::too_many_arguments)]
 pub fn hop(
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
     collection: &str,
-    start_nodes: &[String],
-    edge_labels: &[&str],
-    direction: Direction,
-    depth: usize,
-    options: &GraphTraversalOptions,
-    frontier_bitmap: Option<&SurrogateBitmap>,
+    spec: HopSpec<'_>,
 ) -> Result<QueryResult, LiteError> {
+    let HopSpec {
+        start_nodes,
+        edge_labels,
+        direction,
+        depth,
+        options,
+        frontier_bitmap,
+    } = spec;
     let map = csr_map.lock().map_err(|_| LiteError::LockPoisoned)?;
     let Some(csr) = map.get(collection) else {
         return Ok(QueryResult::empty());
@@ -150,17 +172,19 @@ pub fn neighbors_multi(
 }
 
 /// Handle `GraphOp::Path` — shortest path between two nodes.
-#[allow(clippy::too_many_arguments)]
 pub fn path(
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
     collection: &str,
-    src: &str,
-    dst: &str,
-    edge_labels: &[&str],
-    max_depth: usize,
-    options: &GraphTraversalOptions,
-    frontier_bitmap: Option<&SurrogateBitmap>,
+    spec: PathSpec<'_>,
 ) -> Result<QueryResult, LiteError> {
+    let PathSpec {
+        src,
+        dst,
+        edge_labels,
+        max_depth,
+        options,
+        frontier_bitmap,
+    } = spec;
     let map = csr_map.lock().map_err(|_| LiteError::LockPoisoned)?;
     let Some(csr) = map.get(collection) else {
         return Ok(QueryResult::empty());
@@ -266,12 +290,14 @@ mod tests {
         let r = hop(
             &m,
             "social",
-            &["a".to_string()],
-            &["KNOWS"],
-            Direction::Out,
-            2,
-            &opts,
-            None,
+            HopSpec {
+                start_nodes: &["a".to_string()],
+                edge_labels: &["KNOWS"],
+                direction: Direction::Out,
+                depth: 2,
+                options: &opts,
+                frontier_bitmap: None,
+            },
         )
         .unwrap();
         let nodes: Vec<&str> = r.rows.iter().filter_map(|row| row[0].as_str()).collect();
@@ -284,7 +310,19 @@ mod tests {
     fn test_path() {
         let m = make_csr_map_with_graph();
         let opts = GraphTraversalOptions::default();
-        let r = path(&m, "social", "a", "c", &["KNOWS"], 5, &opts, None).unwrap();
+        let r = path(
+            &m,
+            "social",
+            PathSpec {
+                src: "a",
+                dst: "c",
+                edge_labels: &["KNOWS"],
+                max_depth: 5,
+                options: &opts,
+                frontier_bitmap: None,
+            },
+        )
+        .unwrap();
         assert_eq!(r.rows.len(), 1);
         if let Value::Array(p) = &r.rows[0][0] {
             let names: Vec<&str> = p.iter().filter_map(|v| v.as_str()).collect();

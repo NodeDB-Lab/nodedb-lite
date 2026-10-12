@@ -25,7 +25,7 @@ use nodedb_types::value::Value;
 use crate::nodedb::NodeDbLite;
 use crate::storage::engine::StorageEngine;
 
-use super::vector::{INTERNAL_FIELDS_BASE, INTERNAL_FIELDS_NAMED};
+use super::vector::{INTERNAL_FIELDS_BASE, INTERNAL_FIELDS_NAMED, TraitVectorSearch};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -40,15 +40,15 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
         filter: Option<&MetadataFilter>,
         allowed_ids: Option<&HashSet<String>>,
     ) -> NodeDbResult<Vec<SearchResult>> {
-        self.vector_search_internal(
-            collection,
+        self.vector_search_internal(TraitVectorSearch {
+            index_key: collection,
             collection,
             query,
             k,
             filter,
-            INTERNAL_FIELDS_BASE,
+            exclude_fields: INTERNAL_FIELDS_BASE,
             allowed_ids,
-        )
+        })
         .await
     }
 
@@ -92,15 +92,15 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
         } else {
             format!("{collection}:{field_name}")
         };
-        self.vector_search_internal(
-            &index_key,
+        self.vector_search_internal(TraitVectorSearch {
+            index_key: &index_key,
             collection,
             query,
             k,
             filter,
-            INTERNAL_FIELDS_NAMED,
-            None,
-        )
+            exclude_fields: INTERNAL_FIELDS_NAMED,
+            allowed_ids: None,
+        })
         .await
     }
 

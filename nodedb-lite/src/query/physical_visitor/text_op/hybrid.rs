@@ -16,7 +16,9 @@ use nodedb_types::value::Value;
 use crate::engine::crdt::CrdtEngine;
 use crate::engine::fts::state::FtsState;
 use crate::engine::fts::{TextSearchRequest, run_text_search};
-use crate::engine::vector::search::run_vector_search;
+use crate::engine::vector::search::{
+    AnnTuning, SearchFilter, VectorSearchRequest, run_vector_search,
+};
 use crate::engine::vector::state::VectorState;
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
@@ -113,17 +115,15 @@ impl Legs {
         let mut vector_results = run_vector_search(
             vector_state,
             crdt,
-            &vector_index_key(&self.collection, &self.vector_field),
-            &self.collection,
-            &self.query_vector,
-            self.leg_k,
-            None,
-            &[],
-            None,
-            None,
-            false,
-            None,
-            None,
+            VectorSearchRequest {
+                index_key: &vector_index_key(&self.collection, &self.vector_field),
+                collection: &self.collection,
+                query: &self.query_vector,
+                k: self.leg_k,
+                filter: SearchFilter::default(),
+                tuning: AnnTuning::default(),
+                skip_payload_fetch: false,
+            },
         )
         .await
         .map_err(|e| LiteError::Query(e.to_string()))?;

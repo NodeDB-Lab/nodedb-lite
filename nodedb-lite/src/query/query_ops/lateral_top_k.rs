@@ -24,27 +24,46 @@ use nodedb_sql::types::SqlPlan;
 
 use crate::storage::engine::StorageEngine;
 
+/// Inputs of a LATERAL top-K scan, shared by the physical-plan and SQL-plan
+/// entry points.
+///
+/// `inner_filters` holds msgpack-encoded `MetadataFilter` bytes. An empty
+/// slice means no filter.
+pub struct LateralTopKSpec<'a> {
+    pub outer_alias: &'a str,
+    pub inner_collection: &'a str,
+    pub inner_filters: &'a [u8],
+    pub inner_order_by: &'a [SortKeySpec],
+    pub inner_limit: usize,
+    pub correlation_keys: &'a [(String, String)],
+    pub lateral_alias: &'a str,
+    pub projection: &'a [JoinProjection],
+    pub left_join: bool,
+}
+
 /// SQL-plan-aware entry for `LiteVisitor::lateral_top_k`.
 ///
 /// Runs `outer_sql` via `engine.execute_plan`, then delegates to
 /// `execute_lateral_top_k` with the materialised rows embedded in an
 /// in-memory sentinel plan.  This avoids requiring a second visitor pass
 /// to produce a `PhysicalPlan` from the SQL outer plan.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_lateral_top_k_sql<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     permit: Option<&crate::engine::fts::coordinator::TextMutationPermit>,
     outer_sql: &SqlPlan,
-    outer_alias: &str,
-    inner_collection: &str,
-    inner_filters: &[u8],
-    inner_order_by: &[SortKeySpec],
-    inner_limit: usize,
-    correlation_keys: &[(String, String)],
-    lateral_alias: &str,
-    projection: &[JoinProjection],
-    left_join: bool,
+    spec: LateralTopKSpec<'_>,
 ) -> Result<QueryResult, LiteError> {
+    let LateralTopKSpec {
+        outer_alias,
+        inner_collection,
+        inner_filters,
+        inner_order_by,
+        inner_limit,
+        correlation_keys,
+        lateral_alias,
+        projection,
+        left_join,
+    } = spec;
     let outer_result = engine.execute_plan_admitted(outer_sql, permit).await?;
     let outer_rows = rows_to_maps(outer_result);
     let base_inner_filters = decode_filters(inner_filters)?;
@@ -96,20 +115,22 @@ pub(crate) async fn execute_lateral_top_k_sql<S: StorageEngine>(
 /// `inner_filters`, sorts by `inner_order_by`, takes the top `inner_limit`
 /// rows, and merges them with the outer row.  Supports LEFT join semantics
 /// (preserve outer rows with no inner match).
-#[allow(clippy::too_many_arguments)]
 pub async fn execute_lateral_top_k<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     outer_plan: &PhysicalPlan,
-    outer_alias: &str,
-    inner_collection: &str,
-    inner_filters: &[u8],
-    inner_order_by: &[SortKeySpec],
-    inner_limit: usize,
-    correlation_keys: &[(String, String)],
-    lateral_alias: &str,
-    projection: &[JoinProjection],
-    left_join: bool,
+    spec: LateralTopKSpec<'_>,
 ) -> Result<QueryResult, LiteError> {
+    let LateralTopKSpec {
+        outer_alias,
+        inner_collection,
+        inner_filters,
+        inner_order_by,
+        inner_limit,
+        correlation_keys,
+        lateral_alias,
+        projection,
+        left_join,
+    } = spec;
     let outer_rows = execute_nested_plan(engine, outer_plan).await?;
     let base_inner_filters = decode_filters(inner_filters)?;
     let effective_limit = if inner_limit == 0 {

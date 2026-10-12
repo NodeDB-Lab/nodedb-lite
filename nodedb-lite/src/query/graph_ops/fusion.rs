@@ -22,9 +22,26 @@ use crate::engine::crdt::CrdtEngine;
 use crate::engine::fts::search::{TextSearchRequest, run_text_search};
 use crate::engine::fts::state::FtsState;
 use crate::engine::vector::VectorState;
-use crate::engine::vector::search::run_vector_search;
+use crate::engine::vector::search::{
+    AnnTuning, SearchFilter, VectorSearchRequest, run_vector_search,
+};
 use crate::error::LiteError;
 use crate::storage::engine::StorageEngine;
+
+/// Parameters of a `GraphOp::RagFusion` query.
+pub struct RagFusionSpec<'a> {
+    pub query_vector: &'a [f32],
+    pub vector_field: &'a str,
+    pub vector_top_k: usize,
+    pub edge_label: Option<&'a str>,
+    pub direction: Direction,
+    pub expansion_depth: usize,
+    pub final_top_k: usize,
+    pub rrf_k: (f64, f64),
+    pub rrf_k_triple: Option<(f64, f64, f64)>,
+    pub bm25_query: Option<&'a str>,
+    pub bm25_field: Option<&'a str>,
+}
 
 /// Execute a `GraphOp::RagFusion` against the Lite engine state.
 ///
@@ -34,25 +51,27 @@ use crate::storage::engine::StorageEngine;
 /// 3. BFS graph expansion from vector-result nodes up to `expansion_depth` hops.
 /// 4. RRF merge of all active rankings.
 /// 5. Truncate to `final_top_k`.
-#[allow(clippy::too_many_arguments)]
 pub async fn rag_fusion<S: StorageEngine>(
     vector_state: &Arc<VectorState<S>>,
     crdt: &Arc<Mutex<CrdtEngine>>,
     fts_state: &Arc<FtsState>,
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
     collection: &str,
-    query_vector: &[f32],
-    vector_field: &str,
-    vector_top_k: usize,
-    edge_label: Option<&str>,
-    direction: Direction,
-    expansion_depth: usize,
-    final_top_k: usize,
-    rrf_k: (f64, f64),
-    rrf_k_triple: Option<(f64, f64, f64)>,
-    bm25_query: Option<&str>,
-    bm25_field: Option<&str>,
+    spec: RagFusionSpec<'_>,
 ) -> Result<QueryResult, LiteError> {
+    let RagFusionSpec {
+        query_vector,
+        vector_field,
+        vector_top_k,
+        edge_label,
+        direction,
+        expansion_depth,
+        final_top_k,
+        rrf_k,
+        rrf_k_triple,
+        bm25_query,
+        bm25_field,
+    } = spec;
     // Pure vector degenerate path: no expansion and no BM25.
     if expansion_depth == 0 && bm25_query.is_none() {
         return pure_vector_path(
@@ -76,17 +95,15 @@ pub async fn rag_fusion<S: StorageEngine>(
     let vector_results = run_vector_search(
         vector_state,
         crdt,
-        &index_key,
-        collection,
-        query_vector,
-        vector_top_k,
-        None,
-        &[],
-        None,
-        None,
-        true, // skip_payload_fetch — RRF only needs IDs
-        None,
-        None,
+        VectorSearchRequest {
+            index_key: &index_key,
+            collection,
+            query: query_vector,
+            k: vector_top_k,
+            filter: SearchFilter::default(),
+            tuning: AnnTuning::default(),
+            skip_payload_fetch: true, // RRF only needs IDs
+        },
     )
     .await
     .map_err(|e| LiteError::Query(e.to_string()))?;
@@ -232,17 +249,15 @@ async fn pure_vector_path<S: StorageEngine>(
     let results = run_vector_search(
         vector_state,
         crdt,
-        &index_key,
-        collection,
-        query_vector,
-        final_top_k,
-        None,
-        &[],
-        None,
-        None,
-        true,
-        None,
-        None,
+        VectorSearchRequest {
+            index_key: &index_key,
+            collection,
+            query: query_vector,
+            k: final_top_k,
+            filter: SearchFilter::default(),
+            tuning: AnnTuning::default(),
+            skip_payload_fetch: true,
+        },
     )
     .await
     .map_err(|e| LiteError::Query(e.to_string()))?;
@@ -265,6 +280,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use nodedb_graph::Direction;
+
+    use super::RagFusionSpec;
 
     use crate::PagedbStorageMem;
     use crate::engine::array::ArrayEngineState;
@@ -339,17 +356,19 @@ mod tests {
             &engine.fts_state,
             &engine.csr,
             "col",
-            &[1.0_f32, 0.0, 0.0, 0.0],
-            "",
-            5,
-            None,
-            Direction::Out,
-            0,
-            5,
-            (60.0, 60.0),
-            None,
-            None,
-            None,
+            RagFusionSpec {
+                query_vector: &[1.0_f32, 0.0, 0.0, 0.0],
+                vector_field: "",
+                vector_top_k: 5,
+                edge_label: None,
+                direction: Direction::Out,
+                expansion_depth: 0,
+                final_top_k: 5,
+                rrf_k: (60.0, 60.0),
+                rrf_k_triple: None,
+                bm25_query: None,
+                bm25_field: None,
+            },
         )
         .await
         .expect("pure vector path must not error on empty index");
@@ -367,17 +386,19 @@ mod tests {
             &engine.fts_state,
             &engine.csr,
             "col",
-            &[1.0_f32, 0.0, 0.0, 0.0],
-            "",
-            5,
-            Some("KNOWS"),
-            Direction::Out,
-            2,
-            5,
-            (60.0, 60.0),
-            None,
-            None,
-            None,
+            RagFusionSpec {
+                query_vector: &[1.0_f32, 0.0, 0.0, 0.0],
+                vector_field: "",
+                vector_top_k: 5,
+                edge_label: Some("KNOWS"),
+                direction: Direction::Out,
+                expansion_depth: 2,
+                final_top_k: 5,
+                rrf_k: (60.0, 60.0),
+                rrf_k_triple: None,
+                bm25_query: None,
+                bm25_field: None,
+            },
         )
         .await
         .expect("two-source path must not error");
@@ -402,17 +423,19 @@ mod tests {
             &engine.fts_state,
             &engine.csr,
             "col",
-            &[1.0_f32, 0.0, 0.0, 0.0],
-            "",
-            5,
-            Some("KNOWS"),
-            Direction::Out,
-            2,
-            5,
-            (60.0, 60.0),
-            Some((60.0, 60.0, 60.0)),
-            Some("what is retrieval"),
-            Some("content"),
+            RagFusionSpec {
+                query_vector: &[1.0_f32, 0.0, 0.0, 0.0],
+                vector_field: "",
+                vector_top_k: 5,
+                edge_label: Some("KNOWS"),
+                direction: Direction::Out,
+                expansion_depth: 2,
+                final_top_k: 5,
+                rrf_k: (60.0, 60.0),
+                rrf_k_triple: Some((60.0, 60.0, 60.0)),
+                bm25_query: Some("what is retrieval"),
+                bm25_field: Some("content"),
+            },
         )
         .await
         .expect("three-source path must not error");
@@ -439,17 +462,19 @@ mod tests {
             &engine.fts_state,
             &engine.csr,
             "col",
-            &[1.0_f32, 0.0, 0.0, 0.0],
-            "",
-            5,
-            Some("KNOWS"),
-            Direction::Out,
-            2,
-            5,
-            (60.0, 60.0),
-            Some((60.0, 60.0, 60.0)),
-            Some("what is retrieval"),
-            Some("content"),
+            RagFusionSpec {
+                query_vector: &[1.0_f32, 0.0, 0.0, 0.0],
+                vector_field: "",
+                vector_top_k: 5,
+                edge_label: Some("KNOWS"),
+                direction: Direction::Out,
+                expansion_depth: 2,
+                final_top_k: 5,
+                rrf_k: (60.0, 60.0),
+                rrf_k_triple: Some((60.0, 60.0, 60.0)),
+                bm25_query: Some("what is retrieval"),
+                bm25_field: Some("content"),
+            },
         )
         .await
         .expect_err("an unindexed text field must fail the fusion");

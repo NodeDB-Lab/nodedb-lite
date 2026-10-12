@@ -131,28 +131,7 @@ pub(super) fn update_from<'a, S: StorageEngine + 'a>(
     permit: &'a crate::engine::fts::coordinator::TextMutationPermit,
     args: UpdateFromVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
-    let UpdateFromVisitArgs {
-        collection,
-        engine: engine_type,
-        source,
-        target_join_col,
-        source_join_col,
-        assignments,
-        target_filters,
-        returning,
-    } = args;
-    lower_update_from(
-        engine,
-        permit,
-        collection,
-        engine_type,
-        source,
-        target_join_col,
-        source_join_col,
-        assignments,
-        target_filters,
-        returning,
-    )
+    lower_update_from(engine, permit, args)
 }
 
 pub(super) fn merge<'a, S: StorageEngine + 'a>(
@@ -160,28 +139,7 @@ pub(super) fn merge<'a, S: StorageEngine + 'a>(
     permit: &'a crate::engine::fts::coordinator::TextMutationPermit,
     args: MergeVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
-    let MergeVisitArgs {
-        target,
-        engine: engine_type,
-        source,
-        target_join_col,
-        source_join_col,
-        source_alias,
-        clauses,
-        returning,
-    } = args;
-    lower_merge(
-        engine,
-        permit,
-        target,
-        engine_type,
-        source,
-        target_join_col,
-        source_join_col,
-        source_alias,
-        clauses,
-        returning,
-    )
+    lower_merge(engine, permit, args)
 }
 
 pub(super) fn timeseries_ingest<'a, S: StorageEngine + 'a>(

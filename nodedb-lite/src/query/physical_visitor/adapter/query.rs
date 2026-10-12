@@ -17,12 +17,14 @@ use crate::query::query_ops::{
     aggregate::{execute_aggregate, execute_partial_aggregate},
     facets::execute_facet_counts,
     joins::{
-        hash::execute_hash_join, nested_loop::execute_nested_loop_join,
+        hash::execute_hash_join,
+        nested_loop::execute_nested_loop_join,
         sort_merge::execute_sort_merge_join,
+        spec::{CollectionSide, JoinSpec, PostAggregate},
     },
-    lateral_loop::execute_lateral_loop,
-    lateral_top_k::execute_lateral_top_k,
-    recursive_scan::execute_recursive_scan,
+    lateral_loop::{LateralLoopSpec, execute_lateral_loop},
+    lateral_top_k::{LateralTopKSpec, execute_lateral_top_k},
+    recursive_scan::{RecursiveScanSpec, execute_recursive_scan},
     recursive_value::execute_recursive_value,
 };
 use crate::storage::engine::StorageEngine;
@@ -124,17 +126,25 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             Ok(Box::pin(async move {
                 execute_hash_join(
                     engine,
-                    lc.as_str(),
-                    rc.as_str(),
-                    la.as_deref(),
-                    ra.as_deref(),
-                    &on,
-                    &jt,
-                    lim,
-                    &pg,
-                    &pa,
-                    &proj,
-                    &pf,
+                    CollectionSide {
+                        collection: lc.as_str(),
+                        alias: la.as_deref(),
+                    },
+                    CollectionSide {
+                        collection: rc.as_str(),
+                        alias: ra.as_deref(),
+                    },
+                    &JoinSpec {
+                        on: &on,
+                        join_type: &jt,
+                        limit: lim,
+                        projection: &proj,
+                        post_filters: &pf,
+                    },
+                    &PostAggregate {
+                        group_by: &pg,
+                        aggregates: &pa,
+                    },
                 )
                 .await
             }))
@@ -267,8 +277,19 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let dist = *distinct;
             let lim = *limit;
             Ok(Box::pin(async move {
-                execute_recursive_scan(engine, col.as_str(), &bf, &rf, jl.as_ref(), mi, dist, lim)
-                    .await
+                execute_recursive_scan(
+                    engine,
+                    RecursiveScanSpec {
+                        collection: col.as_str(),
+                        base_filters: &bf,
+                        recursive_filters: &rf,
+                        join_link: jl.as_ref(),
+                        max_iterations: mi,
+                        distinct: dist,
+                        limit: lim,
+                    },
+                )
+                .await
             }))
         }
 
@@ -319,15 +340,17 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                 execute_lateral_top_k(
                     engine,
                     &op_clone,
-                    &oa,
-                    ic.as_str(),
-                    &inf,
-                    &iob,
-                    il,
-                    &ck,
-                    &la,
-                    &proj,
-                    lj,
+                    LateralTopKSpec {
+                        outer_alias: &oa,
+                        inner_collection: ic.as_str(),
+                        inner_filters: &inf,
+                        inner_order_by: &iob,
+                        inner_limit: il,
+                        correlation_keys: &ck,
+                        lateral_alias: &la,
+                        projection: &proj,
+                        left_join: lj,
+                    },
                 )
                 .await
             }))
@@ -357,14 +380,16 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                 execute_lateral_loop(
                     engine,
                     &op_clone,
-                    &oa,
-                    ic.as_str(),
-                    &inf,
-                    &cp,
-                    &la,
-                    &proj,
-                    lj,
-                    orc,
+                    LateralLoopSpec {
+                        outer_alias: &oa,
+                        inner_collection: ic.as_str(),
+                        inner_filters: &inf,
+                        correlation_predicates: &cp,
+                        lateral_alias: &la,
+                        projection: &proj,
+                        left_join: lj,
+                        outer_row_cap: orc,
+                    },
                 )
                 .await
             }))

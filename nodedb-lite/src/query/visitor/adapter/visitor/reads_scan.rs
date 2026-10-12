@@ -54,39 +54,7 @@ pub(super) fn document_index_lookup<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     args: DocumentIndexLookupVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
-    let DocumentIndexLookupVisitArgs {
-        collection,
-        alias,
-        engine: engine_type,
-        field,
-        value,
-        filters,
-        projection,
-        sort_keys,
-        limit,
-        offset,
-        distinct,
-        window_functions,
-        case_insensitive,
-        temporal,
-    } = args;
-    lower_document_index_lookup(
-        engine,
-        collection,
-        alias,
-        engine_type,
-        field,
-        value,
-        filters,
-        projection,
-        sort_keys,
-        limit,
-        offset,
-        distinct,
-        window_functions,
-        case_insensitive,
-        temporal,
-    )
+    lower_document_index_lookup(engine, args)
 }
 
 pub(super) fn range_scan<'a, S: StorageEngine + 'a>(
@@ -104,105 +72,28 @@ pub(super) fn spatial_scan<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     args: SpatialScanVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
-    let SpatialScanVisitArgs {
-        collection,
-        field,
-        predicate,
-        query_geometry,
-        distance_meters,
-        attribute_filters,
-        limit,
-        projection,
-    } = args;
-    lower_spatial_scan(
-        engine,
-        collection,
-        field,
-        predicate,
-        query_geometry,
-        distance_meters,
-        attribute_filters,
-        limit,
-        projection,
-    )
+    lower_spatial_scan(engine, args)
 }
 
 pub(super) fn timeseries_scan<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     args: TimeseriesScanVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
-    let TimeseriesScanVisitArgs {
-        collection,
-        time_range,
-        bucket_interval_ms,
-        group_by,
-        aggregates,
-        filters,
-        projection,
-        gap_fill,
-        limit,
-        tiered,
-        temporal,
-        sort_keys,
-    } = args;
-    lower_timeseries_scan(
-        engine,
-        collection,
-        time_range,
-        bucket_interval_ms,
-        group_by,
-        aggregates,
-        filters,
-        projection,
-        gap_fill,
-        limit,
-        tiered,
-        temporal,
-        sort_keys,
-    )
+    lower_timeseries_scan(engine, args)
 }
 
 pub(super) fn recursive_scan<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     args: RecursiveScanVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
-    let RecursiveScanVisitArgs {
-        collection,
-        base_filters,
-        recursive_filters,
-        join_link,
-        max_iterations,
-        distinct,
-        limit,
-    } = args;
-    lower_recursive_scan(
-        engine,
-        collection,
-        base_filters,
-        recursive_filters,
-        join_link,
-        max_iterations,
-        distinct,
-        limit,
-    )
+    lower_recursive_scan(engine, args)
 }
 
 pub(super) fn recursive_value<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     args: RecursiveValueVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
-    let RecursiveValueVisitArgs {
-        cte_name,
-        columns,
-        init_exprs,
-        step_exprs,
-        condition,
-        max_depth,
-        distinct,
-    } = args;
-    lower_recursive_value(
-        engine, cte_name, columns, init_exprs, step_exprs, condition, max_depth, distinct,
-    )
+    lower_recursive_value(engine, args)
 }
 
 pub(super) fn lateral_top_k<'a, S: StorageEngine + 'a>(
@@ -210,32 +101,7 @@ pub(super) fn lateral_top_k<'a, S: StorageEngine + 'a>(
     permit: Option<&'a crate::engine::fts::coordinator::TextMutationPermit>,
     args: LateralTopKVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
-    let LateralTopKVisitArgs {
-        outer,
-        outer_alias,
-        inner_collection,
-        inner_filters,
-        inner_order_by,
-        inner_limit,
-        correlation_keys,
-        lateral_alias,
-        projection,
-        left_join,
-    } = args;
-    lower_lateral_top_k(
-        engine,
-        permit,
-        outer,
-        outer_alias,
-        inner_collection,
-        inner_filters,
-        inner_order_by,
-        inner_limit,
-        correlation_keys,
-        lateral_alias,
-        projection,
-        left_join,
-    )
+    lower_lateral_top_k(engine, permit, args)
 }
 
 pub(super) fn lateral_loop<'a, S: StorageEngine + 'a>(
@@ -243,26 +109,5 @@ pub(super) fn lateral_loop<'a, S: StorageEngine + 'a>(
     permit: Option<&'a crate::engine::fts::coordinator::TextMutationPermit>,
     args: LateralLoopVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
-    let LateralLoopVisitArgs {
-        outer,
-        outer_alias,
-        inner,
-        correlation_predicates,
-        lateral_alias,
-        projection,
-        outer_row_cap,
-        left_join,
-    } = args;
-    lower_lateral_loop(
-        engine,
-        permit,
-        outer,
-        outer_alias,
-        inner,
-        correlation_predicates,
-        lateral_alias,
-        projection,
-        outer_row_cap,
-        left_join,
-    )
+    lower_lateral_loop(engine, permit, args)
 }

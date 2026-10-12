@@ -9,4 +9,4 @@ pub(crate) mod lazy_load;
 mod rerank;
 mod run;
 
-pub(crate) use run::run_vector_search;
+pub(crate) use run::{AnnTuning, SearchFilter, VectorSearchRequest, run_vector_search};

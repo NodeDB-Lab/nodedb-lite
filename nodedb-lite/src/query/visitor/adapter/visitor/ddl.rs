@@ -15,29 +15,7 @@ pub(super) fn create_array<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     args: CreateArrayVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
-    let CreateArrayVisitArgs {
-        name,
-        dims,
-        attrs,
-        tile_extents,
-        cell_order,
-        tile_order,
-        prefix_bits,
-        audit_retain_ms,
-        minimum_audit_retain_ms,
-    } = args;
-    lower_create_array(
-        engine,
-        name,
-        dims,
-        attrs,
-        tile_extents,
-        cell_order,
-        tile_order,
-        prefix_bits,
-        audit_retain_ms,
-        minimum_audit_retain_ms,
-    )
+    lower_create_array(engine, args)
 }
 
 pub(super) fn drop_array<'a, S: StorageEngine + 'a>(

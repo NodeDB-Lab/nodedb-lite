@@ -90,12 +90,14 @@ pub(super) fn hop<'a, S: StorageEngine + 'a>(
         traversal::hop(
             &csr_map,
             &collection,
-            &start_nodes,
-            &labels,
-            direction,
-            depth,
-            &options,
-            frontier_bitmap.as_ref(),
+            traversal::HopSpec {
+                start_nodes: &start_nodes,
+                edge_labels: &labels,
+                direction,
+                depth,
+                options: &options,
+                frontier_bitmap: frontier_bitmap.as_ref(),
+            },
         )
     }))
 }
@@ -189,12 +191,14 @@ pub(super) fn path<'a, S: StorageEngine + 'a>(
         traversal::path(
             &csr_map,
             &collection,
-            &src,
-            &dst,
-            &labels,
-            max_depth,
-            &options,
-            frontier_bitmap.as_ref(),
+            traversal::PathSpec {
+                src: &src,
+                dst: &dst,
+                edge_labels: &labels,
+                max_depth,
+                options: &options,
+                frontier_bitmap: frontier_bitmap.as_ref(),
+            },
         )
     }))
 }

@@ -5,6 +5,7 @@
 use nodedb_physical::PhysicalTaskVisitor;
 use nodedb_physical::physical_plan::QueryOp;
 use nodedb_sql::types::filter::Filter;
+use nodedb_sql::{RecursiveScanVisitArgs, RecursiveValueVisitArgs};
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
@@ -32,17 +33,19 @@ fn encode_filters(filters: &[Filter]) -> Result<Vec<u8>, LiteError> {
 // ── RecursiveScan ─────────────────────────────────────────────────────────────
 
 /// Lower `SqlPlan::RecursiveScan` to `QueryOp::RecursiveScan`.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn lower_recursive_scan<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
-    collection: &str,
-    base_filters: &[Filter],
-    recursive_filters: &[Filter],
-    join_link: Option<&(String, String)>,
-    max_iterations: usize,
-    distinct: bool,
-    limit: usize,
+    args: RecursiveScanVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
+    let RecursiveScanVisitArgs {
+        collection,
+        base_filters,
+        recursive_filters,
+        join_link,
+        max_iterations,
+        distinct,
+        limit,
+    } = args;
     let base_bytes = encode_filters(base_filters)?;
     let rec_bytes = encode_filters(recursive_filters)?;
 
@@ -68,17 +71,19 @@ pub(super) fn lower_recursive_scan<'a, S: StorageEngine + 'a>(
 // ── RecursiveValue ────────────────────────────────────────────────────────────
 
 /// Lower `SqlPlan::RecursiveValue` to `QueryOp::RecursiveValue`.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn lower_recursive_value<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
-    cte_name: &str,
-    columns: &[String],
-    init_exprs: &[String],
-    step_exprs: &[String],
-    condition: Option<&str>,
-    max_depth: usize,
-    distinct: bool,
+    args: RecursiveValueVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
+    let RecursiveValueVisitArgs {
+        cte_name,
+        columns,
+        init_exprs,
+        step_exprs,
+        condition,
+        max_depth,
+        distinct,
+    } = args;
     let op = QueryOp::RecursiveValue {
         cte_name: cte_name.to_string(),
         columns: columns.to_vec(),
@@ -97,6 +102,8 @@ pub(super) fn lower_recursive_value<'a, S: StorageEngine + 'a>(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    use nodedb_sql::{RecursiveScanVisitArgs, RecursiveValueVisitArgs};
 
     use crate::PagedbStorageMem;
     use crate::query::engine::{LiteQueryEngine, LiteQueryEngineParams};
@@ -163,13 +170,15 @@ mod tests {
         // WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 WHERE n < 5)
         let result = super::lower_recursive_value(
             &engine,
-            "counter",
-            &["n".to_string()],
-            &["1".to_string()],
-            &["n + 1".to_string()],
-            Some("n < 5"),
-            100,
-            false,
+            RecursiveValueVisitArgs {
+                cte_name: "counter",
+                columns: &["n".to_string()],
+                init_exprs: &["1".to_string()],
+                step_exprs: &["n + 1".to_string()],
+                condition: Some("n < 5"),
+                max_depth: 100,
+                distinct: false,
+            },
         );
         assert!(result.is_ok());
         let fut = result.unwrap();
@@ -183,13 +192,15 @@ mod tests {
         let engine = make_engine().await;
         let result = super::lower_recursive_scan(
             &engine,
-            "nodes",
-            &[],
-            &[],
-            Some(&("parent_id".to_string(), "id".to_string())),
-            100,
-            true,
-            500,
+            RecursiveScanVisitArgs {
+                collection: "nodes",
+                base_filters: &[],
+                recursive_filters: &[],
+                join_link: Some(&("parent_id".to_string(), "id".to_string())),
+                max_iterations: 100,
+                distinct: true,
+                limit: 500,
+            },
         );
         assert!(result.is_ok());
     }
