@@ -40,3 +40,35 @@ pub(super) fn wcc_superstep() -> LiteError {
             .into(),
     }
 }
+
+pub(super) fn node_edge_guard() -> LiteError {
+    LiteError::Unsupported {
+        detail: "NodeEdgeGuard is a Calvin transaction guard on a node's key home; \
+                 unsupported on the single-node Lite engine"
+            .into(),
+    }
+}
+
+pub(super) fn node_presence_guard() -> LiteError {
+    LiteError::Unsupported {
+        detail: "NodePresenceGuard is a Calvin transaction guard on a collection vShard; \
+                 unsupported on the single-node Lite engine"
+            .into(),
+    }
+}
+
+pub(super) fn node_presence_read() -> LiteError {
+    LiteError::Unsupported {
+        detail: "NodePresenceRead is a Calvin planner read on a collection vShard; \
+                 unsupported on the single-node Lite engine"
+            .into(),
+    }
+}
+
+pub(super) fn truncate_edges() -> LiteError {
+    LiteError::Unsupported {
+        detail: "TruncateEdges is a per-vShard Calvin edge truncation; \
+                 unsupported on the single-node Lite engine"
+            .into(),
+    }
+}

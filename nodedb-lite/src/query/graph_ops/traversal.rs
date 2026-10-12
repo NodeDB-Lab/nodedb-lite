@@ -37,7 +37,7 @@ pub fn hop(
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
     collection: &str,
     start_nodes: &[String],
-    edge_label: Option<&str>,
+    edge_labels: &[&str],
     direction: Direction,
     depth: usize,
     options: &GraphTraversalOptions,
@@ -53,7 +53,7 @@ pub fn hop(
     let nodes = csr.traverse_bfs(
         nodedb_graph::BfsParams {
             start_nodes: &starts,
-            label_filter: edge_label,
+            label_filter: edge_labels,
             direction,
             max_depth: depth,
             max_visited: mv,
@@ -76,7 +76,7 @@ pub fn neighbors(
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
     collection: &str,
     node_id: &str,
-    edge_label: Option<&str>,
+    edge_labels: &[&str],
     direction: Direction,
 ) -> Result<QueryResult, LiteError> {
     let map = csr_map.lock().map_err(|_| LiteError::LockPoisoned)?;
@@ -84,7 +84,7 @@ pub fn neighbors(
         return Ok(QueryResult::empty());
     };
 
-    let nbrs = csr.neighbors(node_id, edge_label, direction);
+    let nbrs = csr.neighbors(node_id, edge_labels, direction);
     let columns = vec!["label".to_string(), "neighbor".to_string()];
     let rows = nbrs
         .iter()
@@ -103,7 +103,7 @@ pub fn neighbors_multi(
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
     collection: &str,
     node_ids: &[String],
-    edge_label: Option<&str>,
+    edge_labels: &[&str],
     direction: Direction,
     max_results: u32,
 ) -> Result<QueryResult, LiteError> {
@@ -128,7 +128,7 @@ pub fn neighbors_multi(
         if rows.len() >= cap {
             break;
         }
-        let nbrs = csr.neighbors_multi(node, edge_label.as_slice(), direction);
+        let nbrs = csr.neighbors(node, edge_labels, direction);
         for (lbl, nb) in nbrs {
             if rows.len() >= cap {
                 break;
@@ -156,7 +156,7 @@ pub fn path(
     collection: &str,
     src: &str,
     dst: &str,
-    edge_label: Option<&str>,
+    edge_labels: &[&str],
     max_depth: usize,
     options: &GraphTraversalOptions,
     frontier_bitmap: Option<&SurrogateBitmap>,
@@ -171,7 +171,7 @@ pub fn path(
         nodedb_graph::ShortestPathParams {
             src,
             dst,
-            label_filter: edge_label.as_slice(),
+            label_filter: edge_labels,
             max_depth,
             max_visited: mv,
             frontier_bitmap,
@@ -201,7 +201,7 @@ pub fn subgraph(
     csr_map: &Arc<Mutex<HashMap<String, CsrIndex>>>,
     collection: &str,
     start_nodes: &[String],
-    edge_label: Option<&str>,
+    edge_labels: &[&str],
     depth: usize,
     options: &GraphTraversalOptions,
 ) -> Result<QueryResult, LiteError> {
@@ -212,7 +212,7 @@ pub fn subgraph(
 
     let starts: Vec<&str> = start_nodes.iter().map(String::as_str).collect();
     let mv = max_visited(options);
-    let edges = csr.subgraph(&starts, edge_label, Direction::Out, depth, mv, None);
+    let edges = csr.subgraph(&starts, edge_labels, Direction::Out, depth, mv, None);
 
     let columns = vec!["src".to_string(), "label".to_string(), "dst".to_string()];
     let rows = edges
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn test_neighbors() {
         let m = make_csr_map_with_graph();
-        let r = neighbors(&m, "social", "a", Some("KNOWS"), Direction::Out).unwrap();
+        let r = neighbors(&m, "social", "a", &["KNOWS"], Direction::Out).unwrap();
         assert_eq!(r.rows.len(), 1);
         assert_eq!(r.rows[0][1], Value::String("b".to_string()));
     }
@@ -254,7 +254,7 @@ mod tests {
     fn test_neighbors_multi() {
         let m = make_csr_map_with_graph();
         let node_ids = vec!["a".to_string(), "b".to_string()];
-        let r = neighbors_multi(&m, "social", &node_ids, None, Direction::Out, 0).unwrap();
+        let r = neighbors_multi(&m, "social", &node_ids, &[], Direction::Out, 0).unwrap();
         // a has 2 out edges (KNOWS->b, WORKS->d), b has 1 (KNOWS->c)
         assert_eq!(r.rows.len(), 3);
     }
@@ -267,7 +267,7 @@ mod tests {
             &m,
             "social",
             &["a".to_string()],
-            Some("KNOWS"),
+            &["KNOWS"],
             Direction::Out,
             2,
             &opts,
@@ -284,7 +284,7 @@ mod tests {
     fn test_path() {
         let m = make_csr_map_with_graph();
         let opts = GraphTraversalOptions::default();
-        let r = path(&m, "social", "a", "c", Some("KNOWS"), 5, &opts, None).unwrap();
+        let r = path(&m, "social", "a", "c", &["KNOWS"], 5, &opts, None).unwrap();
         assert_eq!(r.rows.len(), 1);
         if let Value::Array(p) = &r.rows[0][0] {
             let names: Vec<&str> = p.iter().filter_map(|v| v.as_str()).collect();
@@ -299,7 +299,7 @@ mod tests {
     fn test_subgraph() {
         let m = make_csr_map_with_graph();
         let opts = GraphTraversalOptions::default();
-        let r = subgraph(&m, "social", &["a".to_string()], None, 1, &opts).unwrap();
+        let r = subgraph(&m, "social", &["a".to_string()], &[], 1, &opts).unwrap();
         assert_eq!(r.rows.len(), 2); // a->b KNOWS, a->d WORKS
     }
 }

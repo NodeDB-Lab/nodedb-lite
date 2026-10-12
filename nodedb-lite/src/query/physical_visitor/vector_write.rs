@@ -182,16 +182,26 @@ where
 
 /// Delete a vector by surrogate: tombstone its live node and detach it from
 /// its payload row, as a delete by id does. Reports 1 when a row or node
-/// existed, else 0.
+/// existed, else 0. A missing surrogate reports 0.
 pub(super) fn vector_delete_by_surrogate<'a, S>(
     engine: &'a LiteQueryEngine<S>,
     collection: String,
-    surrogate: Surrogate,
+    surrogate: Option<Surrogate>,
     field_name: String,
 ) -> LitePhysicalFut<'a>
 where
     S: StorageEngine + 'a,
 {
+    let Some(surrogate) = surrogate else {
+        return Box::pin(async move {
+            Ok(QueryResult {
+                columns: vec![],
+                rows: vec![],
+                rows_affected: 0,
+                command: None,
+            })
+        });
+    };
     let doc_id = surrogate.to_string();
     let vector_state = Arc::clone(&engine.vector_state);
     let crdt = Arc::clone(&engine.crdt);

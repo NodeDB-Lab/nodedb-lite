@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Catalog changes made by DDL: dropping, moving and renaming indexes, and
+//! Catalog changes made by DDL: dropping and moving indexes, and
 //! clearing a collection's entries.
 //!
 //! A document index's changes are left for the flush, like the CRDT state
@@ -16,8 +16,6 @@ use crate::error::LiteError;
 use crate::storage::engine::{StorageEngine, WriteOp};
 
 use super::catalog::{IndexDef, IndexEngine};
-use super::key;
-use super::maintain::IndexWriteOp;
 use super::store::{IndexCatalog, IndexState};
 
 fn durable(def: &IndexDef) -> bool {
@@ -210,68 +208,6 @@ impl IndexCatalog {
         )
         .await
     }
-
-    /// Move every index on `old` — definitions, entries and tombstones — to
-    /// the collection name `new`.
-    pub(crate) async fn rename_collection<S: StorageEngine>(
-        &self,
-        storage: &S,
-        old: &str,
-        new: &str,
-    ) -> Result<(), LiteError> {
-        self.apply_ddl(
-            storage,
-            |state| defs_of(state, old),
-            |state, defs| {
-                let mut ops = Vec::new();
-                for def in defs {
-                    let (moved, written) =
-                        state.collecting(durable(def), |s| rename_index(s, def, new));
-                    moved?;
-                    ops.extend(written);
-                }
-                let tombstones: Vec<(String, String)> = state
-                    .tombstoned
-                    .iter()
-                    .filter(|(c, _)| c == old)
-                    .cloned()
-                    .collect();
-                for (_, id) in tombstones {
-                    state.tombstoned.remove(&(old.to_string(), id.clone()));
-                    state.tombstoned.insert((new.to_string(), id));
-                }
-                Ok(((), ops))
-            },
-        )
-        .await
-    }
-}
-
-/// Move one index and its entries to the collection name `new`.
-fn rename_index(state: &mut IndexState, def: &Arc<IndexDef>, new: &str) -> Result<(), LiteError> {
-    let old_prefix = def.entry_prefix();
-    let renamed = Arc::new(IndexDef {
-        collection: new.to_string(),
-        ..(**def).clone()
-    });
-    let new_prefix = renamed.entry_prefix();
-    let entries: Vec<Vec<u8>> = state
-        .entries
-        .range(old_prefix.clone()..)
-        .take_while(|k| k.starts_with(&old_prefix))
-        .cloned()
-        .collect();
-    state.remove_def(&def.name);
-    state.put_def(renamed)?;
-    for entry in entries {
-        let mut moved = new_prefix.clone();
-        moved.extend_from_slice(&entry[old_prefix.len()..]);
-        if let Some(parsed) = key::parse_entry(&moved) {
-            let doc_id = parsed.doc_id.to_string();
-            state.apply(new, &doc_id, vec![IndexWriteOp::Put(moved)]);
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -398,15 +334,6 @@ mod tests {
                     .is_err()
             );
             assert_unchanged(&catalog, &def);
-
-            assert!(
-                catalog
-                    .rename_collection(&RejectingStorage, "users", "people")
-                    .await
-                    .is_err()
-            );
-            assert_unchanged(&catalog, &def);
-            assert!(catalog.def_on_field("people", "$.email").is_none());
         }
     }
 
@@ -426,49 +353,5 @@ mod tests {
 
         assert!(dropped.is_some());
         assert!(catalog.def_named("idx_email").is_none());
-    }
-
-    #[tokio::test]
-    async fn renaming_a_collection_moves_its_indexes() {
-        let storage = PagedbStorageMem::open_in_memory().await.expect("storage");
-        let catalog = IndexCatalog::new();
-        let (path, is_array) = canonical_field("email");
-        let def = Arc::new(IndexDef {
-            name: "idx_email".into(),
-            collection: "old".into(),
-            path,
-            unique: true,
-            case_insensitive: false,
-            is_array,
-            predicate: None,
-            engine: IndexEngine::Document,
-        });
-        let row = Value::Object(HashMap::from([(
-            "email".to_string(),
-            Value::String("a@x".into()),
-        )]));
-        catalog
-            .install(def, [("d1".to_string(), row.clone())])
-            .expect("install");
-
-        catalog
-            .rename_collection(&storage, "old", "new")
-            .await
-            .expect("rename");
-
-        let moved = catalog.def_named("idx_email").expect("definition kept");
-        assert_eq!(moved.collection, "new");
-        assert_eq!(
-            catalog.lookup_eq(&moved, &Value::String("a@x".into())),
-            vec!["d1"]
-        );
-        assert!(catalog.def_on_field("old", "$.email").is_none());
-        // The moved unique index still guards its value under the new name.
-        let read = |id: &str| (id == "d1").then(|| row.clone());
-        assert!(
-            catalog
-                .check_unique("new", &[("d2", Some(row.clone()))], read)
-                .is_err()
-        );
     }
 }

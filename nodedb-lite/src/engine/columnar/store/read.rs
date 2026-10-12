@@ -26,7 +26,15 @@ impl<S: StorageEngine> ColumnarEngine<S> {
         }
         let snap = {
             let s = Self::lock_state(&state_arc)?;
-            let memtable_rows: Vec<Vec<Value>> = s.mutation.memtable().iter_rows().collect();
+            // A memtable row with a corrupt cell refuses the scan.
+            let memtable_rows: Vec<Vec<Value>> = s
+                .mutation
+                .memtable()
+                .iter_rows()
+                .collect::<Result<_, _>>()
+                .map_err(|e| LiteError::Storage {
+                    detail: format!("read memtable row of '{collection}': {e}"),
+                })?;
             Snapshot {
                 memtable_rows,
                 seg_metas: s.segments.clone(),

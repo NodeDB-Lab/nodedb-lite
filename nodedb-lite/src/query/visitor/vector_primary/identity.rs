@@ -70,7 +70,7 @@ pub(super) mod support {
     use nodedb_sql::types::filter::Filter;
     use nodedb_sql::types::plan::{VectorPrimaryInsertIntent, VectorPrimaryRow};
     use nodedb_sql::types_expr::{SqlExpr, SqlValue};
-    use nodedb_types::{Surrogate, VectorQuantization, VectorStorageDtype};
+    use nodedb_types::{VectorQuantization, VectorStorageDtype};
 
     use super::super::insert::lower_vector_primary_insert;
     use super::super::mutation::{lower_vector_primary_delete, lower_vector_primary_update};
@@ -92,7 +92,6 @@ pub(super) mod support {
             payload_fields.insert((*k).to_string(), v.clone());
         }
         VectorPrimaryRow {
-            surrogate: Surrogate::ZERO,
             vector,
             payload_fields,
         }

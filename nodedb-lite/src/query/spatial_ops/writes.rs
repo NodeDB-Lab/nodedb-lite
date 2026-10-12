@@ -45,8 +45,17 @@ pub fn spatial_delete<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     field: &str,
-    surrogate: Surrogate,
+    surrogate: Option<Surrogate>,
 ) -> Result<QueryResult, LiteError> {
+    // No surrogate means no row to remove.
+    let Some(surrogate) = surrogate else {
+        return Ok(QueryResult {
+            columns: vec![],
+            rows: vec![],
+            rows_affected: 0,
+            command: None,
+        });
+    };
     let doc_id = surrogate.0.to_string();
     engine
         .spatial

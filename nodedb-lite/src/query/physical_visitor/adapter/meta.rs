@@ -52,26 +52,6 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                 meta_ops::handle_unregister_materialized_view(engine, tid, &n).await
             }))
         }
-        MetaOp::RenameCollection {
-            tenant_id,
-            old_collection,
-            new_collection,
-            ..
-        } => {
-            let tid = *tenant_id;
-            let old = old_collection.clone();
-            let new = new_collection.clone();
-            Ok(Box::pin(async move {
-                meta_ops::lifecycle::handle_rename_collection_coordinated(
-                    engine,
-                    permit,
-                    tid,
-                    old.as_str(),
-                    new.as_str(),
-                )
-                .await
-            }))
-        }
         // Lite's convert probes its own per-engine stores (CRDT, strict) and
         // decodes each with that store's schema, so the plan-level source
         // mode carries nothing Lite acts on.
@@ -298,7 +278,16 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
         MetaOp::CreateTenantSnapshot {
             tenant_id,
             cut_watermark: _,
+            cut_capture,
+            arrays: _,
         } => {
+            if cut_capture.is_some() {
+                return Err(LiteError::Unsupported {
+                    detail: "CreateTenantSnapshot with cut_capture is a cluster backup barrier \
+                             capture; unsupported on single-node Lite"
+                        .into(),
+                });
+            }
             let tid = *tenant_id;
             let storage = engine.storage.clone();
             Ok(Box::pin(async move {
@@ -365,11 +354,6 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
         // Calvin deterministic-scheduling ops. Calvin sequences transactions
         // across a replicated log; Lite has no sequencer, Raft group, or
         // cross-core write-version registry, so these are unreachable here.
-        MetaOp::CalvinFlush { .. } => Err(LiteError::Unsupported {
-            detail: "CalvinFlush is a deterministic-scheduler op; \
-                     unsupported on the single-node Lite engine"
-                .into(),
-        }),
         MetaOp::CalvinResolve { .. } => Err(LiteError::Unsupported {
             detail: "CalvinResolve is a deterministic-scheduler op; \
                      unsupported on the single-node Lite engine"
@@ -380,8 +364,19 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                      unsupported on the single-node Lite engine"
                 .into(),
         }),
-        MetaOp::RecordCalvinWriteVersions { .. } => Err(LiteError::Unsupported {
-            detail: "RecordCalvinWriteVersions maintains the cluster write-version registry; \
+
+        MetaOp::VerifyHashChain { .. } => Err(LiteError::Unsupported {
+            detail: "VerifyHashChain checks a Data Plane audit hash chain; \
+                     unsupported on the single-node Lite engine"
+                .into(),
+        }),
+        MetaOp::HomeVersions { .. } => Err(LiteError::Unsupported {
+            detail: "HomeVersions reads the cluster write-version registry; \
+                     unsupported on the single-node Lite engine"
+                .into(),
+        }),
+        MetaOp::RestoreRedo(_) => Err(LiteError::Unsupported {
+            detail: "RestoreRedo reinstalls a cluster transaction redo record; \
                      unsupported on the single-node Lite engine"
                 .into(),
         }),

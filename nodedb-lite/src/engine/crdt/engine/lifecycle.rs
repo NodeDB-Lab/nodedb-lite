@@ -148,25 +148,16 @@ impl CrdtEngine {
         collection: &str,
         data: &[u8],
     ) -> Result<TrackedImport, LiteError> {
-        let result = (|| {
-            let state = self.state_mut(collection)?;
-            let before = state.state_frontiers();
-            let admission = state.import(data).map_err(|e| LiteError::Storage {
-                detail: format!("remote delta import for '{collection}' failed: {e}"),
-            })?;
-            let changed_rows =
-                state
-                    .changed_rows_since(collection, &before)
-                    .map_err(|e| LiteError::Storage {
-                        detail: format!("rows changed by remote delta for '{collection}': {e}"),
-                    })?;
-            Ok((admission, changed_rows))
-        })();
-        let (admission, changed_rows) = match result {
-            Ok(result) => result,
-            Err(error) => {
+        let tracked = self.state_mut(collection)?.import_tracked(collection, data);
+        let changed_rows = tracked.changed_rows;
+        let admission = match tracked.outcome {
+            Ok(admission) => admission,
+            Err(e) => {
+                self.sync_indexes(collection, changed_rows.iter().map(String::as_str));
                 self.reconcile_live_collection(collection);
-                return Err(error);
+                return Err(LiteError::Storage {
+                    detail: format!("remote delta import for '{collection}' failed: {e}"),
+                });
             }
         };
         warn_if_fully_trimmed(collection, "remote delta", &admission);
@@ -223,25 +214,18 @@ impl CrdtEngine {
         collection: &str,
         bytes: &[u8],
     ) -> Result<TrackedImport, LiteError> {
-        let result = (|| {
-            let state = self.state_mut(collection)?;
-            let before = state.state_frontiers();
-            let admission = state.import_local(bytes).map_err(|e| LiteError::Storage {
-                detail: format!("update import for '{collection}' failed: {e}"),
-            })?;
-            let changed_rows =
-                state
-                    .changed_rows_since(collection, &before)
-                    .map_err(|e| LiteError::Storage {
-                        detail: format!("rows changed by update for '{collection}': {e}"),
-                    })?;
-            Ok((admission, changed_rows))
-        })();
-        let (admission, changed_rows) = match result {
-            Ok(result) => result,
-            Err(error) => {
+        let tracked = self
+            .state_mut(collection)?
+            .import_local_tracked(collection, bytes);
+        let changed_rows = tracked.changed_rows;
+        let admission = match tracked.outcome {
+            Ok(admission) => admission,
+            Err(e) => {
+                self.sync_indexes(collection, changed_rows.iter().map(String::as_str));
                 self.reconcile_live_collection(collection);
-                return Err(error);
+                return Err(LiteError::Storage {
+                    detail: format!("update import for '{collection}' failed: {e}"),
+                });
             }
         };
         warn_if_fully_trimmed(collection, "update", &admission);

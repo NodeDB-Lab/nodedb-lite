@@ -24,7 +24,7 @@ pub use indexes::handle_rebuild_index;
 pub use info::handle_query_collection_size;
 pub use lifecycle::{
     handle_checkpoint, handle_compact, handle_convert_collection, handle_create_snapshot,
-    handle_rename_collection, handle_unregister_collection, handle_unregister_materialized_view,
+    handle_unregister_collection, handle_unregister_materialized_view,
 };
 pub use synonyms::{handle_delete_synonym_group, handle_put_synonym_group};
 pub use temporal::{

@@ -137,7 +137,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
             if depth < params.graph_depth
                 && let Some(csr) = csr
             {
-                let mut neighbors = csr.neighbors_multi(&id, &[], Direction::Out);
+                let mut neighbors = csr.neighbors(&id, &[], Direction::Out);
                 neighbors.sort_unstable_by(|a, b| a.1.cmp(&b.1));
                 for (_, neighbor) in neighbors {
                     if params

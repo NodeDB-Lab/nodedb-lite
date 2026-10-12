@@ -3,7 +3,7 @@ use nodedb_physical::PhysicalTaskVisitor;
 use nodedb_physical::physical_plan::VectorOp;
 use nodedb_sql::VectorPrimaryInsertVisitArgs;
 use nodedb_sql::types::plan::VectorPrimaryInsertIntent;
-use nodedb_types::RlsWriteCheck;
+use nodedb_types::{RlsWriteCheck, Surrogate};
 
 use super::identity::{key_column, row_identity, rows_affected};
 use crate::error::LiteError;
@@ -44,11 +44,12 @@ pub(in crate::query::visitor) fn lower_vector_primary_insert<'a, S: StorageEngin
         let (pk_bytes, payload) = row_identity(row, key_column)?;
         // Lite's planner produces no RLS program and no RETURNING projection;
         // the adapter rejects either if one ever appears.
+        // Lite binds no surrogate to a primary key. Identity is the pk bytes.
         let op = match intent {
             VectorPrimaryInsertIntent::Insert => VectorOp::DirectInsert {
                 collection: qualified.clone(),
                 field: field.clone(),
-                surrogate: row.surrogate,
+                surrogate: Surrogate::ZERO,
                 pk_bytes,
                 vector: row.vector.clone(),
                 payload,
@@ -61,7 +62,7 @@ pub(in crate::query::visitor) fn lower_vector_primary_insert<'a, S: StorageEngin
             VectorPrimaryInsertIntent::InsertIfAbsent => VectorOp::DirectInsertIfAbsent {
                 collection: qualified.clone(),
                 field: field.clone(),
-                surrogate: row.surrogate,
+                surrogate: Surrogate::ZERO,
                 pk_bytes,
                 vector: row.vector.clone(),
                 payload,
@@ -74,7 +75,7 @@ pub(in crate::query::visitor) fn lower_vector_primary_insert<'a, S: StorageEngin
             VectorPrimaryInsertIntent::Upsert => VectorOp::DirectUpsert {
                 collection: qualified.clone(),
                 field: field.clone(),
-                surrogate: row.surrogate,
+                surrogate: Surrogate::ZERO,
                 pk_bytes,
                 vector: row.vector.clone(),
                 payload,

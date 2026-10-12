@@ -164,13 +164,19 @@ pub async fn temporal_neighbors<S: StorageEngine>(
 
     // When no as_of is provided, fall back to current-state neighbors.
     if system_as_of_ms.is_none() {
-        return super::traversal::neighbors(csr_map, collection, node_id, edge_label, direction);
+        return super::traversal::neighbors(
+            csr_map,
+            collection,
+            node_id,
+            edge_label.as_slice(),
+            direction,
+        );
     }
 
     let as_of = system_as_of_ms.unwrap();
     let snapshot = build_temporal_snapshot(storage, collection, as_of, memory).await?;
 
-    let nbrs = snapshot.neighbors(node_id, edge_label, direction);
+    let nbrs = snapshot.neighbors(node_id, edge_label.as_slice(), direction);
     let columns = vec!["label".to_string(), "neighbor".to_string()];
     let rows = nbrs
         .into_iter()

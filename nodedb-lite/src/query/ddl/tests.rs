@@ -96,10 +96,7 @@ fn type_vocabulary_canonical() {
     );
     assert_eq!(
         "DECIMAL".parse::<ColumnType>().unwrap(),
-        ColumnType::Decimal {
-            precision: 38,
-            scale: 10
-        }
+        ColumnType::Decimal(None)
     );
     assert_eq!(
         "GEOMETRY".parse::<ColumnType>().unwrap(),
@@ -137,10 +134,7 @@ fn type_vocabulary_aliases() {
     assert_eq!("BOOLEAN".parse::<ColumnType>().unwrap(), ColumnType::Bool);
     assert_eq!(
         "NUMERIC".parse::<ColumnType>().unwrap(),
-        ColumnType::Decimal {
-            precision: 38,
-            scale: 10
-        }
+        ColumnType::Decimal(None)
     );
 }
 

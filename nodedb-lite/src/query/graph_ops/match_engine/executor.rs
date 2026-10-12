@@ -141,7 +141,7 @@ fn execute_triple(
             let expanded = csr.traverse_bfs(
                 nodedb_graph::BfsParams {
                     start_nodes: &[src_name.as_str()],
-                    label_filter,
+                    label_filter: label_filter.as_slice(),
                     direction,
                     max_depth: triple.edge.max_hops,
                     max_visited: 50_000,
@@ -176,7 +176,7 @@ fn execute_triple(
         }
     } else {
         for src_name in &src_nodes {
-            let neighbors = csr.neighbors(src_name, label_filter, direction);
+            let neighbors = csr.neighbors(src_name, label_filter.as_slice(), direction);
             for (label_name, dst_name) in neighbors {
                 let Some(dst_raw) = csr.node_id_raw(&dst_name) else {
                     continue;

@@ -10,7 +10,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use nodedb_physical::physical_plan::GraphOp;
+use nodedb_physical::physical_plan::{GraphOp, RagStage};
 use nodedb_types::result::QueryResult;
 
 use crate::error::LiteError;
@@ -61,7 +61,7 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
 
         GraphOp::Hop {
             start_nodes,
-            edge_label,
+            edge_labels,
             direction,
             depth,
             options,
@@ -72,7 +72,7 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             engine,
             start_nodes,
             traversal::HopArgs {
-                edge_label: edge_label.as_deref(),
+                edge_labels,
                 direction: *direction,
                 depth: *depth,
                 options,
@@ -83,38 +83,37 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
 
         GraphOp::Neighbors {
             node_id,
-            edge_label,
+            edge_labels,
             direction,
             rls_filters,
             ..
-        } => traversal::neighbors(
-            engine,
-            node_id,
-            edge_label.as_deref(),
-            *direction,
-            rls_filters,
-        )?,
+        } => traversal::neighbors(engine, node_id, edge_labels, *direction, rls_filters)?,
 
         GraphOp::NeighborsMulti {
             node_ids,
-            edge_label,
+            edge_labels,
             direction,
             max_results,
             rls_filters,
+            edge_predicate,
+            with_properties,
             ..
-        } => traversal::neighbors_multi(
-            engine,
-            node_ids,
-            edge_label.as_deref(),
-            *direction,
-            *max_results,
-            rls_filters,
-        )?,
+        } => {
+            traversal::check_neighbors_multi_supported(edge_predicate, *with_properties)?;
+            traversal::neighbors_multi(
+                engine,
+                node_ids,
+                edge_labels,
+                *direction,
+                *max_results,
+                rls_filters,
+            )?
+        }
 
         GraphOp::Path {
             src,
             dst,
-            edge_label,
+            edge_labels,
             max_depth,
             options,
             frontier_bitmap,
@@ -125,7 +124,7 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             src,
             dst,
             traversal::PathArgs {
-                edge_label: edge_label.as_deref(),
+                edge_labels,
                 max_depth: *max_depth,
                 options,
                 frontier_bitmap: frontier_bitmap.as_ref(),
@@ -135,7 +134,7 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
 
         GraphOp::Subgraph {
             start_nodes,
-            edge_label,
+            edge_labels,
             depth,
             options,
             rls_filters,
@@ -143,7 +142,7 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
         } => traversal::subgraph(
             engine,
             start_nodes,
-            edge_label.as_deref(),
+            edge_labels,
             *depth,
             options,
             rls_filters,
@@ -207,23 +206,34 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             options: _,
             bm25_query,
             bm25_field,
-        } => fusion_match::rag_fusion(
-            engine,
-            collection.as_str(),
-            fusion_match::RagFusionArgs {
-                query_vector,
-                vector_top_k: *vector_top_k,
-                edge_label: edge_label.as_deref(),
-                direction: *direction,
-                expansion_depth: *expansion_depth,
-                final_top_k: *final_top_k,
-                rrf_k: *rrf_k,
-                rrf_k_triple: *rrf_k_triple,
-                vector_field,
-                bm25_query: bm25_query.as_deref(),
-                bm25_field: bm25_field.as_deref(),
-            },
-        ),
+            stage,
+        } => {
+            if !matches!(stage, RagStage::Local) {
+                return Err(LiteError::BadRequest {
+                    detail: format!(
+                        "GraphOp::RagFusion stage {stage:?} is a cross-core plan; \
+                         Lite runs only RagStage::Local"
+                    ),
+                });
+            }
+            fusion_match::rag_fusion(
+                engine,
+                collection.as_str(),
+                fusion_match::RagFusionArgs {
+                    query_vector,
+                    vector_top_k: *vector_top_k,
+                    edge_label: edge_label.as_deref(),
+                    direction: *direction,
+                    expansion_depth: *expansion_depth,
+                    final_top_k: *final_top_k,
+                    rrf_k: *rrf_k,
+                    rrf_k_triple: *rrf_k_triple,
+                    vector_field,
+                    bm25_query: bm25_query.as_deref(),
+                    bm25_field: bm25_field.as_deref(),
+                },
+            )
+        }
 
         // Cross-shard MATCH continuation / var-len resume and the BSP
         // superstep primitives (PageRank/WCC) exist to let a distributed
@@ -236,6 +246,22 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
 
         GraphOp::MatchVarLenResume { .. } => {
             Box::pin(async move { Err(unsupported::match_var_len_resume()) })
+        }
+
+        GraphOp::NodeEdgeGuard { .. } => {
+            Box::pin(async move { Err(unsupported::node_edge_guard()) })
+        }
+
+        GraphOp::NodePresenceGuard { .. } => {
+            Box::pin(async move { Err(unsupported::node_presence_guard()) })
+        }
+
+        GraphOp::NodePresenceRead { .. } => {
+            Box::pin(async move { Err(unsupported::node_presence_read()) })
+        }
+
+        GraphOp::TruncateEdges { .. } => {
+            Box::pin(async move { Err(unsupported::truncate_edges()) })
         }
 
         GraphOp::BspSuperstep(_) => Box::pin(async move { Err(unsupported::bsp_superstep()) }),

@@ -279,7 +279,8 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             source_key,
             dest_key,
             field,
-            *amount,
+            // Lite moves every balance by float arithmetic.
+            amount.to_f64(),
             rls_write_check,
         ),
 

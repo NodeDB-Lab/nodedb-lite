@@ -2,6 +2,7 @@
 //! Columnar write operations: insert (by intent), update, delete.
 
 use nodedb_physical::physical_plan::columnar::ColumnarInsertIntent;
+use nodedb_physical::physical_plan::document::types::UpdateValue;
 use nodedb_query::scan_filter::ScanFilter;
 use nodedb_types::columnar::ColumnarSchema;
 use nodedb_types::result::QueryResult;
@@ -172,11 +173,16 @@ pub async fn insert<S: StorageEngine>(
 }
 
 /// Update rows matching filter predicates.
+///
+/// A literal assignment decodes once. An expression assignment evaluates
+/// against each matched row's pre-image, so one assignment never observes
+/// another. Every post-image is built before the first row changes, so an
+/// assignment that fails leaves every row as it was.
 pub async fn update<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
     filters_bytes: &[u8],
-    updates: &[(String, Vec<u8>)],
+    updates: &[(String, UpdateValue)],
 ) -> Result<QueryResult, LiteError> {
     let schema = engine
         .columnar
@@ -198,40 +204,49 @@ pub async fn update<S: StorageEngine>(
         })?
     };
 
-    // Parse update value bytes (each value is msgpack-encoded).
-    let parsed_updates: Vec<(String, Value)> = updates
-        .iter()
-        .map(|(field, bytes)| {
-            let v: Value = zerompk::from_msgpack(bytes).unwrap_or(Value::Null);
-            (field.clone(), v)
-        })
-        .collect();
+    // `(column index, assignment)` per SET entry. A literal decodes here.
+    let mut assignments: Vec<(usize, Assigned<'_>)> = Vec::with_capacity(updates.len());
+    for (field, update) in updates {
+        let Some(col_idx) = col_names.iter().position(|n| n == field) else {
+            continue;
+        };
+        let assigned = match update {
+            UpdateValue::Literal(bytes) => {
+                Assigned::Literal(nodedb_types::value_from_msgpack(bytes).map_err(|e| {
+                    LiteError::Serialization {
+                        detail: format!("decode update value for field '{field}': {e}"),
+                    }
+                })?)
+            }
+            UpdateValue::Expr(expr) => Assigned::Expr(expr),
+        };
+        assignments.push((col_idx, assigned));
+    }
 
-    // Read current rows, apply filters, build modified rows.
-    // collect PKs and new rows first, then mutate (borrow separation).
     let all_rows = engine.columnar.list_rows(collection).await?;
 
-    let mut affected: u64 = 0;
-
+    let mut pending: Vec<(Value, Vec<Value>)> = Vec::new();
     for row in all_rows {
         let doc = row_to_object(&col_names, &row);
-        let matches = ScanFilter::all_match_value(&filters, &doc)?;
-        if !matches {
+        if !ScanFilter::all_match_value(&filters, &doc)? {
             continue;
         }
-
         let pk = row.get(pk_idx).cloned().unwrap_or(Value::Null);
-
-        // Build new_values: copy current row then apply updates.
         let mut new_values = row;
-        for (field, new_val) in &parsed_updates {
-            if let Some(col_idx) = col_names.iter().position(|n| n == field)
-                && col_idx < new_values.len()
-            {
-                new_values[col_idx] = new_val.clone();
+        for (col_idx, assigned) in &assignments {
+            let value = match assigned {
+                Assigned::Literal(value) => value.clone(),
+                Assigned::Expr(expr) => expr.eval(&doc)?,
+            };
+            if let Some(slot) = new_values.get_mut(*col_idx) {
+                *slot = value;
             }
         }
+        pending.push((pk, new_values));
+    }
 
+    let mut affected: u64 = 0;
+    for (pk, new_values) in pending {
         engine.columnar.update(collection, &pk, &new_values)?;
         index_columnar_rows(engine, collection, [new_values.as_slice()])?;
         affected += 1;
@@ -243,6 +258,12 @@ pub async fn update<S: StorageEngine>(
         rows_affected: affected,
         command: Some("UPDATE".into()),
     })
+}
+
+/// The value one columnar UPDATE assignment writes.
+enum Assigned<'a> {
+    Literal(Value),
+    Expr(&'a nodedb_query::expr::SqlExpr),
 }
 
 /// Delete rows matching filter predicates.

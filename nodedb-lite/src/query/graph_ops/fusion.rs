@@ -145,7 +145,7 @@ pub async fn rag_fusion<S: StorageEngine>(
             let expanded = csr.traverse_bfs(
                 nodedb_graph::BfsParams {
                     start_nodes: &starts,
-                    label_filter: edge_label,
+                    label_filter: edge_label.as_slice(),
                     direction,
                     max_depth: expansion_depth,
                     max_visited: max_vis,

@@ -2,6 +2,7 @@
 //! Read-only traversal `GraphOp` arms: hop, neighbors, path, subgraph.
 
 use nodedb_graph::{Direction, GraphTraversalOptions};
+use nodedb_types::filter::MetadataFilter;
 use nodedb_types::{RlsWriteCheck, SurrogateBitmap};
 
 use crate::error::LiteError;
@@ -16,12 +17,39 @@ use super::dispatch::GraphFut;
 /// Grouped tail fields of `GraphOp::Hop`, kept out of the function
 /// signature so it stays under clippy's argument-count lint.
 pub(super) struct HopArgs<'a> {
-    pub edge_label: Option<&'a str>,
+    pub edge_labels: &'a [String],
     pub direction: Direction,
     pub depth: usize,
     pub options: &'a GraphTraversalOptions,
     pub frontier_bitmap: Option<&'a SurrogateBitmap>,
     pub rls_filters: &'a [u8],
+}
+
+/// Borrow each owned label as `&str`.
+pub(super) fn label_refs(labels: &[String]) -> Vec<&str> {
+    labels.iter().map(String::as_str).collect()
+}
+
+/// Reject the `NeighborsMulti` fields Lite cannot evaluate. Lite stores
+/// edge properties outside the CSR index, so neither an edge predicate nor
+/// property projection has a local execution path.
+pub(super) fn check_neighbors_multi_supported(
+    edge_predicate: &[MetadataFilter],
+    with_properties: bool,
+) -> Result<(), LiteError> {
+    if !edge_predicate.is_empty() {
+        return Err(LiteError::Unsupported {
+            detail: "GraphOp::NeighborsMulti edge_predicate is unsupported on the Lite engine"
+                .into(),
+        });
+    }
+    if with_properties {
+        return Err(LiteError::Unsupported {
+            detail: "GraphOp::NeighborsMulti with_properties is unsupported on the Lite engine"
+                .into(),
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn hop<'a, S: StorageEngine + 'a>(
@@ -52,17 +80,18 @@ pub(super) fn hop<'a, S: StorageEngine + 'a>(
     let start_nodes = start_nodes.to_vec();
     let direction = args.direction;
     let depth = args.depth;
-    let edge_label = args.edge_label.map(str::to_owned);
+    let edge_labels = args.edge_labels.to_vec();
     let options = args.options.clone();
     let frontier_bitmap = args.frontier_bitmap.cloned();
     Ok(Box::pin(async move {
         // Resolve collection from csr_map.
         let collection = resolve_collection_for_nodes(&csr_map, &start_nodes);
+        let labels = label_refs(&edge_labels);
         traversal::hop(
             &csr_map,
             &collection,
             &start_nodes,
-            edge_label.as_deref(),
+            &labels,
             direction,
             depth,
             &options,
@@ -74,7 +103,7 @@ pub(super) fn hop<'a, S: StorageEngine + 'a>(
 pub(super) fn neighbors<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     node_id: &str,
-    edge_label: Option<&str>,
+    edge_labels: &[String],
     direction: Direction,
     rls_filters: &[u8],
 ) -> Result<GraphFut<'a>, LiteError> {
@@ -86,23 +115,18 @@ pub(super) fn neighbors<'a, S: StorageEngine + 'a>(
     )?;
     let csr_map = engine.csr.clone();
     let node_id = node_id.to_owned();
-    let edge_label = edge_label.map(str::to_owned);
+    let edge_labels = edge_labels.to_vec();
     Ok(Box::pin(async move {
         let collection = resolve_collection_for_nodes(&csr_map, std::slice::from_ref(&node_id));
-        traversal::neighbors(
-            &csr_map,
-            &collection,
-            &node_id,
-            edge_label.as_deref(),
-            direction,
-        )
+        let labels = label_refs(&edge_labels);
+        traversal::neighbors(&csr_map, &collection, &node_id, &labels, direction)
     }))
 }
 
 pub(super) fn neighbors_multi<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     node_ids: &[String],
-    edge_label: Option<&str>,
+    edge_labels: &[String],
     direction: Direction,
     max_results: u32,
     rls_filters: &[u8],
@@ -115,14 +139,15 @@ pub(super) fn neighbors_multi<'a, S: StorageEngine + 'a>(
     )?;
     let csr_map = engine.csr.clone();
     let node_ids = node_ids.to_vec();
-    let edge_label = edge_label.map(str::to_owned);
+    let edge_labels = edge_labels.to_vec();
     Ok(Box::pin(async move {
         let collection = resolve_collection_for_nodes(&csr_map, &node_ids);
+        let labels = label_refs(&edge_labels);
         traversal::neighbors_multi(
             &csr_map,
             &collection,
             &node_ids,
-            edge_label.as_deref(),
+            &labels,
             direction,
             max_results,
         )
@@ -132,7 +157,7 @@ pub(super) fn neighbors_multi<'a, S: StorageEngine + 'a>(
 /// Grouped tail fields of `GraphOp::Path`, kept out of the function
 /// signature so it stays under clippy's argument-count lint.
 pub(super) struct PathArgs<'a> {
-    pub edge_label: Option<&'a str>,
+    pub edge_labels: &'a [String],
     pub max_depth: usize,
     pub options: &'a GraphTraversalOptions,
     pub frontier_bitmap: Option<&'a SurrogateBitmap>,
@@ -154,18 +179,19 @@ pub(super) fn path<'a, S: StorageEngine + 'a>(
     let csr_map = engine.csr.clone();
     let src = src.to_owned();
     let dst = dst.to_owned();
-    let edge_label = args.edge_label.map(str::to_owned);
+    let edge_labels = args.edge_labels.to_vec();
     let max_depth = args.max_depth;
     let options = args.options.clone();
     let frontier_bitmap = args.frontier_bitmap.cloned();
     Ok(Box::pin(async move {
         let collection = resolve_collection_for_nodes(&csr_map, &[src.clone(), dst.clone()]);
+        let labels = label_refs(&edge_labels);
         traversal::path(
             &csr_map,
             &collection,
             &src,
             &dst,
-            edge_label.as_deref(),
+            &labels,
             max_depth,
             &options,
             frontier_bitmap.as_ref(),
@@ -176,7 +202,7 @@ pub(super) fn path<'a, S: StorageEngine + 'a>(
 pub(super) fn subgraph<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     start_nodes: &[String],
-    edge_label: Option<&str>,
+    edge_labels: &[String],
     depth: usize,
     options: &GraphTraversalOptions,
     rls_filters: &[u8],
@@ -189,15 +215,16 @@ pub(super) fn subgraph<'a, S: StorageEngine + 'a>(
     )?;
     let csr_map = engine.csr.clone();
     let start_nodes = start_nodes.to_vec();
-    let edge_label = edge_label.map(str::to_owned);
+    let edge_labels = edge_labels.to_vec();
     let options = options.clone();
     Ok(Box::pin(async move {
         let collection = resolve_collection_for_nodes(&csr_map, &start_nodes);
+        let labels = label_refs(&edge_labels);
         traversal::subgraph(
             &csr_map,
             &collection,
             &start_nodes,
-            edge_label.as_deref(),
+            &labels,
             depth,
             &options,
         )

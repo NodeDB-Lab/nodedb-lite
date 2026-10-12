@@ -9,5 +9,4 @@ mod vector_write;
 
 pub(crate) use adapter::LiteDataPlaneVisitor;
 pub(crate) use adapter::execute_surrogate_scan;
-pub(crate) use text_op::execute_text_op_on_field;
 pub(crate) use vector_direct::clear_collection_indexes;
