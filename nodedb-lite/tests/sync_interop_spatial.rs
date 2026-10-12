@@ -23,7 +23,7 @@
 
 #![cfg(feature = "sync")]
 
-mod common;
+pub mod common;
 
 use std::sync::Arc;
 use std::time::Duration;

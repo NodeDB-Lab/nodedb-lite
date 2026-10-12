@@ -11,7 +11,7 @@
 // This file is compiled as an integration test (not a criterion bench) so that
 // nextest can manage it. Criterion is not required.
 
-mod common;
+pub mod common;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};

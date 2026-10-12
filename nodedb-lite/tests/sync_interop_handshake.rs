@@ -10,7 +10,7 @@
 //! kills it on exit. The `heavy` nextest group serializes these so port 9090
 //! is never contested.
 
-mod common;
+pub mod common;
 
 use std::time::Duration;
 

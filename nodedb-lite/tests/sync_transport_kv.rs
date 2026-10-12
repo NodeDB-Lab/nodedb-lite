@@ -21,7 +21,7 @@ use nodedb_types::sync::wire::{
     RowPushRejectMsg, SyncMessageType, stream_id_for,
 };
 
-mod common;
+pub mod common;
 
 use common::mock_delegate::MockDelegate;
 use common::ws_origin::{MockOrigin, await_until, collect_frames_for, next_frame, send_frame};

@@ -9,7 +9,7 @@
 //! Original note: Schema sync uses SchemaRegistry::import_snapshot / export_snapshot
 //! (the Loro CRDT layer) without live ALTER NDARRAY DDL wiring over a real transport.
 
-mod common;
+pub mod common;
 
 use std::sync::Arc;
 

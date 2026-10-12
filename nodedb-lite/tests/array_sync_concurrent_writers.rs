@@ -10,7 +10,7 @@
 //! are delivered to an "Origin" harness (third in-process engine). AS-OF reads
 //! verify both versions land in HLC order.
 
-mod common;
+pub mod common;
 
 use nodedb_array::sync::op::{ArrayOp, ArrayOpHeader, ArrayOpKind};
 use nodedb_array::types::cell_value::value::CellValue;

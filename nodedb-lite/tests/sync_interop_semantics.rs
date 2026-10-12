@@ -8,5 +8,5 @@
 //!
 //! All tests run in the `heavy` nextest group (serialised, port 9090).
 
-mod common;
+pub mod common;
 mod semantics;

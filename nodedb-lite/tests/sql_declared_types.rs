@@ -5,7 +5,7 @@
 //! Run with:
 //!   cargo nextest run -p nodedb-lite --test sql_declared_types
 
-mod common;
+pub mod common;
 
 use std::sync::Arc;
 

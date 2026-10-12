@@ -10,7 +10,7 @@
 //! yet validated end-to-end, so "Origin" in this file is an in-process Lite
 //! inbound + engine state.
 
-mod common;
+pub mod common;
 
 use nodedb_array::types::cell_value::value::CellValue;
 use nodedb_array::types::coord::value::CoordValue;

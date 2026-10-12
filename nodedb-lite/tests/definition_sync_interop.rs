@@ -27,7 +27,7 @@
 //!
 //! Tests run in the `heavy` nextest group (serialized, one at a time).
 
-mod common;
+pub mod common;
 
 use std::time::Duration;
 

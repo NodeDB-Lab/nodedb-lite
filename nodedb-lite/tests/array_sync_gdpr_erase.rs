@@ -8,7 +8,7 @@
 //!
 //! Original note: bypasses WebSocket transport; exercises wire-message handlers directly.
 
-mod common;
+pub mod common;
 
 use nodedb_array::types::cell_value::value::CellValue;
 use nodedb_lite::sync::array::inbound::outcome::InboundOutcome;

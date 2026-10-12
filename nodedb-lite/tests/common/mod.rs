@@ -1,4 +1,8 @@
-#![allow(dead_code, unused_imports)]
+//! Shared helpers for the integration test crates.
+//!
+//! Each test crate declares `pub mod common;`. The `pub` path from the crate
+//! root makes every helper reachable, so a crate that uses only some helpers
+//! gets no `dead_code` or `unused_imports` warnings for the rest.
 
 pub mod clock;
 pub mod harness;

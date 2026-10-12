@@ -6,7 +6,7 @@
 //! fan-out path (`ArrayFanout`) to deliver to subscribed Lite sessions and
 //! are deferred until that path lands.
 
-mod common;
+pub mod common;
 
 /// Smoke test: Lite pushes an array put op to Origin over WebSocket;
 /// Origin applies it and echoes a delta back; Lite receives and applies it.

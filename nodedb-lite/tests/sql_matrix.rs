@@ -8,7 +8,7 @@
 //! Run with:
 //!   cargo nextest run -p nodedb-lite --test sql_matrix
 
-mod common;
+pub mod common;
 
 use std::sync::Arc;
 

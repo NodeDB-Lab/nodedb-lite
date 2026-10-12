@@ -18,7 +18,7 @@
 //!   incoming `ArrayDelta` / `ArrayDeltaBatch` frame.
 //! - Assertions check both the returned `ArrayAckMsg` and the engine state.
 
-mod common;
+pub mod common;
 
 use std::sync::Arc;
 

@@ -7,7 +7,7 @@
 //!
 //! Each test spawns its own Origin instance with a fresh temp data dir.
 
-mod common;
+pub mod common;
 
 use std::time::Duration;
 

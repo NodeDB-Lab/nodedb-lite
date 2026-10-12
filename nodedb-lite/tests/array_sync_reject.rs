@@ -9,7 +9,7 @@
 //! Original note: "Rejection" is synthesised by delivering an ArrayRejectMsg
 //! directly to the inbound handler — matching what Origin would send over the wire.
 
-mod common;
+pub mod common;
 
 use nodedb_array::sync::op_codec;
 use nodedb_lite::sync::array::inbound::outcome::InboundOutcome;

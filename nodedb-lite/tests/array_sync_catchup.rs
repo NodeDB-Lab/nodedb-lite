@@ -14,7 +14,7 @@
 //! 2. Shipping a synthetic snapshot via handle_snapshot_header / handle_snapshot_chunk.
 //! 3. Verifying the engine state after snapshot assembly.
 
-mod common;
+pub mod common;
 
 use nodedb_array::sync::hlc::Hlc;
 use nodedb_array::sync::op::{ArrayOp, ArrayOpHeader, ArrayOpKind};

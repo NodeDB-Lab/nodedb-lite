@@ -8,7 +8,7 @@
 //! Run with:
 //!   cargo nextest run -p nodedb-lite --test sql_parity
 
-mod common;
+pub mod common;
 
 #[path = "sql_parity/document.rs"]
 mod document;

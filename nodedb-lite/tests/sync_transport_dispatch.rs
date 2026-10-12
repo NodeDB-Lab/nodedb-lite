@@ -20,7 +20,7 @@ use nodedb_lite::nodedb::CollectionMeta;
 use nodedb_lite::sync::{SyncClient, SyncConfig, SyncDelegate, run_sync_loop};
 use nodedb_types::sync::wire::SyncMessageType;
 
-mod common;
+pub mod common;
 
 use common::mock_delegate::MockDelegate;
 use common::ws_origin::{MockOrigin, await_until, collect_frames_for, send_frame};
