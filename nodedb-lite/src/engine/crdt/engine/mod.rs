@@ -24,6 +24,7 @@ mod mutate;
 mod pending;
 mod persist;
 mod read;
+mod rollback;
 mod rotate;
 pub mod types;
 

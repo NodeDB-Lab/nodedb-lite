@@ -12,6 +12,7 @@ use nodedb_crdt::{CrdtState, ImportAdmission};
 
 use crate::error::LiteError;
 
+use super::rollback::Rollback;
 use super::types::CrdtEngine;
 
 /// What an import did to a collection.
@@ -119,8 +120,8 @@ impl CrdtEngine {
         match self.states.entry(collection.to_string()) {
             Entry::Occupied(e) => Ok(e.into_mut()),
             Entry::Vacant(e) => {
-                let state = CrdtState::new(peer_id).map_err(|err| LiteError::Storage {
-                    detail: format!("failed to create CrdtState for '{collection}': {err}"),
+                let state = CrdtState::new(peer_id).map_err(|err| {
+                    LiteError::crdt(&format!("creating CrdtState for '{collection}'"), err)
                 })?;
                 Ok(e.insert(state))
             }
@@ -155,9 +156,10 @@ impl CrdtEngine {
             Err(e) => {
                 self.sync_indexes(collection, changed_rows.iter().map(String::as_str));
                 self.reconcile_live_collection(collection);
-                return Err(LiteError::Storage {
-                    detail: format!("remote delta import for '{collection}' failed: {e}"),
-                });
+                return Err(LiteError::crdt(
+                    &format!("remote delta import for '{collection}'"),
+                    e,
+                ));
             }
         };
         warn_if_fully_trimmed(collection, "remote delta", &admission);
@@ -195,9 +197,7 @@ impl CrdtEngine {
         let result = self
             .state_mut(collection)?
             .import_local(snapshot)
-            .map_err(|e| LiteError::Storage {
-                detail: format!("snapshot import for '{collection}' failed: {e}"),
-            });
+            .map_err(|e| LiteError::crdt(&format!("snapshot import for '{collection}'"), e));
         self.reconcile_live_collection(collection);
         let admission = result?;
         warn_if_fully_trimmed(collection, "snapshot", &admission);
@@ -223,9 +223,10 @@ impl CrdtEngine {
             Err(e) => {
                 self.sync_indexes(collection, changed_rows.iter().map(String::as_str));
                 self.reconcile_live_collection(collection);
-                return Err(LiteError::Storage {
-                    detail: format!("update import for '{collection}' failed: {e}"),
-                });
+                return Err(LiteError::crdt(
+                    &format!("update import for '{collection}'"),
+                    e,
+                ));
             }
         };
         warn_if_fully_trimmed(collection, "update", &admission);
@@ -270,9 +271,9 @@ impl CrdtEngine {
     ) -> Result<Vec<u8>, LiteError> {
         self.snapshot_exports
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        state.export_snapshot().map_err(|e| LiteError::Storage {
-            detail: format!("snapshot export for '{collection}' failed: {e}"),
-        })
+        state
+            .export_snapshot()
+            .map_err(|e| LiteError::crdt(&format!("snapshot export for '{collection}'"), e))
     }
 
     /// Access a collection's underlying `CrdtState` for advanced operations.
@@ -299,9 +300,38 @@ impl CrdtEngine {
         };
         state
             .export_updates_since(from_version)
-            .map_err(|e| LiteError::Storage {
-                detail: format!("export_delta_from '{collection}': {e}"),
-            })
+            .map_err(|e| LiteError::crdt(&format!("export_delta_from '{collection}'"), e))
+    }
+
+    /// Restore one document to its state at `version` with a forward
+    /// mutation.
+    ///
+    /// The restore is a local write: its delta joins the sync queue like any
+    /// other, and the row's derived indexes follow it. Returns the restore
+    /// delta, or an empty vector when the live row already matches.
+    pub fn restore_to_version(
+        &mut self,
+        collection: &str,
+        document_id: &str,
+        version: &loro::VersionVector,
+    ) -> Result<Vec<u8>, LiteError> {
+        if !self.states.contains_key(collection) {
+            return Err(LiteError::from(nodedb_crdt::CrdtError::UnknownCollection(
+                collection.to_string(),
+            )));
+        }
+        let (delta, _) = self.with_delta_capture(
+            collection,
+            document_id,
+            "restore to version",
+            Rollback::Keep,
+            |state| {
+                state
+                    .restore_to_version(collection, document_id, version)
+                    .map_err(|e| LiteError::crdt("restore to version", e))
+            },
+        )?;
+        Ok(delta)
     }
 
     /// Compact a collection's history at a specific version, discarding oplog
@@ -319,9 +349,7 @@ impl CrdtEngine {
         };
         state
             .compact_at_version(version)
-            .map_err(|e| LiteError::Storage {
-                detail: format!("compact_at_version '{collection}': {e}"),
-            })?;
+            .map_err(|e| LiteError::crdt(&format!("compact_at_version '{collection}'"), e))?;
         // See `compact_history`: the frontier is unchanged but the exported
         // bytes are not, so the collection must be re-persisted — as a fresh
         // checkpoint, since the updates on top of the old base no longer
@@ -337,6 +365,7 @@ impl CrdtEngine {
 #[cfg(test)]
 mod tests {
     use super::CrdtEngine;
+    use crate::error::LiteError;
     use loro::LoroValue;
 
     #[test]
@@ -389,5 +418,61 @@ mod tests {
             imported.changed_rows.contains("i1"),
             "the import must report the row it created"
         );
+    }
+
+    #[test]
+    fn restoring_a_row_absent_at_the_version_is_an_undefined_object() {
+        let mut engine = CrdtEngine::new(1).unwrap();
+        engine
+            .upsert("notes", "a", &[("v", LoroValue::I64(1))])
+            .unwrap();
+        let pending_before = engine.pending_count();
+
+        let err = engine
+            .restore_to_version("notes", "a", &loro::VersionVector::default())
+            .unwrap_err();
+
+        assert!(matches!(err, LiteError::UndefinedObject { .. }), "{err:?}");
+        assert_eq!(
+            nodedb_types::error::NodeDbError::from(err).code(),
+            nodedb_types::error::ErrorCode::UNDEFINED_OBJECT
+        );
+        assert_eq!(engine.pending_count(), pending_before);
+    }
+
+    #[test]
+    fn a_restore_joins_the_sync_queue() {
+        let mut engine = CrdtEngine::new(1).unwrap();
+        engine
+            .upsert("notes", "a", &[("v", LoroValue::I64(1))])
+            .unwrap();
+        let version = engine.state("notes").unwrap().oplog_version_vector();
+        engine
+            .upsert("notes", "a", &[("v", LoroValue::I64(2))])
+            .unwrap();
+
+        let delta = engine.restore_to_version("notes", "a", &version).unwrap();
+
+        assert!(!delta.is_empty());
+        assert_eq!(
+            engine.read_field("notes", "a", "v"),
+            Some(LoroValue::I64(1))
+        );
+        assert_eq!(engine.pending_count(), 3);
+        let peer = nodedb_crdt::CrdtState::new(CrdtEngine::collection_peer_id(2, "notes")).unwrap();
+        for pending in engine.pending_deltas() {
+            peer.import(&pending.delta_bytes).unwrap();
+        }
+        assert_eq!(peer.read_field("notes", "a", "v"), Some(LoroValue::I64(1)));
+    }
+
+    #[test]
+    fn restoring_in_an_absent_collection_is_an_undefined_object() {
+        let mut engine = CrdtEngine::new(1).unwrap();
+        let err = engine
+            .restore_to_version("missing", "a", &loro::VersionVector::default())
+            .unwrap_err();
+        assert!(matches!(err, LiteError::UndefinedObject { .. }), "{err:?}");
+        assert!(engine.state("missing").is_none());
     }
 }

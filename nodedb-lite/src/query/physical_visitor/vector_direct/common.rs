@@ -169,15 +169,11 @@ pub(super) fn write_row(
     if guard.exists(collection, doc_id) {
         guard
             .delete(collection, doc_id)
-            .map_err(|e| LiteError::Storage {
-                detail: format!("{op_name}: CRDT row replace failed: {e}"),
-            })?;
+            .map_err(|e| e.within(&format!("{op_name}: CRDT row replace")))?;
     }
     guard
         .upsert(collection, doc_id, &loro_fields)
-        .map_err(|e| LiteError::Storage {
-            detail: format!("{op_name}: CRDT upsert failed: {e}"),
-        })?;
+        .map_err(|e| e.within(&format!("{op_name}: CRDT upsert")))?;
     Ok(())
 }
 
@@ -194,8 +190,6 @@ pub(super) fn delete_row(
     }
     guard
         .delete(collection, doc_id)
-        .map_err(|e| LiteError::Storage {
-            detail: format!("{op_name}: CRDT delete failed: {e}"),
-        })?;
+        .map_err(|e| e.within(&format!("{op_name}: CRDT delete")))?;
     Ok(true)
 }

@@ -54,20 +54,20 @@ impl CrdtEngine {
             let peer_id = Self::collection_peer_id(new_peer_id, collection);
             let rekeyed = state
                 .rekey(collection, peer_id)
-                .map_err(|e| LiteError::Storage {
-                    detail: format!("peer-id rotation of '{collection}' failed: {e}"),
-                })?;
+                .map_err(|e| LiteError::crdt(&format!("peer-id rotation of '{collection}'"), e))?;
 
             for row in &rekeyed.rows {
                 let delta_bytes = rekeyed
                     .state
                     .export_local_range(row.from_counter, row.to_counter)
-                    .map_err(|e| LiteError::Storage {
-                        detail: format!(
-                            "peer-id rotation of '{collection}' could not export row \
-                             '{}': {e}",
-                            row.row_id
-                        ),
+                    .map_err(|e| {
+                        LiteError::crdt(
+                            &format!(
+                                "peer-id rotation of '{collection}' exporting row '{}'",
+                                row.row_id
+                            ),
+                            e,
+                        )
                     })?;
                 if delta_bytes.is_empty() {
                     continue;

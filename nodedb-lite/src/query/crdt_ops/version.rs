@@ -65,9 +65,7 @@ pub async fn handle_read_at_version<S: StorageEngine>(
 
     let value = state
         .read_at_version(collection, document_id, &vv)
-        .map_err(|e| LiteError::Storage {
-            detail: format!("read_at_version: {e}"),
-        })?;
+        .map_err(|e| LiteError::crdt("ReadAtVersion", e))?;
 
     let row = match value {
         Some(v) => {
@@ -116,11 +114,7 @@ pub async fn handle_export_delta<S: StorageEngine>(
     if crdt.state(collection).is_none() {
         return Err(missing_collection("ExportDelta", collection));
     }
-    let delta_bytes = crdt
-        .export_delta_from(collection, &vv)
-        .map_err(|e| LiteError::Storage {
-            detail: format!("ExportDelta: {e}"),
-        })?;
+    let delta_bytes = crdt.export_delta_from(collection, &vv)?;
 
     Ok(QueryResult {
         columns: vec!["delta_bytes".to_string()],
@@ -132,7 +126,7 @@ pub async fn handle_export_delta<S: StorageEngine>(
 
 /// Restore a document to a historical version via a forward mutation.
 ///
-/// Returns the delta bytes for the restore operation.
+/// The restore delta joins the sync queue. Returns its bytes.
 pub async fn handle_restore_to_version<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     collection: &str,
@@ -188,14 +182,15 @@ pub(crate) async fn handle_restore_to_version_admitted<S: StorageEngine>(
     let _permit = permit;
     let vv = parse_version_vector(target_version_json)?;
 
-    let crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
-    let delta_bytes = crdt
-        .state(collection)
-        .ok_or_else(|| missing_collection("RestoreToVersion", collection))?
-        .restore_to_version(collection, document_id, &vv)
-        .map_err(|e| LiteError::Storage {
-            detail: format!("RestoreToVersion: {e}"),
-        })?;
+    let delta_bytes = {
+        let mut crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
+        if crdt.state(collection).is_none() {
+            return Err(missing_collection("RestoreToVersion", collection));
+        }
+        crdt.restore_to_version(collection, document_id, &vv)?
+    };
+    // The restore is a local write: the text index follows the restored row.
+    crate::query::text_index::reindex_documents(engine, collection, [document_id])?;
 
     Ok(QueryResult {
         columns: vec!["delta_bytes".to_string()],
@@ -245,10 +240,7 @@ pub(crate) async fn handle_compact_at_version_admitted<S: StorageEngine>(
     if crdt.state(collection).is_none() {
         return Err(missing_collection("CompactAtVersion", collection));
     }
-    crdt.compact_at_version(collection, &vv)
-        .map_err(|e| LiteError::Storage {
-            detail: format!("CompactAtVersion: {e}"),
-        })?;
+    crdt.compact_at_version(collection, &vv)?;
 
     Ok(QueryResult {
         columns: vec![],

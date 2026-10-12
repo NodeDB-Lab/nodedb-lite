@@ -82,10 +82,7 @@ pub(crate) async fn handle_list_insert_admitted<S: StorageEngine>(
         })?;
 
     let mut crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
-    crdt.list_insert(collection, document_id, list_path, index, &fields)
-        .map_err(|e| LiteError::Storage {
-            detail: format!("ListInsert: {e}"),
-        })?;
+    crdt.list_insert(collection, document_id, list_path, index, &fields)?;
 
     Ok(QueryResult {
         columns: vec![],
@@ -148,10 +145,7 @@ pub(crate) async fn handle_list_delete_admitted<S: StorageEngine>(
 ) -> Result<QueryResult, LiteError> {
     let _permit = permit;
     let mut crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
-    crdt.list_delete(collection, document_id, list_path, index)
-        .map_err(|e| LiteError::Storage {
-            detail: format!("ListDelete: {e}"),
-        })?;
+    crdt.list_delete(collection, document_id, list_path, index)?;
 
     Ok(QueryResult {
         columns: vec![],
@@ -228,10 +222,7 @@ pub(crate) async fn handle_list_move_admitted<S: StorageEngine>(
 ) -> Result<QueryResult, LiteError> {
     let _permit = permit;
     let mut crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
-    crdt.list_move(collection, document_id, list_path, from_index, to_index)
-        .map_err(|e| LiteError::Storage {
-            detail: format!("ListMove: {e}"),
-        })?;
+    crdt.list_move(collection, document_id, list_path, from_index, to_index)?;
 
     Ok(QueryResult {
         columns: vec![],

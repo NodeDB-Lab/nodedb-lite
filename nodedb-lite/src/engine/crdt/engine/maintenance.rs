@@ -13,8 +13,8 @@ impl CrdtEngine {
     /// operations are discarded. Current state is fully preserved.
     pub fn compact_history(&mut self) -> Result<(), LiteError> {
         for (collection, state) in &mut self.states {
-            state.compact_history().map_err(|e| LiteError::Storage {
-                detail: format!("history compaction for '{collection}' failed: {e}"),
+            state.compact_history().map_err(|e| {
+                LiteError::crdt(&format!("history compaction for '{collection}'"), e)
             })?;
         }
         // Compaction rewrites the document without advancing its frontier, so

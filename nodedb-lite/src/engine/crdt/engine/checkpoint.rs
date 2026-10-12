@@ -101,12 +101,9 @@ impl CrdtEngine {
 
             let (kind, bytes) = match persisted {
                 Some(from) if !self.checkpoint_is_due(collection) => {
-                    let bytes =
-                        state
-                            .export_updates_since(from)
-                            .map_err(|e| LiteError::Storage {
-                                detail: format!("delta export for '{collection}' failed: {e}"),
-                            })?;
+                    let bytes = state.export_updates_since(from).map_err(|e| {
+                        LiteError::crdt(&format!("delta export for '{collection}'"), e)
+                    })?;
                     let seq = self.next_delta_seq.get(collection).copied().unwrap_or(0);
                     (CrdtWriteKind::Delta { seq }, bytes)
                 }

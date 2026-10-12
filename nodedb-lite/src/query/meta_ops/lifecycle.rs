@@ -99,9 +99,8 @@ pub(crate) async fn handle_unregister_collection_admitted<S: StorageEngine>(
         let mut crdt = engine.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
         let ids = crdt.list_ids(name);
         for id in &ids {
-            crdt.delete(name, id).map_err(|e| LiteError::Storage {
-                detail: format!("UnregisterCollection: delete CRDT doc '{id}': {e}"),
-            })?;
+            crdt.delete(name, id)
+                .map_err(|e| e.within(&format!("UnregisterCollection: delete CRDT doc '{id}'")))?;
         }
     }
     // The collection's documents are gone, and so is every index over them.

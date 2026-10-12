@@ -203,7 +203,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         } else {
             nodedb_sql::plan_sql_with_params(sql, &sql_params, &catalog)
         }
-        .map_err(|e| LiteError::Query(format!("SQL plan: {e}")))?;
+        .map_err(LiteError::from)?;
 
         // One statement can plan to several units: `TRUNCATE a, b` yields one
         // plan per collection. Every unit runs; the last result is the answer.

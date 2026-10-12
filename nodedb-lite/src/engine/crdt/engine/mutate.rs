@@ -10,6 +10,7 @@ use nodedb_crdt::CrdtState;
 use crate::error::LiteError;
 
 use super::live_ids::AffectedRows;
+use super::rollback::{Rollback, run_with_rollback};
 use super::types::{CrdtBatchOp, CrdtEngine, CrdtRowOp, CrdtRowWrite, PendingDelta};
 
 impl CrdtEngine {
@@ -25,13 +26,12 @@ impl CrdtEngine {
         fields: &[(&str, LoroValue)],
     ) -> Result<u64, LiteError> {
         self.check_unique_writes(&[(CrdtRowWrite::Upsert, collection, doc_id, fields)])?;
-        let (_, mutation_id) = self.with_delta_capture(collection, doc_id, "upsert", |state| {
-            state
-                .upsert(collection, doc_id, fields)
-                .map_err(|e| LiteError::Storage {
-                    detail: format!("CRDT upsert failed: {e}"),
-                })
-        })?;
+        let (_, mutation_id) =
+            self.with_delta_capture(collection, doc_id, "upsert", Rollback::RowImage, |state| {
+                state
+                    .upsert(collection, doc_id, fields)
+                    .map_err(|e| LiteError::crdt("CRDT upsert", e))
+            })?;
         Ok(mutation_id)
     }
 
@@ -48,14 +48,17 @@ impl CrdtEngine {
         fields: &[(&str, LoroValue)],
     ) -> Result<u64, LiteError> {
         self.check_unique_writes(&[(CrdtRowWrite::SetFields, collection, doc_id, fields)])?;
-        let (_, mutation_id) =
-            self.with_delta_capture(collection, doc_id, "set_fields", |state| {
+        let (_, mutation_id) = self.with_delta_capture(
+            collection,
+            doc_id,
+            "set_fields",
+            Rollback::RowImage,
+            |state| {
                 state
                     .set_fields(collection, doc_id, fields)
-                    .map_err(|e| LiteError::Storage {
-                        detail: format!("CRDT set_fields failed: {e}"),
-                    })
-            })?;
+                    .map_err(|e| LiteError::crdt("CRDT set_fields", e))
+            },
+        )?;
         Ok(mutation_id)
     }
 
@@ -70,24 +73,27 @@ impl CrdtEngine {
         doc_id: &str,
         fields: &[&str],
     ) -> Result<(usize, u64), LiteError> {
-        self.with_delta_capture(collection, doc_id, "remove_fields", |state| {
-            state
-                .remove_fields(collection, doc_id, fields)
-                .map_err(|e| LiteError::Storage {
-                    detail: format!("CRDT remove_fields failed: {e}"),
-                })
-        })
+        self.with_delta_capture(
+            collection,
+            doc_id,
+            "remove_fields",
+            Rollback::RowImage,
+            |state| {
+                state
+                    .remove_fields(collection, doc_id, fields)
+                    .map_err(|e| LiteError::crdt("CRDT remove_fields", e))
+            },
+        )
     }
 
     /// Delete a document/row.
     pub fn delete(&mut self, collection: &str, doc_id: &str) -> Result<u64, LiteError> {
-        let (_, mutation_id) = self.with_delta_capture(collection, doc_id, "delete", |state| {
-            state
-                .delete(collection, doc_id)
-                .map_err(|e| LiteError::Storage {
-                    detail: format!("CRDT delete failed: {e}"),
-                })
-        })?;
+        let (_, mutation_id) =
+            self.with_delta_capture(collection, doc_id, "delete", Rollback::Keep, |state| {
+                state
+                    .delete(collection, doc_id)
+                    .map_err(|e| LiteError::crdt("CRDT delete", e))
+            })?;
         Ok(mutation_id)
     }
 
@@ -108,14 +114,17 @@ impl CrdtEngine {
         self.check_unique_writes(&rows)?;
         let mut last_mutation_id = 0;
         for &(collection, doc_id, fields) in ops {
-            let (_, mutation_id) =
-                self.with_delta_capture(collection, doc_id, "batch upsert", |state| {
+            let (_, mutation_id) = self.with_delta_capture(
+                collection,
+                doc_id,
+                "batch upsert",
+                Rollback::RowImage,
+                |state| {
                     state
                         .upsert(collection, doc_id, fields)
-                        .map_err(|e| LiteError::Storage {
-                            detail: format!("CRDT batch upsert failed: {e}"),
-                        })
-                })?;
+                        .map_err(|e| LiteError::crdt("CRDT batch upsert", e))
+                },
+            )?;
             if mutation_id != 0 {
                 last_mutation_id = mutation_id;
             }
@@ -133,16 +142,19 @@ impl CrdtEngine {
         self.check_unique_writes(ops)?;
         let mut mutation_ids = Vec::with_capacity(ops.len());
         for &(mode, collection, doc_id, fields) in ops {
-            let (_, mutation_id) =
-                self.with_delta_capture(collection, doc_id, "batch write", |state| {
+            let (_, mutation_id) = self.with_delta_capture(
+                collection,
+                doc_id,
+                "batch write",
+                Rollback::RowImage,
+                |state| {
                     match mode {
                         CrdtRowWrite::Upsert => state.upsert(collection, doc_id, fields),
                         CrdtRowWrite::SetFields => state.set_fields(collection, doc_id, fields),
                     }
-                    .map_err(|e| LiteError::Storage {
-                        detail: format!("CRDT batch write failed: {e}"),
-                    })
-                })?;
+                    .map_err(|e| LiteError::crdt("CRDT batch write", e))
+                },
+            )?;
             if mutation_id != 0 {
                 mutation_ids.push(mutation_id);
             }
@@ -160,13 +172,12 @@ impl CrdtEngine {
             collection,
             "*",
             AffectedRows::Collection,
+            Rollback::Keep,
             "clear collection",
             |state| {
                 state
                     .clear_collection(collection)
-                    .map_err(|e| LiteError::Storage {
-                        detail: format!("clear collection: {e}"),
-                    })
+                    .map_err(|e| LiteError::crdt("clear collection", e))
             },
         )?;
         self.clear_index_entries(collection);
@@ -179,6 +190,10 @@ impl CrdtEngine {
     /// Loro delta against the pre-mutation version vector, and push it onto
     /// the pending-deltas queue tagged with a fresh mutation ID.
     ///
+    /// A failed `body` is undone as `rollback` says. The operations it
+    /// committed, and the compensating ones, are still enqueued as one delta
+    /// before its error returns: see [`super::rollback`].
+    ///
     /// Returns `body`'s value alongside the assigned mutation ID; the ID is 0
     /// when the mutation produced no operations and nothing was enqueued (an
     /// empty delta blob is not importable by the receiver).
@@ -187,6 +202,7 @@ impl CrdtEngine {
         collection: &str,
         document_id: &str,
         op_name: &str,
+        rollback: Rollback,
         body: F,
     ) -> Result<(T, u64), LiteError>
     where
@@ -196,48 +212,61 @@ impl CrdtEngine {
             collection,
             document_id,
             AffectedRows::One(document_id),
+            rollback,
             op_name,
             body,
         )
     }
 
+    /// `rollback` applies to a single affected row. A collection-wide body
+    /// has no row image and keeps what it committed.
     fn capture_affected<F, T>(
         &mut self,
         collection: &str,
         document_id: &str,
         affected: AffectedRows<'_>,
+        rollback: Rollback,
         op_name: &str,
         body: F,
     ) -> Result<(T, u64), LiteError>
     where
         F: FnOnce(&CrdtState) -> Result<T, LiteError>,
     {
+        let image_row = match (rollback, &affected) {
+            (Rollback::RowImage, AffectedRows::One(row)) => Some(*row),
+            _ => None,
+        };
         let result: Result<_, LiteError> = (|| {
             let state = self.state_mut(collection)?;
             let version_before = state.oplog_version_vector();
             let counter_before = state.local_op_counter();
-            let value = body(state)?;
+            let outcome = run_with_rollback(state, collection, image_row, body);
             // A body that authored nothing (deleting an absent row, clearing an
-            // empty collection) still exports a non-empty Loro header. Enqueuing
-            // that would send the receiver a delta carrying no operations.
+            // empty collection, a write refused before its first operation)
+            // still exports a non-empty Loro header. Enqueuing that would send
+            // the receiver a delta carrying no operations.
             if state.local_op_counter() == counter_before {
-                return Ok((value, Vec::new()));
+                return Ok((outcome, Vec::new()));
             }
-            let delta_bytes =
-                state
-                    .export_updates_since(&version_before)
-                    .map_err(|e| LiteError::Storage {
-                        detail: format!("{op_name} delta export: {e}"),
-                    })?;
-            Ok((value, delta_bytes))
+            let delta_bytes = state
+                .export_updates_since(&version_before)
+                .map_err(|e| LiteError::crdt(&format!("{op_name} delta export"), e))?;
+            Ok((outcome, delta_bytes))
         })();
         self.reconcile_affected(collection, affected);
-        let (value, delta_bytes) = result?;
+        let (outcome, delta_bytes) = result?;
 
-        if delta_bytes.is_empty() {
-            return Ok((value, 0));
-        }
+        let mutation_id = if delta_bytes.is_empty() {
+            0
+        } else {
+            self.enqueue_delta(collection, document_id, delta_bytes)
+        };
+        Ok((outcome?, mutation_id))
+    }
 
+    /// Push `delta_bytes` onto the pending-deltas queue under a fresh
+    /// mutation ID, and return the ID.
+    fn enqueue_delta(&mut self, collection: &str, document_id: &str, delta_bytes: Vec<u8>) -> u64 {
         let mutation_id = self.next_mutation_id.fetch_add(1, Ordering::Relaxed);
         self.pending_deltas.push(PendingDelta {
             mutation_id,
@@ -247,13 +276,13 @@ impl CrdtEngine {
             seq: 0,
         });
         self.mark_delta_unpersisted(mutation_id);
-        Ok((value, mutation_id))
+        mutation_id
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AffectedRows, CrdtEngine};
+    use super::{AffectedRows, CrdtEngine, Rollback};
     use crate::error::LiteError;
     use loro::LoroValue;
 
@@ -269,6 +298,7 @@ mod tests {
             "docs",
             "*",
             AffectedRows::Collection,
+            Rollback::Keep,
             "clear collection",
             |state| {
                 state.delete("docs", "b").unwrap();
@@ -281,6 +311,107 @@ mod tests {
             matches!(result, Err(LiteError::Storage { detail }) if detail == "injected collection error")
         );
         assert_eq!(engine.live_ids_page("docs", None, 10, 10).unwrap(), ["*"]);
+        assert_eq!(
+            engine.pending_count(),
+            3,
+            "the delete committed before the error reaches the sync queue"
+        );
+    }
+
+    fn string(value: &str) -> LoroValue {
+        LoroValue::String(value.to_string().into())
+    }
+
+    /// A page row with scalar field `a` and a block list under `blocks`.
+    fn engine_with_block_page() -> CrdtEngine {
+        let mut engine = CrdtEngine::new(1).unwrap();
+        engine.upsert("pages", "p", &[("a", string("x"))]).unwrap();
+        let block: sonic_rs::Value = sonic_rs::from_str(r#"{"t":"b0"}"#).unwrap();
+        engine
+            .list_insert("pages", "p", "blocks", 0, &block)
+            .unwrap();
+        engine
+    }
+
+    /// Replay every pending delta into a fresh peer and read the page row.
+    fn replayed_page(engine: &CrdtEngine) -> Option<LoroValue> {
+        let peer = nodedb_crdt::CrdtState::new(CrdtEngine::collection_peer_id(2, "pages")).unwrap();
+        for delta in engine.pending_deltas() {
+            peer.import(&delta.delta_bytes).unwrap();
+        }
+        peer.read_row("pages", "p")
+    }
+
+    fn assert_refused_write_leaves_row_unchanged(
+        write: impl FnOnce(&mut CrdtEngine) -> Result<u64, LiteError>,
+    ) {
+        let mut engine = engine_with_block_page();
+        let before = engine.read("pages", "p");
+        let pending_before = engine.pending_count();
+
+        let err = write(&mut engine).unwrap_err();
+
+        assert!(
+            matches!(&err, LiteError::TypeMismatch { collection, .. } if collection == "pages"),
+            "{err:?}"
+        );
+        assert_eq!(engine.read("pages", "p"), before);
+        assert_eq!(
+            engine.pending_count(),
+            pending_before + 1,
+            "the partial write and its undo reach the sync queue as one delta"
+        );
+        assert_eq!(replayed_page(&engine), before);
+    }
+
+    #[test]
+    fn a_refused_set_fields_leaves_the_row_unchanged_on_every_replica() {
+        assert_refused_write_leaves_row_unchanged(|engine| {
+            engine.set_fields("pages", "p", &[("a", string("y")), ("blocks", string("z"))])
+        });
+    }
+
+    #[test]
+    fn a_refused_upsert_leaves_the_row_unchanged_on_every_replica() {
+        assert_refused_write_leaves_row_unchanged(|engine| {
+            engine.upsert(
+                "pages",
+                "p",
+                &[("n", string("new")), ("blocks", string("z"))],
+            )
+        });
+    }
+
+    #[test]
+    fn a_write_refused_before_its_first_operation_enqueues_nothing() {
+        let mut engine = engine_with_block_page();
+        let pending_before = engine.pending_count();
+        let err = engine
+            .set_fields("pages", "p", &[("blocks", string("z"))])
+            .unwrap_err();
+        assert!(matches!(err, LiteError::TypeMismatch { .. }), "{err:?}");
+        assert_eq!(engine.pending_count(), pending_before);
+    }
+
+    #[test]
+    fn a_successful_write_after_a_refused_one_enqueues_one_delta() {
+        let mut engine = engine_with_block_page();
+        engine
+            .set_fields("pages", "p", &[("a", string("y")), ("blocks", string("z"))])
+            .unwrap_err();
+        let pending_before = engine.pending_count();
+
+        let mutation_id = engine
+            .set_fields("pages", "p", &[("a", string("y"))])
+            .unwrap();
+
+        assert_ne!(mutation_id, 0);
+        assert_eq!(engine.pending_count(), pending_before + 1);
+        assert_eq!(
+            replayed_page(&engine),
+            engine.read("pages", "p"),
+            "a fresh peer converges on the written row"
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@ use nodedb_crdt::CrdtState;
 
 use crate::error::LiteError;
 
+use super::rollback::{Rollback, run_with_rollback};
 use super::types::{CrdtEngine, CrdtRowWrite, DeferredOp, PendingDelta};
 
 impl CrdtEngine {
@@ -24,12 +25,10 @@ impl CrdtEngine {
         fields: &[(&str, LoroValue)],
     ) -> Result<(), LiteError> {
         self.check_unique_writes(&[(CrdtRowWrite::Upsert, collection, doc_id, fields)])?;
-        self.defer(collection, doc_id, |state| {
+        self.defer(collection, doc_id, Rollback::RowImage, |state| {
             state
                 .upsert(collection, doc_id, fields)
-                .map_err(|e| LiteError::Storage {
-                    detail: format!("CRDT upsert failed: {e}"),
-                })
+                .map_err(|e| LiteError::crdt("CRDT upsert", e))
         })
     }
 
@@ -42,48 +41,57 @@ impl CrdtEngine {
         fields: &[(&str, LoroValue)],
     ) -> Result<(), LiteError> {
         self.check_unique_writes(&[(CrdtRowWrite::SetFields, collection, doc_id, fields)])?;
-        self.defer(collection, doc_id, |state| {
+        self.defer(collection, doc_id, Rollback::RowImage, |state| {
             state
                 .set_fields(collection, doc_id, fields)
-                .map_err(|e| LiteError::Storage {
-                    detail: format!("CRDT set_fields failed: {e}"),
-                })
+                .map_err(|e| LiteError::crdt("CRDT set_fields", e))
         })
     }
 
     /// Delete without generating a delta. Use `flush_deltas()` later.
     pub fn delete_deferred(&mut self, collection: &str, doc_id: &str) -> Result<(), LiteError> {
-        self.defer(collection, doc_id, |state| {
+        self.defer(collection, doc_id, Rollback::Keep, |state| {
             state
                 .delete(collection, doc_id)
-                .map_err(|e| LiteError::Storage {
-                    detail: format!("CRDT delete failed: {e}"),
-                })
+                .map_err(|e| LiteError::crdt("CRDT delete", e))
         })
     }
 
     /// Apply `body` to the collection's document and record the counter range
     /// its operations occupy, so `flush_deltas` can export exactly that row
     /// later.
-    fn defer<F>(&mut self, collection: &str, document_id: &str, body: F) -> Result<(), LiteError>
+    ///
+    /// A failed `body` is undone as `rollback` says. The operations it
+    /// committed, and the compensating ones, are still recorded for
+    /// `flush_deltas` before its error returns: see [`super::rollback`].
+    fn defer<F>(
+        &mut self,
+        collection: &str,
+        document_id: &str,
+        rollback: Rollback,
+        body: F,
+    ) -> Result<(), LiteError>
     where
         F: FnOnce(&CrdtState) -> Result<(), LiteError>,
     {
+        let image_row = (rollback == Rollback::RowImage).then_some(document_id);
         let result: Result<_, LiteError> = (|| {
             let state = self.state_mut(collection)?;
             let from_counter = state.local_op_counter();
-            body(state)?;
-            Ok((from_counter, state.local_op_counter()))
+            let outcome = run_with_rollback(state, collection, image_row, body);
+            Ok((outcome, from_counter, state.local_op_counter()))
         })();
         self.sync_indexes(collection, [document_id]);
-        let (from_counter, to_counter) = result?;
-        self.deferred.push(DeferredOp {
-            collection: collection.to_string(),
-            document_id: document_id.to_string(),
-            from_counter,
-            to_counter,
-        });
-        Ok(())
+        let (outcome, from_counter, to_counter) = result?;
+        if outcome.is_ok() || to_counter != from_counter {
+            self.deferred.push(DeferredOp {
+                collection: collection.to_string(),
+                document_id: document_id.to_string(),
+                from_counter,
+                to_counter,
+            });
+        }
+        outcome
     }
 
     /// Export one delta per deferred mutation since the last flush. Returns
@@ -103,8 +111,8 @@ impl CrdtEngine {
             };
             let delta_bytes = state
                 .export_local_range(op.from_counter, op.to_counter)
-                .map_err(|e| LiteError::Storage {
-                    detail: format!("flush delta export for '{}': {e}", op.collection),
+                .map_err(|e| {
+                    LiteError::crdt(&format!("flush delta export for '{}'", op.collection), e)
                 })?;
             // An empty range exports no bytes, and an empty blob is not
             // importable — never enqueue one.
@@ -129,7 +137,7 @@ impl CrdtEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{CrdtEngine, LiteError};
+    use super::{CrdtEngine, LiteError, Rollback};
     use loro::LoroValue;
 
     /// Deferred writes must flush as one self-contained delta per row, tagged with
@@ -193,7 +201,7 @@ mod tests {
     #[test]
     fn deferred_operation_error_reconciles_applied_rows() {
         let mut engine = CrdtEngine::new(1).unwrap();
-        let result = engine.defer("docs", "a", |state| {
+        let result = engine.defer("docs", "a", Rollback::Keep, |state| {
             state
                 .upsert("docs", "a", &[("value", LoroValue::I64(1))])
                 .unwrap();
@@ -205,6 +213,39 @@ mod tests {
             matches!(result, Err(LiteError::Storage { detail }) if detail == "injected deferred error")
         );
         assert_eq!(engine.live_ids_page("docs", None, 1, 10).unwrap(), ["a"]);
-        assert!(engine.deferred.is_empty());
+        assert_eq!(
+            engine.flush_deltas().unwrap(),
+            1,
+            "the write committed before the error reaches the sync queue"
+        );
+        assert_eq!(engine.pending_count(), 1);
+    }
+
+    #[test]
+    fn a_refused_deferred_set_fields_leaves_the_row_unchanged_on_every_replica() {
+        const PEER: u64 = 3;
+        let text = |value: &str| LoroValue::String(value.to_string().into());
+
+        let mut engine = CrdtEngine::new(PEER).unwrap();
+        engine.upsert("pages", "p", &[("a", text("x"))]).unwrap();
+        let block: sonic_rs::Value = sonic_rs::from_str(r#"{"t":"b0"}"#).unwrap();
+        engine
+            .list_insert("pages", "p", "blocks", 0, &block)
+            .unwrap();
+        let before = engine.read("pages", "p");
+
+        let err = engine
+            .set_fields_deferred("pages", "p", &[("a", text("y")), ("blocks", text("z"))])
+            .unwrap_err();
+
+        assert!(matches!(err, LiteError::TypeMismatch { .. }), "{err:?}");
+        assert_eq!(engine.read("pages", "p"), before);
+        assert_eq!(engine.flush_deltas().unwrap(), 1);
+        let peer =
+            nodedb_crdt::CrdtState::new(CrdtEngine::collection_peer_id(PEER + 1, "pages")).unwrap();
+        for delta in engine.pending_deltas() {
+            peer.import(&delta.delta_bytes).unwrap();
+        }
+        assert_eq!(peer.read_row("pages", "p"), before);
     }
 }

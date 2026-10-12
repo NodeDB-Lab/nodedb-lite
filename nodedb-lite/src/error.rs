@@ -1,5 +1,8 @@
 //! Error types for NodeDB-Lite.
 
+mod from_crdt;
+mod from_sql;
+
 /// Errors specific to the Lite embedded engine.
 #[derive(Debug, thiserror::Error)]
 pub enum LiteError {
@@ -114,8 +117,11 @@ pub enum LiteError {
         fault: nodedb_physical::kv_atomic::CounterFault,
     },
 
-    /// A KV atomic found a typed row with no column of the type it reads.
-    #[error("type mismatch on {collection}: {detail}")]
+    /// A value of the wrong kind for its target: a KV atomic on a typed row
+    /// with no column of the type it reads, a text element in a `VECTOR`
+    /// literal, a scalar write onto a nested CRDT container. `collection` is
+    /// empty when the fault names no collection. SQLSTATE `42804`.
+    #[error("{}", type_mismatch_message(.collection, .detail))]
     TypeMismatch { collection: String, detail: String },
 
     /// An input the engine cannot compute on: a vector of the wrong
@@ -123,6 +129,55 @@ pub enum LiteError {
     /// Origin raises for the same fault, SQLSTATE `22000`.
     #[error("{detail}")]
     DataException { detail: String },
+
+    /// A value past the range of its numeric type: an integer wider than
+    /// its column, a constant that overflows. SQLSTATE `22003`.
+    #[error("{detail}")]
+    NumericValueOutOfRange { detail: String },
+
+    /// A statement or CRDT operation named an object that does not exist,
+    /// such as a document absent at the requested version. SQLSTATE `42704`.
+    #[error("{object} does not exist")]
+    UndefinedObject { object: String },
+
+    /// The object exists, but not in the state the request needs, such as a
+    /// CRDT version below the compaction boundary. SQLSTATE `55000`.
+    #[error("{detail}")]
+    ObjectNotReady { object: String, detail: String },
+
+    /// A named constraint refused a write. `constraint` names the
+    /// constraint. SQLSTATE class `23`.
+    #[error("constraint violation: {constraint} on '{collection}': {detail}")]
+    ConstraintViolation {
+        collection: String,
+        constraint: String,
+        detail: String,
+    },
+
+    /// The request applied nothing it reports as done. The same request
+    /// succeeds once a transient condition clears: missing causal history
+    /// arrives, or a full queue drains. Retriable.
+    #[error("refused, retry: {detail}")]
+    RetryableRefusal { detail: String },
+
+    /// The caller is not allowed to perform the request: expired auth or a
+    /// delta signature that does not check out.
+    #[error("authorization denied on {resource}")]
+    AuthorizationDenied { resource: String },
+
+    /// A pre-validation gate refused the request, such as a replayed sync
+    /// sequence number. The same request fails the same way every time.
+    #[error("pre-validation rejected: {reason}")]
+    PrevalidationRejected { reason: String },
+}
+
+/// `detail` alone when no collection is named.
+fn type_mismatch_message(collection: &str, detail: &str) -> String {
+    if collection.is_empty() {
+        detail.to_string()
+    } else {
+        format!("type mismatch on {collection}: {detail}")
+    }
 }
 
 impl LiteError {
@@ -132,6 +187,23 @@ impl LiteError {
         Self::CollectionNotFound {
             engine,
             collection: collection.into(),
+        }
+    }
+
+    /// `e` classified as `From<CrdtError>` classifies it. A storage-class
+    /// error names `op`, the operation that raised it.
+    pub(crate) fn crdt(op: &str, e: nodedb_crdt::CrdtError) -> Self {
+        Self::from(e).within(op)
+    }
+
+    /// `self` with `op` named in a storage-class detail. Every other class
+    /// keeps its variant and message.
+    pub(crate) fn within(self, op: &str) -> Self {
+        match self {
+            Self::Storage { detail } => Self::Storage {
+                detail: format!("{op}: {detail}"),
+            },
+            other => other,
         }
     }
 }
@@ -186,21 +258,61 @@ impl From<nodedb_types::columnar::SchemaError> for LiteError {
 
 impl From<LiteError> for nodedb_types::error::NodeDbError {
     fn from(e: LiteError) -> Self {
-        use nodedb_types::error::NodeDbError;
+        use nodedb_types::error::{ErrorCode, NodeDbError};
         match e {
             // The same public errors Origin builds for the same faults.
             LiteError::CounterFault { collection, fault } => {
                 NodeDbError::kv_counter_fault(collection, fault, fault.is_out_of_range())
             }
+            LiteError::TypeMismatch { collection, detail } if collection.is_empty() => {
+                NodeDbError::from_wire(ErrorCode::TYPE_MISMATCH, detail)
+            }
             LiteError::TypeMismatch { collection, detail } => {
                 NodeDbError::type_mismatch(collection, detail)
             }
             LiteError::DataException { detail } => NodeDbError::data_exception(detail),
+            LiteError::NumericValueOutOfRange { detail } => {
+                NodeDbError::numeric_value_out_of_range(detail)
+            }
+            LiteError::UndefinedObject { object } => NodeDbError::undefined_object(object),
+            LiteError::ObjectNotReady { object, detail } => {
+                NodeDbError::object_not_ready(object, detail)
+            }
             LiteError::CollectionNotFound { collection, .. } => {
                 NodeDbError::collection_not_found(collection)
             }
             LiteError::UniqueViolation { collection, detail } => {
                 NodeDbError::constraint_violation(collection, "unique", detail)
+            }
+            LiteError::NotNullViolation { collection, column } => {
+                NodeDbError::constraint_violation(
+                    collection,
+                    "not_null",
+                    format!("null value in column '{column}'"),
+                )
+            }
+            LiteError::ConstraintViolation {
+                collection,
+                constraint,
+                detail,
+            } => NodeDbError::constraint_violation(collection, constraint, detail),
+            // Nothing the caller asked for took effect, and the same request
+            // succeeds later: the retriable class, as Origin renders it.
+            e @ LiteError::RetryableRefusal { .. } => {
+                NodeDbError::from_wire(ErrorCode::WRITE_CONFLICT, e.to_string())
+            }
+            LiteError::AuthorizationDenied { resource } => {
+                NodeDbError::authorization_denied(resource)
+            }
+            LiteError::PrevalidationRejected { reason } => {
+                NodeDbError::prevalidation_rejected("crdt", reason)
+            }
+            LiteError::Query(detail) => NodeDbError::plan_error(detail),
+            LiteError::BadRequest { detail } => NodeDbError::bad_request(detail),
+            // SQLSTATE `0A000`: `SQL_NOT_ENABLED` is the class every
+            // feature-not-supported refusal carries.
+            LiteError::Unsupported { detail } => {
+                NodeDbError::from_wire(ErrorCode::SQL_NOT_ENABLED, detail)
             }
             e @ (LiteError::TextIndexMissing { .. } | LiteError::FtsQueryInvalid { .. }) => {
                 NodeDbError::bad_request(e)
@@ -267,6 +379,36 @@ mod tests {
             nodedb_types::error::ErrorCode::COLLECTION_NOT_FOUND,
             "{ndb}"
         );
+    }
+
+    #[test]
+    fn a_not_null_violation_is_a_constraint_violation() {
+        let e = LiteError::NotNullViolation {
+            collection: "users".into(),
+            column: "email".into(),
+        };
+        let ndb: nodedb_types::error::NodeDbError = e.into();
+        assert!(ndb.is_constraint_violation(), "{ndb}");
+    }
+
+    #[test]
+    fn a_bad_request_keeps_its_class() {
+        let e = LiteError::BadRequest {
+            detail: "invalid version vector JSON".into(),
+        };
+        let ndb: nodedb_types::error::NodeDbError = e.into();
+        assert_eq!(ndb.code(), nodedb_types::error::ErrorCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn a_type_mismatch_without_a_collection_renders_its_detail() {
+        let e = LiteError::TypeMismatch {
+            collection: String::new(),
+            detail: "column 'v': expected a number".into(),
+        };
+        assert_eq!(e.to_string(), "column 'v': expected a number");
+        let ndb: nodedb_types::error::NodeDbError = e.into();
+        assert_eq!(ndb.code(), nodedb_types::error::ErrorCode::TYPE_MISMATCH);
     }
 
     #[test]

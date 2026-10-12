@@ -101,9 +101,7 @@ where
                     loro::LoroValue::I64(embedding.len() as i64),
                 )],
             )
-            .map_err(|e| LiteError::Storage {
-                detail: format!("Insert: CRDT field merge failed: {e}"),
-            })?;
+            .map_err(|e| e.within("Insert: CRDT field merge"))?;
         }
         Ok(QueryResult {
             columns: vec![],
@@ -167,9 +165,7 @@ where
                 &remaining,
                 vector_primary,
             )
-            .map_err(|e| LiteError::Storage {
-                detail: format!("Delete: CRDT detach failed: {e}"),
-            })?;
+            .map_err(|e| e.within("Delete: CRDT detach"))?;
         }
         Ok(QueryResult {
             columns: vec![],
@@ -233,9 +229,7 @@ where
                 &remaining,
                 vector_primary,
             )
-            .map_err(|e| LiteError::Storage {
-                detail: format!("DeleteBySurrogate: CRDT detach failed: {e}"),
-            })?;
+            .map_err(|e| e.within("DeleteBySurrogate: CRDT detach"))?;
             had_row
         };
         Ok(QueryResult {

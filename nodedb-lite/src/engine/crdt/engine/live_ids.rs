@@ -163,6 +163,7 @@ impl CrdtEngine {
 #[cfg(test)]
 mod tests {
     use super::CrdtEngine;
+    use crate::engine::crdt::engine::rollback::Rollback;
     use crate::engine::crdt::engine::types::CrdtRowWrite;
     use crate::error::LiteError;
     use loro::LoroValue;
@@ -203,7 +204,7 @@ mod tests {
     fn live_ids_reconcile_state_after_operation_error() {
         let mut engine = CrdtEngine::new(1).unwrap();
         let result: Result<((), u64), LiteError> =
-            engine.with_delta_capture("docs", "*", "write", |state| {
+            engine.with_delta_capture("docs", "*", "write", Rollback::Keep, |state| {
                 state.upsert("docs", "*", &fields()).unwrap();
                 Err(LiteError::Storage {
                     detail: "injected operation error".into(),
@@ -213,7 +214,11 @@ mod tests {
             matches!(result, Err(LiteError::Storage { detail }) if detail == "injected operation error")
         );
         assert_eq!(ids(&engine), ["*"]);
-        assert_eq!(engine.pending_count(), 0);
+        assert_eq!(
+            engine.pending_count(),
+            1,
+            "the write committed before the error reaches the sync queue"
+        );
         assert!(engine.live_id_bytes > 0);
         engine.delete("docs", "*").unwrap();
         assert_eq!(engine.live_id_bytes, 0);
