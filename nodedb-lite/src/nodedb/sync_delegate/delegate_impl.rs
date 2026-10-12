@@ -96,22 +96,40 @@ impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
             .await
     }
 
-    fn handle_array_delta(
+    async fn handle_array_delta(
         &self,
         msg: &nodedb_types::sync::wire::ArrayDeltaMsg,
     ) -> Option<nodedb_types::sync::wire::ArrayAckMsg> {
-        super::array::handle_array_delta_impl(self, msg)
+        super::array::handle_array_delta_impl(self, msg).await
     }
 
-    fn handle_array_delta_batch(
+    async fn handle_array_delta_batch(
         &self,
         msg: &nodedb_types::sync::wire::ArrayDeltaBatchMsg,
     ) -> Option<nodedb_types::sync::wire::ArrayAckMsg> {
-        super::array::handle_array_delta_batch_impl(self, msg)
+        super::array::handle_array_delta_batch_impl(self, msg).await
     }
 
-    fn handle_array_reject(&self, msg: &nodedb_types::sync::wire::ArrayRejectMsg) {
-        super::array::handle_array_reject_impl(self, msg);
+    async fn handle_array_reject(
+        &self,
+        msg: &nodedb_types::sync::wire::ArrayRejectMsg,
+    ) -> Option<nodedb_types::sync::wire::ArrayCatchupRequestMsg> {
+        super::array::handle_array_reject_impl(self, msg).await
+    }
+
+    async fn handle_array_snapshot(&self, msg: &nodedb_types::sync::wire::ArraySnapshotMsg) {
+        super::array::handle_array_snapshot_impl(self, msg).await
+    }
+
+    async fn handle_array_snapshot_chunk(
+        &self,
+        msg: &nodedb_types::sync::wire::ArraySnapshotChunkMsg,
+    ) -> Option<nodedb_types::sync::wire::ArrayAckMsg> {
+        super::array::handle_array_snapshot_chunk_impl(self, msg).await
+    }
+
+    fn begin_array_catchup(&self) -> Vec<nodedb_types::sync::wire::ArrayCatchupRequestMsg> {
+        super::array::begin_array_catchup_impl(self)
     }
 
     async fn pending_columnar_batches(

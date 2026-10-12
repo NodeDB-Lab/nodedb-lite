@@ -140,6 +140,15 @@ pub(super) async fn connect_and_run(
         .persist_producer_state(ack.producer_id, ack.accepted_epoch)
         .await;
 
+    // Origin keeps no per-replica array cursor across sessions: each session
+    // asks for every array it holds from its catch-up high-water mark, and
+    // Origin answers with the missed ops (or a snapshot first when the mark
+    // is below its GC boundary). The push loop sends these on its first tick,
+    // under the same auth-pause gate as every other control frame.
+    client
+        .reset_array_catchups(delegate.begin_array_catchup())
+        .await;
+
     // ── Message loop ──
     let sink = Arc::new(Mutex::new(sink));
 

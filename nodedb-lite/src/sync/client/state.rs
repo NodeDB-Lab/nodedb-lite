@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::Mutex;
 
-use nodedb_types::sync::wire::{ArrayAckMsg, ResyncRequestMsg, RowPushRejectMsg};
+use nodedb_types::sync::wire::{
+    ArrayAckMsg, ArrayCatchupRequestMsg, ResyncRequestMsg, RowPushRejectMsg,
+};
 
 /// Pending array acks keyed by array name.
 ///
@@ -13,6 +15,9 @@ use nodedb_types::sync::wire::{ArrayAckMsg, ResyncRequestMsg, RowPushRejectMsg};
 /// is sufficient to advance Origin's GC frontier: Origin only needs to know the
 /// highest durable HLC per replica per array, not every intermediate ack.
 type PendingArrayAcks = std::collections::HashMap<String, ArrayAckMsg>;
+
+/// Pending array catch-up requests keyed by array name, sent in name order.
+type PendingArrayCatchups = std::collections::BTreeMap<String, ArrayCatchupRequestMsg>;
 
 use super::config::{SyncConfig, SyncState};
 use crate::sync::clock::VectorClock;
@@ -66,6 +71,12 @@ pub struct SyncClient {
     /// array since the last drain. The push loop drains all entries and transmits
     /// them to Origin to advance the GC frontier.
     pub(super) pending_array_ack: Arc<Mutex<PendingArrayAcks>>,
+    /// `ArrayCatchupRequest` frames waiting for the next push tick, keyed by
+    /// array name so a later request for an array replaces an unsent one.
+    ///
+    /// Filled once per session from the delegate's catch-up round, and again
+    /// when Origin sends a `RetentionFloor` reject.
+    pub(super) pending_array_catchups: Arc<Mutex<PendingArrayCatchups>>,
     /// Producer ID assigned by Origin in `HandshakeAckMsg`.
     ///
     /// Used to stamp outbound frames so Origin can route acks back to this
@@ -154,6 +165,7 @@ impl SyncClient {
             token_refresh_pending: Arc::new(Mutex::new(false)),
             push_paused_for_auth: Arc::new(Mutex::new(false)),
             pending_array_ack: Arc::new(Mutex::new(PendingArrayAcks::new())),
+            pending_array_catchups: Arc::new(Mutex::new(PendingArrayCatchups::new())),
             producer_id: Arc::new(Mutex::new(None)),
             accepted_epoch: Arc::new(Mutex::new(None)),
             fenced: Arc::new(AtomicBool::new(false)),

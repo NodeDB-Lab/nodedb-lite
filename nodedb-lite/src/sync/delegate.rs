@@ -113,29 +113,63 @@ pub trait SyncDelegate: Send + Sync + 'static {
 
     /// Apply a single `ArrayDelta` frame from Origin.
     ///
-    /// Returns the `ArrayAckMsg` to send back to Origin (advancing its GC
-    /// frontier), or `None` if the frame was already applied (idempotent) or
-    /// rejected (rejection is handled internally with a warning log).
-    fn handle_array_delta(
+    /// An applied or already-present op advances the array's catch-up
+    /// high-water mark to its HLC. Returns the `ArrayAckMsg` to send back to
+    /// Origin (advancing its GC frontier), or `None` if the frame was already
+    /// applied (idempotent) or rejected (logged as a warning).
+    ///
+    /// Async because recording the high-water mark writes to storage.
+    async fn handle_array_delta(
         &self,
         msg: &nodedb_types::sync::wire::ArrayDeltaMsg,
     ) -> Option<nodedb_types::sync::wire::ArrayAckMsg>;
 
     /// Apply a batch of `ArrayDelta` frames from Origin.
     ///
-    /// Applies each op in order. Returns the `ArrayAckMsg` for the highest
-    /// HLC successfully applied (or `None` if the batch was empty or all ops
-    /// were idempotent/rejected).
-    fn handle_array_delta_batch(
+    /// Applies each op in order. The catch-up high-water mark advances to
+    /// the last op before the first rejected op, so a rejected op is asked
+    /// for again on the next catch-up. Returns the `ArrayAckMsg` for the
+    /// highest HLC applied (or `None` if the batch was empty or all ops were
+    /// idempotent/rejected).
+    async fn handle_array_delta_batch(
         &self,
         msg: &nodedb_types::sync::wire::ArrayDeltaBatchMsg,
     ) -> Option<nodedb_types::sync::wire::ArrayAckMsg>;
 
     /// Process an `ArrayReject` from Origin.
     ///
-    /// Removes the rejected op from the Lite pending queue and marks the array
-    /// for catch-up if the reason is `RetentionFloor`.
-    fn handle_array_reject(&self, msg: &nodedb_types::sync::wire::ArrayRejectMsg);
+    /// Removes the rejected op from the Lite pending queue. For
+    /// `RetentionFloor`, persists the array's catch-up flag and returns the
+    /// catch-up request to send: it starts at `Hlc::ZERO`, so Origin answers
+    /// with a snapshot. Returns `None` for every other reason.
+    async fn handle_array_reject(
+        &self,
+        msg: &nodedb_types::sync::wire::ArrayRejectMsg,
+    ) -> Option<nodedb_types::sync::wire::ArrayCatchupRequestMsg>;
+
+    /// Buffer an `ArraySnapshot` header from Origin. Errors are logged.
+    async fn handle_array_snapshot(&self, msg: &nodedb_types::sync::wire::ArraySnapshotMsg);
+
+    /// Buffer an `ArraySnapshotChunk` from Origin.
+    ///
+    /// On the last chunk the snapshot is assembled and applied: the array's
+    /// catch-up flag is cleared, its high-water mark advances to the
+    /// snapshot HLC, and the `ArrayAckMsg` carrying that HLC is returned.
+    /// Returns `None` while chunks remain. An assembly or apply error is
+    /// logged and flags the array, so the next session asks for a snapshot
+    /// again.
+    async fn handle_array_snapshot_chunk(
+        &self,
+        msg: &nodedb_types::sync::wire::ArraySnapshotChunkMsg,
+    ) -> Option<nodedb_types::sync::wire::ArrayAckMsg>;
+
+    /// Start the array catch-up round for a newly connected session.
+    ///
+    /// Returns one `ArrayCatchupRequestMsg` per array this replica holds,
+    /// each starting at the array's catch-up high-water mark (or `Hlc::ZERO`
+    /// when flagged for a snapshot). Drops partial snapshot assemblies from
+    /// the previous session. Returns an empty list when no arrays exist.
+    fn begin_array_catchup(&self) -> Vec<nodedb_types::sync::wire::ArrayCatchupRequestMsg>;
 
     // ── Columnar ─────────────────────────────────────────────────────────────
     /// Drain up to `PUSH_DRAIN_LIMIT` pending batches from durable storage,

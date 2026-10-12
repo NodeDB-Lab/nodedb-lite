@@ -1,8 +1,8 @@
 //! Receive-path handlers: shape snapshot/delta, clock sync, sequence gap detection, resync.
 
 use nodedb_types::sync::wire::{
-    ArrayAckMsg, ResyncReason, ResyncRequestMsg, ShapeDeltaMsg, ShapeSnapshotMsg,
-    VectorClockSyncMsg,
+    ArrayAckMsg, ArrayCatchupRequestMsg, ResyncReason, ResyncRequestMsg, ShapeDeltaMsg,
+    ShapeSnapshotMsg, VectorClockSyncMsg,
 };
 
 use super::state::SyncClient;
@@ -144,6 +144,33 @@ impl SyncClient {
         let drained: Vec<ArrayAckMsg> = map.drain().map(|(_, v)| v).collect();
         drained
     }
+
+    /// Replace every pending `ArrayCatchupRequest` with `requests`.
+    ///
+    /// Called once per session after the handshake: the new round supersedes
+    /// any request the previous session did not send.
+    pub async fn reset_array_catchups(&self, requests: Vec<ArrayCatchupRequestMsg>) {
+        let mut map = self.pending_array_catchups.lock().await;
+        map.clear();
+        map.extend(requests.into_iter().map(|r| (r.array.clone(), r)));
+    }
+
+    /// Queue an `ArrayCatchupRequest` for the next push tick, replacing an
+    /// unsent request for the same array.
+    pub async fn queue_array_catchup(&self, request: ArrayCatchupRequestMsg) {
+        self.pending_array_catchups
+            .lock()
+            .await
+            .insert(request.array.clone(), request);
+    }
+
+    /// Drain every pending `ArrayCatchupRequest` in array-name order
+    /// (consumed by the push loop).
+    pub async fn drain_array_catchups(&self) -> Vec<ArrayCatchupRequestMsg> {
+        std::mem::take(&mut *self.pending_array_catchups.lock().await)
+            .into_values()
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -218,6 +245,26 @@ mod tests {
         assert!(client.check_sequence_gap("s1", 1).await.is_none());
         assert!(client.check_sequence_gap("s1", 10).await.is_some());
         assert!(client.check_sequence_gap("s1", 20).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn array_catchup_queue_keeps_one_request_per_array_in_name_order() {
+        use nodedb_types::sync::wire::ArrayCatchupRequestMsg;
+        let req = |array: &str, byte: u8| ArrayCatchupRequestMsg {
+            array: array.into(),
+            from_hlc_bytes: [byte; 18],
+        };
+        let client = SyncClient::new(make_config());
+
+        client.queue_array_catchup(req("stale", 1)).await;
+        client
+            .reset_array_catchups(vec![req("b", 2), req("a", 3)])
+            .await;
+        client.queue_array_catchup(req("b", 0)).await;
+
+        let drained = client.drain_array_catchups().await;
+        assert_eq!(drained, vec![req("a", 3), req("b", 0)]);
+        assert!(client.drain_array_catchups().await.is_empty());
     }
 
     #[tokio::test]

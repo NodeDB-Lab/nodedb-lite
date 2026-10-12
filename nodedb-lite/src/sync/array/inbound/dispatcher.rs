@@ -23,15 +23,17 @@ use super::apply::LiteApplyEngine;
 use super::outcome::InboundOutcome;
 
 /// In-flight snapshot assembly state keyed by `(array_name, snapshot_hlc_bytes)`.
+///
+/// An assembly exists only after its header arrived; chunks buffer against it.
 pub(super) struct SnapshotAssembly {
-    pub(super) header: Option<SnapshotHeader>,
+    pub(super) header: SnapshotHeader,
     pub(super) chunks: BTreeMap<u32, SnapshotChunk>,
 }
 
 impl SnapshotAssembly {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(header: SnapshotHeader) -> Self {
         Self {
-            header: None,
+            header,
             chunks: BTreeMap::new(),
         }
     }
@@ -50,7 +52,8 @@ pub struct ArrayInbound<S: StorageEngine> {
     pub(super) schemas: Arc<SchemaRegistry<S>>,
     pub(super) replica: Arc<ReplicaState>,
     pub(super) pending: Arc<PendingQueue<S>>,
-    /// Catchup tracker — updated when Origin sends `RetentionFloor` rejects.
+    /// Catchup tracker — the high-water mark of applied ops per array, and
+    /// the arrays a `RetentionFloor` reject flagged for a snapshot.
     pub(super) catchup: Arc<CatchupTracker<S>>,
     /// In-flight snapshot chunk buffers.
     /// Key: `(array_name, snapshot_hlc_bytes)`.

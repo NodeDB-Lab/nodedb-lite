@@ -134,13 +134,31 @@ impl<S: StorageEngine> CatchupTracker<S> {
             .unwrap_or(Hlc::ZERO)
     }
 
-    /// Build an [`ArrayCatchupRequestMsg`] for `array` using the stored
-    /// last-seen HLC as the starting point.
+    /// Build an [`ArrayCatchupRequestMsg`] for `array`.
+    ///
+    /// The request starts at the stored last-seen HLC. An array flagged by a
+    /// `RetentionFloor` reject starts at [`Hlc::ZERO`] instead: that HLC is
+    /// below Origin's GC boundary, so Origin answers with a snapshot followed
+    /// by the op stream above it.
     pub fn build_request(&self, array: &str) -> ArrayCatchupRequestMsg {
+        let from = if self.is_catchup_needed(array) {
+            Hlc::ZERO
+        } else {
+            self.last_seen(array)
+        };
         ArrayCatchupRequestMsg {
             array: array.to_owned(),
-            from_hlc_bytes: self.last_seen(array).to_bytes(),
+            from_hlc_bytes: from.to_bytes(),
         }
+    }
+
+    /// Returns `true` if a `RetentionFloor` reject flagged `array` and no
+    /// snapshot has completed since.
+    pub fn is_catchup_needed(&self, array: &str) -> bool {
+        self.catchup_needed
+            .lock()
+            .ok()
+            .is_some_and(|s| s.contains(array))
     }
 
     /// Returns `true` if `array` should request a full catch-up on connect.
@@ -149,13 +167,7 @@ impl<S: StorageEngine> CatchupTracker<S> {
     /// - No `last_seen_hlc` is recorded (first connect), OR
     /// - `record_reject_retention_floor` was called (Origin GC advanced past our log).
     pub fn should_request_catchup(&self, array: &str, _current_local_hlc: Hlc) -> bool {
-        let needs_catchup = self
-            .catchup_needed
-            .lock()
-            .ok()
-            .map(|s| s.contains(array))
-            .unwrap_or(false);
-        if needs_catchup {
+        if self.is_catchup_needed(array) {
             return true;
         }
         // First connect: no last-seen HLC recorded.
@@ -291,6 +303,25 @@ mod tests {
         let req = tracker.build_request("feed");
         assert_eq!(req.array, "feed");
         assert_eq!(req.from_hlc_bytes, h.to_bytes());
+    }
+
+    #[tokio::test]
+    async fn build_request_starts_at_zero_while_retention_floor_flag_is_set() {
+        let tracker = make_tracker().await;
+        let h = hlc(5_000);
+        tracker.record("feed", h).await.unwrap();
+        tracker.record_reject_retention_floor("feed").await.unwrap();
+
+        assert!(tracker.is_catchup_needed("feed"));
+        assert_eq!(
+            tracker.build_request("feed").from_hlc_bytes,
+            Hlc::ZERO.to_bytes(),
+            "a flagged array must ask for history below the GC boundary"
+        );
+
+        tracker.clear_catchup_needed("feed").await.unwrap();
+        assert!(!tracker.is_catchup_needed("feed"));
+        assert_eq!(tracker.build_request("feed").from_hlc_bytes, h.to_bytes());
     }
 
     #[tokio::test]

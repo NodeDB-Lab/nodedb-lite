@@ -1,8 +1,8 @@
 //! Inbound array CRDT message handler for NodeDB-Lite.
 //!
 //! [`ArrayInbound`] receives wire messages from Origin and applies them to the
-//! local engine state. It is exercised by tests that hand-construct messages —
-//! no network transport is wired here (that is a later phase).
+//! local engine state. It holds no socket: the sync transport decodes frames
+//! and reaches it through `SyncDelegate`.
 //!
 //! # Module layout
 //!
@@ -13,6 +13,8 @@
 //!   shared helpers.
 //! - [`delta`], [`snapshot`], [`schema`], [`reject`] — one `impl ArrayInbound`
 //!   block per wire-message family, with colocated unit tests.
+//! - [`resume`] — the catch-up requests a new sync session sends, and tracker
+//!   access for the apply paths.
 //!
 //! # No outbound loop
 //!
@@ -26,6 +28,7 @@ pub mod delta;
 pub mod dispatcher;
 pub mod outcome;
 pub mod reject;
+pub mod resume;
 pub mod schema;
 pub mod snapshot;
 

@@ -1,6 +1,8 @@
 //! Snapshot header and chunk handlers — buffer chunks until complete, then
 //! assemble and apply the contained ops.
 
+use std::collections::hash_map::Entry;
+
 use nodedb_array::sync::apply::ApplyOutcome;
 use nodedb_array::sync::hlc::Hlc;
 use nodedb_array::sync::op_codec;
@@ -13,12 +15,21 @@ use crate::storage::engine::StorageEngine;
 use super::dispatcher::{ArrayInbound, SnapshotAssembly};
 use super::outcome::InboundOutcome;
 
+/// Origin's catch-up server emits chunks of at most 256 KiB.
+const MAX_CHUNK_BYTES: usize = 256 * 1024;
+
+/// Upper bound on the chunk count one snapshot can declare. Matches the bound
+/// Origin enforces on snapshots it receives.
+const MAX_CHUNKS_PER_SNAPSHOT: u32 = 4_096;
+
 impl<S: StorageEngine> ArrayInbound<S> {
     /// Buffer an incoming snapshot header.
     ///
     /// Must arrive before any [`Self::handle_snapshot_chunk`] calls for the
-    /// same `(array, snapshot_hlc)`. Returns
-    /// `SnapshotPartial { received: 0, total }` so callers can track progress.
+    /// same `(array, snapshot_hlc)`; Origin sends the header first on the
+    /// same ordered stream. A repeated header restarts the assembly, so a
+    /// transfer Origin re-sends after a reconnect never mixes with stale
+    /// chunks. Returns `SnapshotPartial { received: 0, total }`.
     pub fn handle_snapshot_header(
         &self,
         msg: &ArraySnapshotMsg,
@@ -28,12 +39,20 @@ impl<S: StorageEngine> ArrayInbound<S> {
                 detail: format!("handle_snapshot_header decode: {e}"),
             })?;
 
+        if header.array != msg.array {
+            return Err(LiteError::Sync {
+                detail: format!(
+                    "snapshot header names array '{}' but the frame names '{}'",
+                    header.array, msg.array
+                ),
+            });
+        }
         let total = header.total_chunks;
-        let key = (msg.array.clone(), header.snapshot_hlc.to_bytes());
+        check_total_chunks(&msg.array, total)?;
 
+        let key = (msg.array.clone(), header.snapshot_hlc.to_bytes());
         let mut snapshots = self.snapshots.lock().map_err(|_| LiteError::LockPoisoned)?;
-        let entry = snapshots.entry(key).or_insert_with(SnapshotAssembly::new);
-        entry.header = Some(header);
+        snapshots.insert(key, SnapshotAssembly::new(header));
 
         Ok(InboundOutcome::SnapshotPartial { received: 0, total })
     }
@@ -43,51 +62,76 @@ impl<S: StorageEngine> ArrayInbound<S> {
     ///
     /// Returns [`InboundOutcome::SnapshotPartial`] until the last chunk
     /// arrives, then returns [`InboundOutcome::SnapshotApplied`] after all
-    /// ops in the assembled snapshot have been applied.
+    /// ops in the assembled snapshot have been applied. A chunk that does not
+    /// match its header is an error and drops the assembly. A complete
+    /// assembly leaves the buffer before it is decoded, so a decode or apply
+    /// error never leaves chunks behind.
     pub fn handle_snapshot_chunk(
         &self,
         msg: &ArraySnapshotChunkMsg,
     ) -> Result<InboundOutcome, LiteError> {
-        let key = (msg.array.clone(), msg.snapshot_hlc_bytes);
-
-        let assembled: Option<(SnapshotHeader, Vec<SnapshotChunk>)> = {
-            let mut snapshots = self.snapshots.lock().map_err(|_| LiteError::LockPoisoned)?;
-            let entry = snapshots
-                .entry(key.clone())
-                .or_insert_with(SnapshotAssembly::new);
-
-            let chunk = SnapshotChunk {
-                array: msg.array.clone(),
-                chunk_index: msg.chunk_index,
-                total_chunks: msg.total_chunks,
-                payload: msg.payload.clone(),
-                snapshot_hlc: Hlc::from_bytes(&msg.snapshot_hlc_bytes),
-            };
-            entry.chunks.insert(msg.chunk_index, chunk);
-
-            let total = msg.total_chunks as usize;
-            match &entry.header {
-                Some(h) if entry.chunks.len() == total => {
-                    // All chunks received — extract for assembly outside the lock.
-                    let header = h.clone();
-                    let chunks_vec: Vec<SnapshotChunk> = entry.chunks.values().cloned().collect();
-                    Some((header, chunks_vec))
-                }
-                _ => None,
-            }
-        };
-
-        // If not yet complete, return partial status.
-        let Some((header, mut chunks)) = assembled else {
-            let snapshots = self.snapshots.lock().map_err(|_| LiteError::LockPoisoned)?;
-            let received = snapshots
-                .get(&key)
-                .map(|e| e.chunks.len() as u32)
-                .unwrap_or(0);
-            return Ok(InboundOutcome::SnapshotPartial {
-                received,
-                total: msg.total_chunks,
+        check_total_chunks(&msg.array, msg.total_chunks)?;
+        if msg.chunk_index >= msg.total_chunks {
+            return Err(LiteError::Sync {
+                detail: format!(
+                    "snapshot chunk {} for array '{}' is outside total_chunks {}",
+                    msg.chunk_index, msg.array, msg.total_chunks
+                ),
             });
+        }
+        if msg.payload.len() > MAX_CHUNK_BYTES {
+            return Err(LiteError::Sync {
+                detail: format!(
+                    "snapshot chunk for array '{}' carries {} bytes; the limit is {MAX_CHUNK_BYTES}",
+                    msg.array,
+                    msg.payload.len()
+                ),
+            });
+        }
+
+        let key = (msg.array.clone(), msg.snapshot_hlc_bytes);
+        let (header, mut chunks) = {
+            let mut snapshots = self.snapshots.lock().map_err(|_| LiteError::LockPoisoned)?;
+            let Entry::Occupied(mut slot) = snapshots.entry(key) else {
+                return Err(LiteError::Sync {
+                    detail: format!(
+                        "snapshot chunk for array '{}' arrived before its header",
+                        msg.array
+                    ),
+                });
+            };
+            let total = slot.get().header.total_chunks;
+            if total != msg.total_chunks {
+                slot.remove();
+                return Err(LiteError::Sync {
+                    detail: format!(
+                        "snapshot chunk for array '{}' declares {} chunks; its header declares {total}",
+                        msg.array, msg.total_chunks
+                    ),
+                });
+            }
+
+            let assembly = slot.get_mut();
+            assembly.chunks.insert(
+                msg.chunk_index,
+                SnapshotChunk {
+                    array: msg.array.clone(),
+                    chunk_index: msg.chunk_index,
+                    total_chunks: msg.total_chunks,
+                    payload: msg.payload.clone(),
+                    snapshot_hlc: Hlc::from_bytes(&msg.snapshot_hlc_bytes),
+                },
+            );
+
+            let received = assembly.chunks.len() as u32;
+            if received < total {
+                return Ok(InboundOutcome::SnapshotPartial { received, total });
+            }
+            let complete = slot.remove();
+            (
+                complete.header,
+                complete.chunks.into_values().collect::<Vec<_>>(),
+            )
         };
 
         // Assemble snapshot.
@@ -110,13 +154,34 @@ impl<S: StorageEngine> ArrayInbound<S> {
             }
         }
 
-        // Remove the completed assembly entry.
-        if let Ok(mut snapshots) = self.snapshots.lock() {
-            snapshots.remove(&key);
-        }
-
         Ok(InboundOutcome::SnapshotApplied { ops_applied })
     }
+
+    /// Drop every partial snapshot assembly.
+    ///
+    /// Called when a new session starts its catch-up round. Origin re-sends a
+    /// whole snapshot for each catch-up request, so a partial assembly from a
+    /// closed session can never complete.
+    pub fn discard_partial_snapshots(&self) -> Result<(), LiteError> {
+        self.snapshots
+            .lock()
+            .map_err(|_| LiteError::LockPoisoned)?
+            .clear();
+        Ok(())
+    }
+}
+
+/// Check a declared chunk count against [`MAX_CHUNKS_PER_SNAPSHOT`].
+fn check_total_chunks(array: &str, total: u32) -> Result<(), LiteError> {
+    if total == 0 || total > MAX_CHUNKS_PER_SNAPSHOT {
+        return Err(LiteError::Sync {
+            detail: format!(
+                "snapshot for array '{array}' declares {total} chunks; \
+                 the allowed range is 1..={MAX_CHUNKS_PER_SNAPSHOT}"
+            ),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -294,5 +359,112 @@ mod tests {
             matches!(outcome, InboundOutcome::SnapshotPartial { .. }),
             "expected Partial while chunks remain, got: {outcome:?}"
         );
+    }
+
+    fn header_msg(array: &str, snapshot_ms: u64, total_chunks: u32) -> ArraySnapshotMsg {
+        use nodedb_array::sync::snapshot::SnapshotHeader;
+        let header = SnapshotHeader {
+            array: array.into(),
+            coord_range: CoordRange {
+                lo: vec![CoordValue::Int64(0)],
+                hi: vec![CoordValue::Int64(10)],
+            },
+            snapshot_hlc: hlc(snapshot_ms),
+            schema_hlc: hlc(1),
+            total_chunks,
+        };
+        ArraySnapshotMsg {
+            array: array.into(),
+            header_payload: zerompk::to_msgpack_vec(&header).unwrap(),
+        }
+    }
+
+    fn chunk_msg(array: &str, snapshot_ms: u64, index: u32, total: u32) -> ArraySnapshotChunkMsg {
+        ArraySnapshotChunkMsg {
+            array: array.into(),
+            snapshot_hlc_bytes: hlc(snapshot_ms).to_bytes(),
+            chunk_index: index,
+            total_chunks: total,
+            payload: vec![0xAB; 8],
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chunk_before_header_is_an_error_and_buffers_nothing() {
+        let (inbound, _schemas, _pending, _storage) = make_inbound().await;
+        assert!(
+            inbound
+                .handle_snapshot_chunk(&chunk_msg("a", 50, 0, 2))
+                .is_err()
+        );
+        assert!(inbound.snapshots.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chunk_with_conflicting_total_drops_the_assembly() {
+        let (inbound, _schemas, _pending, _storage) = make_inbound().await;
+        inbound
+            .handle_snapshot_header(&header_msg("a", 50, 3))
+            .unwrap();
+        assert!(
+            inbound
+                .handle_snapshot_chunk(&chunk_msg("a", 50, 0, 2))
+                .is_err()
+        );
+        assert!(inbound.snapshots.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chunk_index_outside_total_is_an_error() {
+        let (inbound, _schemas, _pending, _storage) = make_inbound().await;
+        inbound
+            .handle_snapshot_header(&header_msg("a", 50, 2))
+            .unwrap();
+        assert!(
+            inbound
+                .handle_snapshot_chunk(&chunk_msg("a", 50, 2, 2))
+                .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn header_with_zero_chunks_is_an_error() {
+        let (inbound, _schemas, _pending, _storage) = make_inbound().await;
+        assert!(
+            inbound
+                .handle_snapshot_header(&header_msg("a", 50, 0))
+                .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn complete_assembly_that_fails_to_decode_leaves_no_buffered_state() {
+        let (inbound, _schemas, _pending, _storage) = make_inbound().await;
+        inbound
+            .handle_snapshot_header(&header_msg("a", 50, 1))
+            .unwrap();
+        // The payload is not a valid tile blob, so assembly or decode fails.
+        assert!(
+            inbound
+                .handle_snapshot_chunk(&chunk_msg("a", 50, 0, 1))
+                .is_err()
+        );
+        assert!(inbound.snapshots.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn discard_partial_snapshots_clears_every_assembly() {
+        let (inbound, _schemas, _pending, _storage) = make_inbound().await;
+        inbound
+            .handle_snapshot_header(&header_msg("a", 50, 2))
+            .unwrap();
+        inbound
+            .handle_snapshot_header(&header_msg("b", 60, 2))
+            .unwrap();
+        inbound
+            .handle_snapshot_chunk(&chunk_msg("a", 50, 0, 2))
+            .unwrap();
+        inbound.discard_partial_snapshots().unwrap();
+        assert!(inbound.snapshots.lock().unwrap().is_empty());
     }
 }

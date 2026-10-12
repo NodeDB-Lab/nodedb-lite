@@ -282,7 +282,7 @@ pub(super) async fn dispatch_frame(
         }
         SyncMessageType::ArrayDelta => {
             if let Some(msg) = frame.decode_body::<nodedb_types::sync::wire::ArrayDeltaMsg>() {
-                if let Some(ack) = delegate.handle_array_delta(&msg) {
+                if let Some(ack) = delegate.handle_array_delta(&msg).await {
                     client.set_pending_array_ack(ack).await;
                 }
             } else {
@@ -291,11 +291,33 @@ pub(super) async fn dispatch_frame(
         }
         SyncMessageType::ArrayDeltaBatch => {
             if let Some(msg) = frame.decode_body::<nodedb_types::sync::wire::ArrayDeltaBatchMsg>() {
-                if let Some(ack) = delegate.handle_array_delta_batch(&msg) {
+                if let Some(ack) = delegate.handle_array_delta_batch(&msg).await {
                     client.set_pending_array_ack(ack).await;
                 }
             } else {
                 tracing::warn!("ArrayDeltaBatch: failed to decode frame body");
+            }
+        }
+        SyncMessageType::ArraySnapshot => {
+            // Origin's catch-up server sends the header first, then the
+            // chunks, on this ordered stream.
+            if let Some(msg) = frame.decode_body::<nodedb_types::sync::wire::ArraySnapshotMsg>() {
+                delegate.handle_array_snapshot(&msg).await;
+            } else {
+                tracing::warn!("ArraySnapshot: failed to decode frame body");
+            }
+        }
+        SyncMessageType::ArraySnapshotChunk => {
+            if let Some(msg) =
+                frame.decode_body::<nodedb_types::sync::wire::ArraySnapshotChunkMsg>()
+            {
+                // The ack for the last chunk carries the snapshot HLC, which
+                // advances Origin's GC frontier for this replica.
+                if let Some(ack) = delegate.handle_array_snapshot_chunk(&msg).await {
+                    client.set_pending_array_ack(ack).await;
+                }
+            } else {
+                tracing::warn!("ArraySnapshotChunk: failed to decode frame body");
             }
         }
         SyncMessageType::ArrayReject => {
@@ -306,7 +328,13 @@ pub(super) async fn dispatch_frame(
                     detail = %msg.detail,
                     "received ArrayReject from Origin — op removed from pending queue"
                 );
-                delegate.handle_array_reject(&msg);
+                // A `RetentionFloor` reject means Origin's GC passed this
+                // replica's cursor: the op stream cannot resume, so the
+                // delegate returns a catch-up request that Origin answers
+                // with a snapshot. The push loop sends it on its next tick.
+                if let Some(request) = delegate.handle_array_reject(&msg).await {
+                    client.queue_array_catchup(request).await;
+                }
             } else {
                 tracing::warn!("ArrayReject: failed to decode frame body");
             }
