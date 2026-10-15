@@ -474,3 +474,35 @@ async fn named_vector_delete_keeps_base_vector_fields() {
         .expect("base search");
     assert_eq!(base.first().map(|h| h.id.as_str()), Some("m"));
 }
+
+/// A collection whose last vector is deleted keeps serving vectors inserted
+/// afterwards, including a re-insert of the deleted id.
+#[tokio::test]
+async fn vector_insert_after_last_vector_deleted_is_searchable() {
+    let db = open_db().await;
+    let v = |a: usize| -> Vec<f32> {
+        let x: Vec<f32> = (0..8).map(|i| if i == a { 1.0 } else { 0.1 }).collect();
+        let n = x.iter().map(|y| y * y).sum::<f32>().sqrt();
+        x.into_iter().map(|y| y / n).collect()
+    };
+    db.vector_insert("empty_vecs", "K", &v(0), None)
+        .await
+        .expect("insert K");
+    db.vector_delete("empty_vecs", "K").await.expect("delete K");
+    for (id, a) in [("M", 2), ("P", 5), ("K", 7)] {
+        db.vector_insert("empty_vecs", id, &v(a), None)
+            .await
+            .expect("insert after delete");
+    }
+    for (id, a) in [("M", 2), ("P", 5), ("K", 7)] {
+        let top = db
+            .vector_search("empty_vecs", &v(a), 1, None, None)
+            .await
+            .expect("vector_search");
+        assert_eq!(
+            top.first().map(|h| h.id.as_str()),
+            Some(id),
+            "{id} unreachable"
+        );
+    }
+}

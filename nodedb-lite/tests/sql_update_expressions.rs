@@ -7,6 +7,7 @@
 //! - An assignment that fails on one row leaves every row unchanged.
 //! - `MERGE ... WHEN MATCHED THEN UPDATE` and `UPDATE ... FROM` read target
 //!   and source columns in one expression.
+//! - A DML `RETURNING` clause is refused as unsupported and writes nothing.
 //!
 //! Run with:
 //!   cargo nextest run -p nodedb-lite --test sql_update_expressions
@@ -15,6 +16,7 @@ use std::sync::Arc;
 
 use nodedb_client::NodeDb;
 use nodedb_lite::{NodeDbLite, PagedbStorageMem};
+use nodedb_types::error::ErrorCode;
 use nodedb_types::value::Value;
 
 async fn open_test_db() -> Arc<NodeDbLite<PagedbStorageMem>> {
@@ -217,4 +219,65 @@ async fn update_from_evaluates_an_expression_over_the_source_row() {
         Value::Integer(0),
         "a target row with no source match keeps its value"
     );
+}
+
+/// Run `statement`, which must be refused as unsupported (SQLSTATE `0A000`).
+async fn assert_refused(db: &NodeDbLite<PagedbStorageMem>, statement: &str) {
+    let err = db
+        .execute_sql(statement, &[])
+        .await
+        .expect_err("RETURNING must be refused, never answered with a count");
+    assert_eq!(err.code(), ErrorCode::SQL_NOT_ENABLED, "{statement}: {err}");
+    assert!(err.to_string().contains("RETURNING"), "{statement}: {err}");
+}
+
+#[tokio::test]
+async fn update_returning_is_refused_and_writes_nothing() {
+    let db = open_test_db().await;
+    seed_schemaless(&db).await;
+    assert_refused(
+        &db,
+        "UPDATE tallies SET n = 99 WHERE id = 't1' RETURNING id, n",
+    )
+    .await;
+    assert_refused(&db, "UPDATE tallies SET n = 99 RETURNING *").await;
+    assert_eq!(
+        scalar(&db, "SELECT n FROM tallies WHERE id = 't1'").await,
+        Value::Integer(1)
+    );
+}
+
+#[tokio::test]
+async fn update_from_returning_is_refused_and_writes_nothing() {
+    let db = open_test_db().await;
+    sql(&db, "CREATE COLLECTION orders").await;
+    sql(&db, "CREATE COLLECTION supply").await;
+    sql(&db, "INSERT INTO orders (id, total) VALUES ('o1', 0)").await;
+    sql(&db, "INSERT INTO supply (id, qty) VALUES ('o1', 6)").await;
+    assert_refused(
+        &db,
+        "UPDATE orders SET total = s.qty FROM supply AS s WHERE orders.id = s.id RETURNING id",
+    )
+    .await;
+    assert_eq!(
+        scalar(&db, "SELECT total FROM orders WHERE id = 'o1'").await,
+        Value::Integer(0)
+    );
+}
+
+#[tokio::test]
+async fn insert_and_delete_returning_are_refused_and_write_nothing() {
+    let db = open_test_db().await;
+    seed_schemaless(&db).await;
+    assert_refused(
+        &db,
+        "INSERT INTO tallies (id, n, d) VALUES ('t3', 7, 1) RETURNING id",
+    )
+    .await;
+    assert_refused(&db, "DELETE FROM tallies WHERE id = 't1' RETURNING id").await;
+    let rows = db
+        .execute_sql("SELECT id FROM tallies", &[])
+        .await
+        .expect("SELECT tallies");
+    assert_eq!(rows.rows.len(), 2, "{rows:?}");
 }
