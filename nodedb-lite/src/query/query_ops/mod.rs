@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 pub mod aggregate;
+mod aggregate_numeric;
 pub mod facets;
 pub mod joins;
 pub mod lateral_loop;

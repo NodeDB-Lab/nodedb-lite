@@ -34,19 +34,17 @@ fn overflow(key: &str) -> LiteError {
     }
 }
 
+/// Bytes one token occurrence holds in index `key`: its scoped key and
+/// posting, the normalized string, hash buckets, its position, and geometric
+/// Vec capacity. Live writes and checkpoint restore both charge through it.
+fn occurrence_cost(key_len: usize, term_len: usize) -> Option<usize> {
+    let per_token = key_len.checked_add(5)?.checked_mul(2)?.checked_add(320)?;
+    term_len.checked_mul(4)?.checked_add(per_token)
+}
+
 fn estimate_row(key: &str, tokens: &[String]) -> Result<usize, LiteError> {
-    // Each occurrence reserves a distinct scoped key and posting. Normalized
-    // strings, hash buckets, positions, and geometric Vec capacity remain charged.
-    let scoped_prefix = key.len().checked_add(5).ok_or_else(|| overflow(key))?;
-    let per_token = scoped_prefix
-        .checked_mul(2)
-        .and_then(|bytes| bytes.checked_add(320))
-        .ok_or_else(|| overflow(key))?;
     tokens.iter().try_fold(0usize, |bytes, token| {
-        token
-            .len()
-            .checked_mul(4)
-            .and_then(|normalized| normalized.checked_add(per_token))
+        occurrence_cost(key.len(), token.len())
             .and_then(|cost| bytes.checked_add(cost))
             .ok_or_else(|| overflow(key))
     })
@@ -111,42 +109,35 @@ impl RetainedIndex {
         Ok(())
     }
 
-    pub(super) fn restored(
-        governor: Arc<MemoryGovernor>,
-        key: &str,
-        index: &LiteFtsIndex,
-        next_surrogate: u32,
-    ) -> Self {
+    pub(super) fn restored(governor: Arc<MemoryGovernor>, key: &str, index: &LiteFtsIndex) -> Self {
         let mut bytes = 1024usize.saturating_add(key.len().saturating_mul(4));
         let mut row_estimated_bytes: HashMap<u32, usize> = HashMap::new();
-        // Same per-occurrence charge as `estimate_row`.
-        let per_token = key
-            .len()
-            .saturating_add(5)
-            .saturating_mul(2)
-            .saturating_add(320);
         let scope = IndexScope::document(key);
         for term in index.memtable().terms(0, 0, scope) {
+            let cost = occurrence_cost(key.len(), term.len()).unwrap_or(usize::MAX);
             for posting in index.memtable().get_postings(0, 0, scope, &term) {
                 let occurrences = if posting.positions.is_empty() {
                     posting.term_freq as usize
                 } else {
                     posting.positions.len()
                 };
-                let cost = per_token
-                    .saturating_add(term.len().saturating_mul(4))
-                    .saturating_mul(occurrences);
                 let row = row_estimated_bytes.entry(posting.doc_id.0).or_default();
-                *row = row.saturating_add(cost);
+                *row = row.saturating_add(cost.saturating_mul(occurrences));
             }
         }
         for row in row_estimated_bytes.values() {
             bytes = bytes.saturating_add(*row).saturating_add(128);
         }
-        bytes = bytes.saturating_add((next_surrogate as usize).saturating_mul(16));
+        // Dense slots run to this index's highest surrogate, as `reserve_write`
+        // grows them, not to the store-wide surrogate counter.
+        let dense_slots = row_estimated_bytes
+            .keys()
+            .max()
+            .map_or(0, |surrogate| *surrogate as usize + 1);
+        bytes = bytes.saturating_add(dense_slots.saturating_mul(16));
         Self {
             chunks: vec![memory(governor).charge(bytes)],
-            dense_slots: next_surrogate as usize,
+            dense_slots,
             row_estimated_bytes,
         }
     }
@@ -303,7 +294,7 @@ mod tests {
         index
             .index_analyzed_document(0, 0, "docs", Surrogate(1), &tokens)
             .unwrap();
-        let mut lease = RetainedIndex::restored(Arc::clone(&governor), "docs", &index, 2);
+        let mut lease = RetainedIndex::restored(Arc::clone(&governor), "docs", &index);
         let before = governor
             .snapshot()
             .into_iter()

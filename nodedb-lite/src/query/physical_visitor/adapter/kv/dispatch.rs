@@ -160,10 +160,19 @@ pub(crate) fn dispatch<'a, S: StorageEngine + 'a>(
             collection,
             entries,
             ttl_ms,
+            intent,
             surrogates: _,
             returning,
             rls_filters,
-        } => writes::batch_put(engine, collection, entries, *ttl_ms, returning, rls_filters),
+        } => writes::batch_put(
+            engine,
+            collection,
+            entries,
+            *ttl_ms,
+            intent,
+            returning,
+            rls_filters,
+        ),
 
         KvOp::Expire {
             collection,

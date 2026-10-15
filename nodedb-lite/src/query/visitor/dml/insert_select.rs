@@ -13,32 +13,31 @@ use crate::error::LiteError;
 use crate::query::document_ops::is_strict;
 use crate::query::document_ops::writes::point_insert_admitted;
 use crate::query::engine::LiteQueryEngine;
-use crate::query::expr_convert::convert_sql_expr;
 use crate::storage::engine::StorageEngine;
 
 use crate::query::visitor::adapter::LiteFut;
-use crate::query::visitor::scan_post::row_to_typed_value;
 
 use super::rows::{declared_primary_key, extract_id, row_to_msgpack, value_to_sql_value};
 
 /// `INSERT INTO target [(cols)] SELECT ... FROM source`.
 ///
-/// Executes the source plan and inserts one target row per source row.
-/// `column_map` is the target list: one `(target column, source
-/// expression)` per declared column, evaluated against the source row.
-/// Empty means copy each source row unchanged. Routing (strict vs
-/// schemaless CRDT) is detected via `is_strict`.
+/// Executes the source plan and inserts one target row per output row. The
+/// source plan carries its own LIMIT. `source_columns` pairs each target
+/// column with the source output column it takes. Empty means copy each
+/// output row unchanged. `column_map` binds the same target columns as
+/// expressions over a stored source row. Lite reads every source as output
+/// rows, so `column_map` serves only the plan-time NULL primary-key check.
+/// Routing (strict vs schemaless CRDT) is detected via `is_strict`.
 pub(in crate::query::visitor) fn lower_insert_select<'a, S: StorageEngine + 'a>(
     engine: &'a LiteQueryEngine<S>,
     permit: &'a crate::engine::fts::coordinator::TextMutationPermit,
     target: &str,
     source: &SqlPlan,
-    limit: usize,
     column_map: &[(String, SqlExpr)],
+    source_columns: &[(String, String)],
 ) -> Result<LiteFut<'a>, LiteError> {
     let target = target.to_string();
     let source = source.clone();
-    let effective_limit = if limit == 0 { usize::MAX } else { limit };
 
     // A declared PRIMARY KEY implies NOT NULL. A literal `SELECT NULL` into
     // the pk column is knowable before any row is scanned.
@@ -53,24 +52,41 @@ pub(in crate::query::visitor) fn lower_insert_select<'a, S: StorageEngine + 'a>(
             column: pk.clone(),
         });
     }
-    let column_map: Vec<(String, nodedb_query::expr::types::SqlExpr)> = column_map
-        .iter()
-        .map(|(field, expr)| Ok((field.clone(), convert_sql_expr(expr)?)))
-        .collect::<Result<_, LiteError>>()?;
+    let source_columns = source_columns.to_vec();
 
     Ok(Box::pin(async move {
         let source_result = engine.execute_plan_admitted(&source, Some(permit)).await?;
-        let cols = source_result.columns.clone();
-        let mut maps: Vec<HashMap<String, Value>> = Vec::new();
-        for row in source_result.rows.into_iter().take(effective_limit) {
-            if column_map.is_empty() {
+        let cols = source_result.columns;
+        // The output position each target column reads.
+        let positions: Vec<(String, usize)> = source_columns
+            .iter()
+            .map(|(field, output)| {
+                cols.iter()
+                    .position(|c| c == output)
+                    .map(|i| (field.clone(), i))
+                    .ok_or_else(|| {
+                        LiteError::Query(format!(
+                            "INSERT ... SELECT source has no output column '{output}' for \
+                             target column '{field}'"
+                        ))
+                    })
+            })
+            .collect::<Result<_, LiteError>>()?;
+        let mut maps: Vec<HashMap<String, Value>> = Vec::with_capacity(source_result.rows.len());
+        for row in source_result.rows {
+            if positions.is_empty() {
                 maps.push(cols.iter().cloned().zip(row).collect());
                 continue;
             }
-            let doc = row_to_typed_value(&cols, &row);
-            let mut shaped = HashMap::with_capacity(column_map.len());
-            for (field, expr) in &column_map {
-                let value = expr.eval(&doc)?;
+            let mut shaped = HashMap::with_capacity(positions.len());
+            for (field, index) in &positions {
+                let value = row.get(*index).cloned().ok_or_else(|| {
+                    LiteError::Query(format!(
+                        "INSERT ... SELECT source row has {} values for {} output columns",
+                        row.len(),
+                        cols.len()
+                    ))
+                })?;
                 if matches!(value, Value::Null) && declared_pk.as_deref() == Some(field.as_str()) {
                     return Err(LiteError::NotNullViolation {
                         collection: target.clone(),
@@ -124,7 +140,6 @@ pub(in crate::query::visitor) fn lower_insert_select<'a, S: StorageEngine + 'a>(
 #[cfg(test)]
 mod tests {
     use nodedb_sql::types::SqlValue;
-    use nodedb_sql::types_expr::BinaryOp;
     use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
 
     use nodedb_sql::types::SqlPlan;
@@ -192,40 +207,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_select_column_map_shapes_each_target_row() {
+    async fn insert_select_source_columns_pair_targets_with_outputs() {
         let engine = test_engine().await;
         seed(&engine).await;
+        engine
+            .strict
+            .create_collection(
+                "renamed",
+                StrictSchema {
+                    columns: vec![
+                        ColumnDef::required("k", ColumnType::String).with_primary_key(),
+                        ColumnDef::nullable("m", ColumnType::Int64),
+                    ],
+                    version: 1,
+                    dropped_columns: Vec::new(),
+                    bitemporal: false,
+                },
+            )
+            .await
+            .expect("renamed");
         let guard = engine.fts_state.admit_mutation().await;
-        let column_map = vec![
-            (
-                "id".to_string(),
-                SqlExpr::BinaryOp {
-                    left: Box::new(col("id")),
-                    op: BinaryOp::Concat,
-                    right: Box::new(SqlExpr::Literal(SqlValue::String("-copy".into()))),
-                },
-            ),
-            (
-                "n".to_string(),
-                SqlExpr::BinaryOp {
-                    left: Box::new(col("n")),
-                    op: BinaryOp::Mul,
-                    right: Box::new(SqlExpr::Literal(SqlValue::Int(2))),
-                },
-            ),
+        let column_map = vec![("k".to_string(), col("id")), ("m".to_string(), col("n"))];
+        let source_columns = vec![
+            ("k".to_string(), "id".to_string()),
+            ("m".to_string(), "n".to_string()),
         ];
-        let r = lower_insert_select(&engine, guard.permit(), "dst", &scan("src"), 0, &column_map)
-            .expect("lower")
-            .await;
+        let r = lower_insert_select(
+            &engine,
+            guard.permit(),
+            "renamed",
+            &scan("src"),
+            &column_map,
+            &source_columns,
+        )
+        .expect("lower")
+        .await;
         let r = guard.finish(r).expect("run");
         assert_eq!(r.rows_affected, 1);
         let row = engine
             .strict
-            .get("dst", &Value::String("a-copy".into()))
+            .get("renamed", &Value::String("a".into()))
             .await
             .expect("get")
             .expect("row present");
-        assert_eq!(row[1], Value::Integer(10));
+        assert_eq!(row[1], Value::Integer(5));
+    }
+
+    #[tokio::test]
+    async fn insert_select_missing_output_column_is_refused() {
+        let engine = test_engine().await;
+        seed(&engine).await;
+        let guard = engine.fts_state.admit_mutation().await;
+        let source_columns = vec![
+            ("id".to_string(), "id".to_string()),
+            ("n".to_string(), "absent".to_string()),
+        ];
+        let r = lower_insert_select(
+            &engine,
+            guard.permit(),
+            "dst",
+            &scan("src"),
+            &[],
+            &source_columns,
+        )
+        .expect("lower")
+        .await;
+        let err = guard
+            .finish(r)
+            .expect_err("an unknown output column is refused");
+        assert!(matches!(err, LiteError::Query(_)), "{err}");
     }
 
     #[tokio::test]
@@ -237,12 +287,21 @@ mod tests {
             ("id".to_string(), SqlExpr::Literal(SqlValue::Null)),
             ("n".to_string(), col("n")),
         ];
-        let err =
-            match lower_insert_select(&engine, guard.permit(), "dst", &scan("src"), 0, &column_map)
-            {
-                Ok(_) => panic!("a literal NULL into the pk must be rejected"),
-                Err(e) => e,
-            };
+        let source_columns = vec![
+            ("id".to_string(), "__nodedb_insert_select_0".to_string()),
+            ("n".to_string(), "n".to_string()),
+        ];
+        let err = match lower_insert_select(
+            &engine,
+            guard.permit(),
+            "dst",
+            &scan("src"),
+            &column_map,
+            &source_columns,
+        ) {
+            Ok(_) => panic!("a literal NULL into the pk must be rejected"),
+            Err(e) => e,
+        };
         let err = guard
             .finish::<(), _>(Err(err))
             .expect_err("refused mutation");
@@ -254,7 +313,7 @@ mod tests {
         let engine = test_engine().await;
         seed(&engine).await;
         let guard = engine.fts_state.admit_mutation().await;
-        let r = lower_insert_select(&engine, guard.permit(), "dst", &scan("src"), 0, &[])
+        let r = lower_insert_select(&engine, guard.permit(), "dst", &scan("src"), &[], &[])
             .expect("lower")
             .await;
         let r = guard.finish(r).expect("run");

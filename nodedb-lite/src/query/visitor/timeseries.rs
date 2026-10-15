@@ -19,6 +19,7 @@ use crate::query::visitor::scan_post::sort_rows;
 use crate::storage::engine::StorageEngine;
 
 use super::adapter::LiteFut;
+use super::having_eval::{apply_having_result, make_agg_alias_map};
 use super::projection::projection_names;
 
 fn encode_filters(filters: &[Filter]) -> Result<Vec<u8>, LiteError> {
@@ -36,20 +37,31 @@ fn encode_filters(filters: &[Filter]) -> Result<Vec<u8>, LiteError> {
 }
 
 /// Convert SQL `AggregateExpr` list to `(op, field)` pairs expected by `TimeseriesOp::Scan`.
-fn convert_aggregates(aggregates: &[AggregateExpr]) -> Vec<(String, String)> {
+///
+/// The grouped scan reads one column per aggregate. A computed argument has
+/// no column to read, so it is refused. `DISTINCT` selects the deduplicating
+/// accumulator name.
+fn convert_aggregates(aggregates: &[AggregateExpr]) -> Result<Vec<(String, String)>, LiteError> {
     aggregates
         .iter()
         .map(|agg| {
-            let field = agg
-                .args
-                .first()
-                .and_then(|a| match a {
-                    SqlExpr::Column { name, .. } => Some(name.clone()),
-                    SqlExpr::Wildcard => Some("*".to_string()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| "*".to_string());
-            (agg.function.clone(), field)
+            let field = match agg.args.first() {
+                None | Some(SqlExpr::Wildcard) => "*".to_string(),
+                Some(SqlExpr::Column { name, .. }) => name.clone(),
+                Some(_) => {
+                    return Err(LiteError::Unsupported {
+                        detail: format!(
+                            "aggregate '{}' has a computed argument the grouped timeseries \
+                             scan cannot read in Lite",
+                            agg.alias
+                        ),
+                    });
+                }
+            };
+            Ok((
+                nodedb_sql::planner::agg_naming::aggregate_function_name(agg),
+                field,
+            ))
         })
         .collect()
 }
@@ -68,6 +80,7 @@ pub(super) fn lower_timeseries_scan<'a, S: StorageEngine + 'a>(
         group_by,
         aggregates,
         filters,
+        having,
         projection,
         gap_fill,
         limit,
@@ -77,18 +90,18 @@ pub(super) fn lower_timeseries_scan<'a, S: StorageEngine + 'a>(
     } = args;
     let filter_bytes = encode_filters(filters)?;
     let proj_cols = projection_names(projection, "timeseries scan")?;
-    let agg_pairs = convert_aggregates(aggregates);
+    let agg_pairs = convert_aggregates(aggregates)?;
 
     let (system_time, valid_at_ms) = extract_temporal(temporal);
 
-    // ORDER BY must be applied to the FULL result and only then truncated, so an
-    // ordered query returns the first `limit` rows of the ordering the client
-    // asked for — not an arbitrary `limit` rows that were then sorted among
-    // themselves. So when there are sort keys we scan unbounded (`limit == 0`
-    // is the scan's "no cap" encoding), sort, and truncate here. With no sort
-    // keys the limit is pushed into the scan exactly as before.
-    let sorted = !sort_keys.is_empty();
-    let scan_limit = if sorted { 0 } else { limit };
+    // ORDER BY and HAVING must see the FULL result before it is truncated, so
+    // an ordered or filtered query returns the first `limit` qualifying rows
+    // — not an arbitrary `limit` rows that were then filtered or sorted among
+    // themselves. So with sort keys or HAVING we scan unbounded (`limit == 0`
+    // is the scan's "no cap" encoding), filter, sort, and truncate here.
+    // Otherwise the limit is pushed into the scan.
+    let post_processed = !sort_keys.is_empty() || !having.is_empty();
+    let scan_limit = if post_processed { 0 } else { limit };
 
     let op = TimeseriesOp::Scan {
         // Lite holds a bare collection name; DatabaseId::DEFAULT keeps it unqualified.
@@ -109,17 +122,23 @@ pub(super) fn lower_timeseries_scan<'a, S: StorageEngine + 'a>(
         system_time,
         valid_at_ms,
         sort_keys: Vec::new(),
+        // HAVING is applied below, over the scan's grouped rows.
+        having: Vec::new(),
+        tiering: None,
     };
 
     let mut phys = LiteDataPlaneVisitor::new(engine);
     let fut = phys.timeseries(&op)?;
-    if !sorted {
+    if !post_processed {
         return Ok(Box::pin(fut));
     }
 
     let sort_keys = sort_keys.to_vec();
+    let having = having.to_vec();
+    let agg_alias_map = make_agg_alias_map(aggregates);
     Ok(Box::pin(async move {
-        let mut result = fut.await?;
+        let result = fut.await?;
+        let mut result = apply_having_result(result, &having, &agg_alias_map);
         sort_rows(&mut result, &sort_keys)?;
         if limit > 0 {
             result.rows.truncate(limit);
@@ -280,6 +299,7 @@ mod tests {
                 group_by: &[],
                 aggregates: &[],
                 filters: &[],
+                having: &[],
                 projection: &[],
                 gap_fill: "",
                 limit: 100,

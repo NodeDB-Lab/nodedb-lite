@@ -13,30 +13,23 @@ use nodedb_sql::types_expr::{BinaryOp, SqlExpr, SqlValue};
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
-/// Build a lookup: `"func_name:field"` → result alias for aggregate HAVING.
+/// Build a lookup: canonical aggregate key → result alias for HAVING.
 ///
-/// For example, `SUM(salary) AS total` produces the key `"sum:salary"` → `"total"`.
+/// For example, `SUM(salary) AS total` produces the key `"sum(salary)"` →
+/// `"total"`.
 pub(super) fn make_agg_alias_map(aggregates: &[AggregateExpr]) -> HashMap<String, String> {
     aggregates
         .iter()
         .map(|a| {
-            let func = a.function.to_lowercase();
-            let field = a
-                .args
-                .first()
-                .map(|e| match e {
-                    SqlExpr::Column { name, .. } => name.clone(),
-                    SqlExpr::Wildcard => "*".to_string(),
-                    other => format!("{other:?}"),
-                })
-                .unwrap_or_default();
-            // The CANONICAL key, `sum(salary)` — the same string
-            // `nodedb_query::agg_key::canonical_agg_key` produces and the planner
-            // rewrites HAVING's aggregate calls to. HAVING is evaluated before
-            // aggregate columns are renamed to their user aliases, so it arrives
-            // naming this key while the row carries the alias; this map is what
-            // bridges the two.
-            (format!("{func}({field})"), a.alias.clone())
+            // The CANONICAL key, `sum(salary)`: the key the planner rewrites
+            // HAVING's aggregate calls to. A computed argument is named by its
+            // source text and a FILTER clause is appended, so each aggregate
+            // gets its own key. HAVING arrives naming this key while the row
+            // carries the alias. This map bridges the two.
+            (
+                nodedb_sql::planner::agg_naming::aggregate_output_key(a),
+                a.alias.clone(),
+            )
         })
         .collect()
 }

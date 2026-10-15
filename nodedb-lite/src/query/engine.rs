@@ -174,6 +174,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         if let Some(result) = self.try_handle_ddl(sql).await {
             return result;
         }
+        super::returning::refuse_unflagged_returning(sql)?;
 
         let metas =
             crate::nodedb::collection::ddl::load_persisted_collection_metas(self.storage.as_ref())

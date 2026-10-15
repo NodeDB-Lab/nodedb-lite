@@ -286,7 +286,6 @@ impl FtsCollectionManager {
                         Arc::clone(&self.governor),
                         key,
                         index,
-                        next_surrogate,
                     ),
                 )
             })

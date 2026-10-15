@@ -4,7 +4,7 @@
 //! Every arm runs its write through `kv_ops::sync_capture`, which records
 //! the rows it leaves for the sync push to Origin.
 
-use nodedb_physical::physical_plan::{KvCounterShape, ReturningSpec, UpdateValue};
+use nodedb_physical::physical_plan::{KvBatchIntent, KvCounterShape, ReturningSpec, UpdateValue};
 use nodedb_types::{QualifiedCollection, RlsWriteCheck};
 
 use crate::error::LiteError;
@@ -169,25 +169,37 @@ pub(super) fn batch_put<'a, S: StorageEngine + 'a>(
     collection: &QualifiedCollection,
     entries: &[(Vec<u8>, Vec<u8>)],
     ttl_ms: u64,
+    intent: &KvBatchIntent,
     returning: &Option<ReturningSpec>,
     rls_filters: &[u8],
 ) -> Result<LitePhysicalFut<'a>, LiteError> {
-    // BatchPut has no rls_write_check slot: SET semantics carry no
-    // write gate.
+    // Only a merge carries a write gate. Every other intent writes the
+    // entries as given.
+    let no_policy = RlsWriteCheck::NoPolicyApplies;
+    let write_check = match intent {
+        KvBatchIntent::Merge {
+            rls_write_check, ..
+        } => rls_write_check,
+        KvBatchIntent::Put
+        | KvBatchIntent::Upsert
+        | KvBatchIntent::Insert
+        | KvBatchIntent::InsertIfAbsent => &no_policy,
+    };
     deny_policy(
         "KvOp::BatchPut",
         returning.as_ref(),
         &[rls_filters],
-        &RlsWriteCheck::NoPolicyApplies,
+        write_check,
     )?;
     let col = collection.clone();
     let ents = entries.to_vec();
+    let intent = intent.clone();
     Ok(Box::pin(async move {
         let touched = ents
             .iter()
             .map(|(k, _)| (col.as_str().to_owned(), k.clone()))
             .collect();
-        let write = kv_ops::writes::kv_batch_put(engine, col.as_str(), &ents, ttl_ms);
+        let write = kv_ops::writes::kv_batch_write(engine, col.as_str(), &ents, ttl_ms, &intent);
         record_kv_write(engine, touched, write).await
     }))
 }

@@ -103,6 +103,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             }
             EngineType::KeyValue => kv_select_all(self, collection).await,
             EngineType::Array => Err(array_refusal("scan")),
+            EngineType::ContinuousAggregate => Err(continuous_aggregate_refusal("scan")),
         }
     }
 
@@ -184,6 +185,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 Ok(result)
             }
             EngineType::Array => Err(array_refusal("point lookup")),
+            EngineType::ContinuousAggregate => Err(continuous_aggregate_refusal("point lookup")),
         }
     }
 }
@@ -196,6 +198,15 @@ fn array_refusal(what: &str) -> LiteError {
             "{what} is not supported on an array; read it with NDARRAY_SLICE or \
              NDARRAY_PROJECT"
         ),
+    }
+}
+
+/// The refusal for `what` on a continuous aggregate named as a relation.
+/// Lite's catalog never resolves a continuous aggregate as a relation, so a
+/// plan that names one is refused rather than read or written.
+pub(in crate::query) fn continuous_aggregate_refusal(what: &str) -> LiteError {
+    LiteError::Unsupported {
+        detail: format!("{what} on a continuous aggregate relation is not supported in Lite"),
     }
 }
 

@@ -4,8 +4,6 @@
 
 use std::collections::HashMap;
 
-use nodedb_physical::physical_plan::query::AggregateSpec;
-use nodedb_query::expr::GroupKeySpec;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
@@ -16,8 +14,7 @@ use crate::storage::engine::StorageEngine;
 use super::common::{
     apply_filters, apply_projection, decode_filters, hash_join, maps_to_result, scan_collection,
 };
-use super::spec::{CollectionSide, JoinSpec, PostAggregate};
-use crate::query::query_ops::aggregate::execute_aggregate;
+use super::spec::{CollectionSide, JoinSpec};
 
 pub async fn execute_broadcast_join<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
@@ -25,7 +22,6 @@ pub async fn execute_broadcast_join<S: StorageEngine>(
     small: CollectionSide<'_>,
     broadcast_data: &[u8],
     spec: &JoinSpec<'_>,
-    post: &PostAggregate<'_>,
 ) -> Result<QueryResult, LiteError> {
     let large_rows = scan_collection(engine, large.collection).await?;
 
@@ -54,24 +50,6 @@ pub async fn execute_broadcast_join<S: StorageEngine>(
     let pf = decode_filters(spec.post_filters)?;
     let joined = apply_filters(joined, &pf)?;
     let joined = apply_projection(joined, spec.projection);
-
-    if !post.group_by.is_empty() || !post.aggregates.is_empty() {
-        let agg_specs: Vec<AggregateSpec> = post
-            .aggregates
-            .iter()
-            .map(|(func, field)| AggregateSpec {
-                function: func.clone(),
-                alias: format!("{func}_{field}"),
-                user_alias: None,
-                field: field.clone(),
-                expr: None,
-            })
-            .collect();
-        // Post-join grouping is by bare output column name, so the lift is lossless.
-        let group_specs: Vec<GroupKeySpec> =
-            post.group_by.iter().map(GroupKeySpec::column).collect();
-        return execute_aggregate(joined, &group_specs, &agg_specs, &[], &[], &[], &[]);
-    }
 
     Ok(maps_to_result(joined))
 }

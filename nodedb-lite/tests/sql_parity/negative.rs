@@ -186,7 +186,7 @@ async fn drop_index_succeeds() {
     db.execute_sql("CREATE INDEX idx_name ON users (name)", &[])
         .await
         .expect("CREATE INDEX must succeed");
-    db.execute_sql("DROP INDEX idx_name ON users", &[])
+    db.execute_sql("DROP INDEX idx_name", &[])
         .await
         .expect("DROP INDEX must succeed");
 }

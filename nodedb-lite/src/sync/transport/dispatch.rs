@@ -40,8 +40,8 @@ where
         let bytes = match &msg {
             Message::Binary(b) => b.as_ref(),
             Message::Close(_) => return Ok(()),
-            Message::Ping(_) | Message::Pong(_) => continue,
-            _ => continue,
+            // Sync frames are binary. Control frames and text carry none.
+            Message::Ping(_) | Message::Pong(_) | Message::Text(_) | Message::Frame(_) => continue,
         };
 
         let Some(frame) = SyncFrame::from_bytes(bytes) else {
@@ -324,6 +324,9 @@ pub(super) async fn dispatch_frame(
         SyncMessageType::ArrayReject => {
             super::dispatch_array::handle_array_reject(client, delegate, frame).await;
         }
+        SyncMessageType::ArrayAdvisoryRefused => {
+            super::dispatch_array::handle_array_advisory_refused(frame);
+        }
         SyncMessageType::ColumnarInsertAck => {
             dispatch_acks::handle_columnar_insert_ack(client, delegate, frame).await;
         }
@@ -354,8 +357,46 @@ pub(super) async fn dispatch_frame(
         SyncMessageType::PingPong => {
             super::dispatch_array::handle_ping_pong(client, delegate, frame).await;
         }
-        _ => {
-            tracing::debug!(msg_type = ?frame.msg_type, "unexpected frame type from Origin");
-        }
+        // Types Lite has no handler for: client-to-server frames, a second
+        // handshake ack, and server frames Lite does not act on. Origin logs
+        // an unhandled type at warn and keeps the session, so Lite does too.
+        SyncMessageType::Handshake
+        | SyncMessageType::HandshakeAck
+        | SyncMessageType::DeltaPush
+        | SyncMessageType::CollectionPurged
+        | SyncMessageType::RowPushReject
+        | SyncMessageType::ShapeSubscribe
+        | SyncMessageType::ShapeUnsubscribe
+        | SyncMessageType::TimeseriesPush
+        | SyncMessageType::Throttle
+        | SyncMessageType::TokenRefresh
+        | SyncMessageType::PresenceUpdate
+        | SyncMessageType::PresenceBroadcast
+        | SyncMessageType::PresenceLeave
+        | SyncMessageType::ArraySchema
+        | SyncMessageType::ArrayAck
+        | SyncMessageType::ArrayCatchupRequest
+        | SyncMessageType::ArrayOpResults
+        | SyncMessageType::ColumnarInsert
+        | SyncMessageType::VectorInsert
+        | SyncMessageType::VectorDelete
+        | SyncMessageType::FtsIndex
+        | SyncMessageType::FtsDelete
+        | SyncMessageType::SpatialInsert
+        | SyncMessageType::SpatialDelete
+        | SyncMessageType::KvPush => warn_unhandled(frame),
+        // `SyncMessageType` is `#[non_exhaustive]`, so a match outside its
+        // crate needs this arm. A type added later is unhandled the same way.
+        _ => warn_unhandled(frame),
     }
+}
+
+/// Log a frame of a type Lite does not handle. The session stays open.
+fn warn_unhandled(frame: &SyncFrame) {
+    tracing::warn!(
+        msg_type = ?frame.msg_type,
+        msg_type_code = frame.msg_type as u8,
+        frame_len = frame.body.len(),
+        "unhandled sync message type from Origin; frame ignored"
+    );
 }

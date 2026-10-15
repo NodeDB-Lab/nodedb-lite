@@ -209,6 +209,16 @@ where
         | VectorOp::DirectUpdate { .. }
         | VectorOp::DirectTruncate { .. } => super::direct::dispatch(engine, permit, op),
 
+        // Every row of the page must land, or none. Lite's direct write
+        // applies one row at a time, so a later row's refusal would leave
+        // earlier rows written.
+        VectorOp::DirectBatchWrite { collection, .. } => Err(LiteError::Unsupported {
+            detail: format!(
+                "VectorOp::DirectBatchWrite on '{collection}': an all-or-nothing multi-row \
+                 vector-primary write page is not supported in Lite"
+            ),
+        }),
+
         // Resolve-before-propose splits a governed write into a read-only
         // resolution and a Raft-replicated apply. Lite has no Raft and no
         // write policy; it applies the direct ops above in one step.

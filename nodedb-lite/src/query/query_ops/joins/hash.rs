@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! HashJoin implementation for Lite.
 //!
-//! Supports Inner/Left/Right/Full/Semi/Anti join types.
-//! Bitmap sub-plans are executed first when present; post-aggregates and
-//! projection are applied after the join.
+//! Supports Inner/Left/Right/Full/Semi/Anti join types. Post-join filters
+//! and projection are applied after the join.
 
-use nodedb_physical::physical_plan::query::AggregateSpec;
-use nodedb_query::expr::GroupKeySpec;
 use nodedb_types::result::QueryResult;
 
 use crate::error::LiteError;
@@ -16,15 +13,13 @@ use crate::storage::engine::StorageEngine;
 use super::common::{
     apply_filters, apply_projection, decode_filters, hash_join, maps_to_result, scan_collection,
 };
-use super::spec::{CollectionSide, JoinSpec, PostAggregate};
-use crate::query::query_ops::aggregate::execute_aggregate;
+use super::spec::{CollectionSide, JoinSpec};
 
 pub async fn execute_hash_join<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     left: CollectionSide<'_>,
     right: CollectionSide<'_>,
     spec: &JoinSpec<'_>,
-    post: &PostAggregate<'_>,
 ) -> Result<QueryResult, LiteError> {
     let left_rows = scan_collection(engine, left.collection).await?;
     let right_rows = scan_collection(engine, right.collection).await?;
@@ -66,24 +61,6 @@ pub async fn execute_hash_join<S: StorageEngine>(
     let joined = apply_filters(joined, &pf)?;
 
     let joined = apply_projection(joined, spec.projection);
-
-    if !post.group_by.is_empty() || !post.aggregates.is_empty() {
-        let agg_specs: Vec<AggregateSpec> = post
-            .aggregates
-            .iter()
-            .map(|(func, field)| AggregateSpec {
-                function: func.clone(),
-                alias: format!("{func}_{field}"),
-                user_alias: None,
-                field: field.clone(),
-                expr: None,
-            })
-            .collect();
-        // Post-join grouping is by bare output column name, so the lift is lossless.
-        let group_specs: Vec<GroupKeySpec> =
-            post.group_by.iter().map(GroupKeySpec::column).collect();
-        return execute_aggregate(joined, &group_specs, &agg_specs, &[], &[], &[], &[]);
-    }
 
     Ok(maps_to_result(joined))
 }

@@ -305,7 +305,7 @@ async fn drop_index() {
     let db = open_db().await;
     seed(&db, "ng_idx", "i1").await;
     assert_ok(&db, "CREATE INDEX idx_name ON ng_idx (name)").await;
-    assert_ok(&db, "DROP INDEX idx_name ON ng_idx").await;
+    assert_ok(&db, "DROP INDEX idx_name").await;
 }
 
 // ── Parse-error guardrails ───────────────────────────────────────────────────

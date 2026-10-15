@@ -162,7 +162,7 @@ async fn retention_floor_reject_requests_a_snapshot_from_zero() {
 async fn other_reject_reasons_request_no_catchup() {
     let lite = open_lite_with_array(ARRAY).await;
     let mut reject = retention_floor(ARRAY);
-    reject.reason = ArrayRejectReason::EngineRejected;
+    reject.reason = ArrayRejectReason::EngineUnavailable;
     assert!(
         SyncDelegate::handle_array_reject(lite.as_ref(), &reject)
             .await

@@ -6,10 +6,15 @@
 
 use std::collections::HashMap;
 
+use nodedb_query::EvalError;
+use nodedb_types::approx::{HyperLogLog, SpaceSaving, TDigest};
 use nodedb_types::timeseries::{AggFunction, ContinuousAggregateDef, RefreshPolicy};
+use nodedb_types::value::Value;
+
+use crate::error::LiteError;
 
 /// Materialized bucket: pre-computed aggregates for one (bucket_ts, group_key) pair.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MaterializedBucket {
     pub bucket_ts: i64,
     /// GROUP BY key: "\0"-joined tag values. Empty string if no GROUP BY.
@@ -18,8 +23,13 @@ pub struct MaterializedBucket {
     pub accumulators: Vec<Accumulator>,
 }
 
-/// Per-function accumulator state.
-#[derive(Debug, Clone)]
+/// Accumulator state of one aggregate expression.
+///
+/// The sketch the expression's function reads is present: an HLL for
+/// `CountDistinct`, a t-digest for `Percentile`, a SpaceSaving table for
+/// `TopK`. Sketches key a value by the FNV-1a hash of its `f64` bits, the
+/// identity Origin gives a float cell.
+#[derive(Debug)]
 pub struct Accumulator {
     pub count: u64,
     pub sum: f64,
@@ -27,18 +37,41 @@ pub struct Accumulator {
     pub max: f64,
     pub first: Option<f64>,
     pub last: Option<f64>,
+    pub hll: Option<HyperLogLog>,
+    pub tdigest: Option<TDigest>,
+    pub topk: Option<SpaceSaving>,
 }
 
 impl Accumulator {
-    fn new() -> Self {
-        Self {
+    /// An empty accumulator for `function`, with the sketch it reads.
+    fn new(function: &AggFunction) -> Self {
+        let mut acc = Self {
             count: 0,
             sum: 0.0,
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
             first: None,
             last: None,
+            hll: None,
+            tdigest: None,
+            topk: None,
+        };
+        match function {
+            AggFunction::CountDistinct => acc.hll = Some(HyperLogLog::new()),
+            AggFunction::Percentile(_) => acc.tdigest = Some(TDigest::new()),
+            AggFunction::TopK(k) => acc.topk = Some(SpaceSaving::new(*k)),
+            AggFunction::Sum
+            | AggFunction::Count
+            | AggFunction::Min
+            | AggFunction::Max
+            | AggFunction::Avg
+            | AggFunction::First
+            | AggFunction::Last => {}
+            // `AggFunction` is `#[non_exhaustive]`, so a match outside its
+            // crate needs this arm. `register` refuses such a function.
+            _ => {}
         }
+        acc
     }
 
     fn ingest(&mut self, value: f64) {
@@ -54,27 +87,95 @@ impl Accumulator {
             self.first = Some(value);
         }
         self.last = Some(value);
-    }
-
-    /// Extract the final value for a given aggregate function.
-    pub fn result(&self, func: &AggFunction) -> f64 {
-        match func {
-            AggFunction::Count => self.count as f64,
-            AggFunction::Sum => self.sum,
-            AggFunction::Min => self.min,
-            AggFunction::Max => self.max,
-            AggFunction::Avg => {
-                if self.count == 0 {
-                    0.0
-                } else {
-                    self.sum / self.count as f64
-                }
-            }
-            AggFunction::First => self.first.unwrap_or(f64::NAN),
-            AggFunction::Last => self.last.unwrap_or(f64::NAN),
-            _ => f64::NAN, // Sketch-based functions not yet supported in Lite.
+        let hash = fnv1a(&value.to_bits().to_le_bytes());
+        if let Some(hll) = &mut self.hll {
+            hll.add(hash);
+        }
+        if let Some(td) = &mut self.tdigest {
+            td.add(value);
+        }
+        if let Some(ss) = &mut self.topk {
+            ss.add(hash);
         }
     }
+
+    /// The final value of `func` over this accumulator.
+    ///
+    /// The values match Origin's: `Count` is an `Integer`, `TopK` the
+    /// `Integer` number of tracked heavy hitters, every other function a
+    /// `Float`. A function over no values is NULL, except `Count`, which is
+    /// zero.
+    pub fn result(&self, func: &AggFunction) -> Result<Value, LiteError> {
+        let empty = self.count == 0;
+        let float = |v: f64| {
+            if empty { Value::Null } else { Value::Float(v) }
+        };
+        Ok(match func {
+            AggFunction::Count => i64::try_from(self.count)
+                .map(Value::Integer)
+                .map_err(|_| EvalError::NumericOverflow { function: "count" })?,
+            AggFunction::Sum => float(self.sum),
+            AggFunction::Min => float(self.min),
+            AggFunction::Max => float(self.max),
+            AggFunction::Avg => float(self.sum / self.count as f64),
+            AggFunction::First => self.first.map_or(Value::Null, Value::Float),
+            AggFunction::Last => self.last.map_or(Value::Null, Value::Float),
+            AggFunction::CountDistinct => match &self.hll {
+                Some(hll) => float(hll.estimate()),
+                None => Value::Null,
+            },
+            AggFunction::Percentile(q) => match &self.tdigest {
+                Some(td) => float(td.quantile(*q)),
+                None => Value::Null,
+            },
+            AggFunction::TopK(_) => match &self.topk {
+                Some(ss) => i64::try_from(ss.top_k().len())
+                    .map(Value::Integer)
+                    .map_err(|_| EvalError::NumericOverflow { function: "topk" })?,
+                None => Value::Null,
+            },
+            // `AggFunction` is `#[non_exhaustive]`. `register` refuses a
+            // function this accumulator keeps no state for.
+            other => return Err(unsupported_function(other)),
+        })
+    }
+}
+
+/// Refuse an aggregate function this module keeps no state for.
+fn check_supported(function: &AggFunction) -> Result<(), LiteError> {
+    match function {
+        AggFunction::Sum
+        | AggFunction::Count
+        | AggFunction::Min
+        | AggFunction::Max
+        | AggFunction::Avg
+        | AggFunction::First
+        | AggFunction::Last
+        | AggFunction::CountDistinct
+        | AggFunction::Percentile(_)
+        | AggFunction::TopK(_) => Ok(()),
+        // `AggFunction` is `#[non_exhaustive]`, so a match outside its crate
+        // needs this arm.
+        other => Err(unsupported_function(other)),
+    }
+}
+
+fn unsupported_function(function: &AggFunction) -> LiteError {
+    LiteError::Unsupported {
+        detail: format!(
+            "continuous aggregate function {}() is not supported in Lite",
+            function.as_str()
+        ),
+    }
+}
+
+/// 64-bit FNV-1a hash, the sketch identity Origin gives a cell.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    bytes.iter().fold(OFFSET_BASIS, |hash, &b| {
+        (hash ^ u64::from(b)).wrapping_mul(PRIME)
+    })
 }
 
 /// Key for materialized bucket lookup: (bucket_ts, group_key).
@@ -104,8 +205,12 @@ impl LiteContinuousAggManager {
         }
     }
 
-    /// Register a continuous aggregate definition.
-    pub fn register(&mut self, def: ContinuousAggregateDef) {
+    /// Register a continuous aggregate definition. Refuses a definition with
+    /// an aggregate function Lite keeps no state for, and registers nothing.
+    pub fn register(&mut self, def: ContinuousAggregateDef) -> Result<(), LiteError> {
+        for expr in &def.aggregates {
+            check_supported(&expr.function)?;
+        }
         let source = def.source.clone();
         let name = def.name.clone();
         self.materialized.entry(name.clone()).or_default();
@@ -114,6 +219,7 @@ impl LiteContinuousAggManager {
             .or_default()
             .push(name.clone());
         self.definitions.insert(name, def);
+        Ok(())
     }
 
     /// Remove a continuous aggregate.
@@ -163,7 +269,6 @@ impl LiteContinuousAggManager {
             }
 
             let interval = def.bucket_interval_ms;
-            let num_aggs = def.aggregates.len();
             let mat = self.materialized.entry(agg_name.clone()).or_default();
 
             let mut max_bucket_ts = self.watermarks.get(agg_name).copied().unwrap_or(0);
@@ -199,7 +304,11 @@ impl LiteContinuousAggManager {
                 let bucket = mat.entry(key).or_insert_with(|| MaterializedBucket {
                     bucket_ts,
                     group_key,
-                    accumulators: (0..num_aggs).map(|_| Accumulator::new()).collect(),
+                    accumulators: def
+                        .aggregates
+                        .iter()
+                        .map(|expr| Accumulator::new(&expr.function))
+                        .collect(),
                 });
 
                 // Accumulate each aggregate expression.
@@ -341,13 +450,14 @@ mod tests {
             refresh_policy: RefreshPolicy::OnFlush,
             retention_period_ms: 0,
             stale: false,
+            incarnation: nodedb_types::Hlc::ZERO,
         }
     }
 
     #[test]
     fn register_and_flush() {
         let mut mgr = LiteContinuousAggManager::new();
-        mgr.register(make_def("cpu_1m", "cpu", 60_000));
+        mgr.register(make_def("cpu_1m", "cpu", 60_000)).unwrap();
 
         let base = 1_700_000_040_000_i64;
         let ts: Vec<i64> = (0..120).map(|i| base + i * 1000).collect();
@@ -368,7 +478,7 @@ mod tests {
     #[test]
     fn incremental_accumulation() {
         let mut mgr = LiteContinuousAggManager::new();
-        mgr.register(make_def("cpu_1m", "cpu", 60_000));
+        mgr.register(make_def("cpu_1m", "cpu", 60_000)).unwrap();
 
         let base = 1_700_000_000_000 - (1_700_000_000_000 % 60_000);
         let ts: Vec<i64> = (0..60).map(|i| base + i * 1000).collect();
@@ -386,7 +496,7 @@ mod tests {
         let mut mgr = LiteContinuousAggManager::new();
         let mut def = make_def("cpu_by_host_1m", "cpu", 60_000);
         def.group_by = vec!["host".into()];
-        mgr.register(def);
+        mgr.register(def).unwrap();
 
         let base = 1_700_000_000_000 - (1_700_000_000_000 % 60_000);
         let ts: Vec<i64> = (0..60).map(|i| base + i * 1000).collect();
@@ -411,7 +521,7 @@ mod tests {
     #[test]
     fn watermark_tracking() {
         let mut mgr = LiteContinuousAggManager::new();
-        mgr.register(make_def("m_1m", "m", 60_000));
+        mgr.register(make_def("m_1m", "m", 60_000)).unwrap();
 
         assert_eq!(mgr.watermark("m_1m"), 0);
 
@@ -428,7 +538,7 @@ mod tests {
         let mut mgr = LiteContinuousAggManager::new();
         let mut def = make_def("cpu_1m", "cpu", 60_000);
         def.retention_period_ms = 120_000;
-        mgr.register(def);
+        mgr.register(def).unwrap();
 
         let ts: Vec<i64> = (0..300).map(|i| 1_700_000_000_000 + i * 1000).collect();
         let vals: Vec<f64> = vec![1.0; 300];
@@ -444,7 +554,7 @@ mod tests {
     #[test]
     fn unregister_removes() {
         let mut mgr = LiteContinuousAggManager::new();
-        mgr.register(make_def("cpu_1m", "cpu", 60_000));
+        mgr.register(make_def("cpu_1m", "cpu", 60_000)).unwrap();
         assert_eq!(mgr.count(), 1);
         mgr.unregister("cpu_1m");
         assert_eq!(mgr.count(), 0);
@@ -453,26 +563,106 @@ mod tests {
     #[test]
     fn no_source_match_no_refresh() {
         let mut mgr = LiteContinuousAggManager::new();
-        mgr.register(make_def("cpu_1m", "cpu", 60_000));
+        mgr.register(make_def("cpu_1m", "cpu", 60_000)).unwrap();
 
         let refreshed = mgr.on_flush_simple("memory", &[1_700_000_000_000], &[50.0]);
         assert!(refreshed.is_empty());
     }
 
+    /// An accumulator for `function` fed `values`, finalized.
+    fn finalize(function: AggFunction, values: &[f64]) -> Value {
+        let mut acc = Accumulator::new(&function);
+        for &v in values {
+            acc.ingest(v);
+        }
+        acc.result(&function).unwrap()
+    }
+
     #[test]
     fn accumulator_result_functions() {
-        let mut acc = Accumulator::new();
-        acc.ingest(10.0);
-        acc.ingest(20.0);
-        acc.ingest(30.0);
-        acc.ingest(40.0);
+        let values = [10.0, 20.0, 30.0, 40.0];
+        assert_eq!(finalize(AggFunction::Count, &values), Value::Integer(4));
+        assert_eq!(finalize(AggFunction::Sum, &values), Value::Float(100.0));
+        assert_eq!(finalize(AggFunction::Min, &values), Value::Float(10.0));
+        assert_eq!(finalize(AggFunction::Max, &values), Value::Float(40.0));
+        assert_eq!(finalize(AggFunction::Avg, &values), Value::Float(25.0));
+        assert_eq!(finalize(AggFunction::First, &values), Value::Float(10.0));
+        assert_eq!(finalize(AggFunction::Last, &values), Value::Float(40.0));
+    }
 
-        assert_eq!(acc.result(&AggFunction::Count), 4.0);
-        assert_eq!(acc.result(&AggFunction::Sum), 100.0);
-        assert_eq!(acc.result(&AggFunction::Min), 10.0);
-        assert_eq!(acc.result(&AggFunction::Max), 40.0);
-        assert!((acc.result(&AggFunction::Avg) - 25.0).abs() < f64::EPSILON);
-        assert_eq!(acc.result(&AggFunction::First), 10.0);
-        assert_eq!(acc.result(&AggFunction::Last), 40.0);
+    #[test]
+    fn sketch_functions_compute_values() {
+        let values: Vec<f64> = (0..100).map(|i| f64::from(i % 10)).collect();
+
+        let Value::Float(distinct) = finalize(AggFunction::CountDistinct, &values) else {
+            panic!("count_distinct must be a float");
+        };
+        assert!((distinct - 10.0).abs() < 1.0, "estimate {distinct}");
+
+        let Value::Float(median) = finalize(AggFunction::Percentile(0.5), &values) else {
+            panic!("percentile must be a float");
+        };
+        assert!((3.0..=6.0).contains(&median), "median {median}");
+
+        assert_eq!(finalize(AggFunction::TopK(3), &values), Value::Integer(3));
+    }
+
+    #[test]
+    fn functions_over_no_values_are_null_never_nan() {
+        for function in [
+            AggFunction::Sum,
+            AggFunction::Min,
+            AggFunction::Max,
+            AggFunction::Avg,
+            AggFunction::First,
+            AggFunction::Last,
+            AggFunction::CountDistinct,
+            AggFunction::Percentile(0.9),
+        ] {
+            assert_eq!(finalize(function.clone(), &[]), Value::Null, "{function:?}");
+        }
+        assert_eq!(finalize(AggFunction::Count, &[]), Value::Integer(0));
+        assert_eq!(finalize(AggFunction::TopK(2), &[]), Value::Integer(0));
+    }
+
+    #[test]
+    fn flushed_sketch_aggregate_finalizes_without_nan() {
+        let mut mgr = LiteContinuousAggManager::new();
+        let mut def = make_def("cpu_sketch", "cpu", 60_000);
+        def.aggregates = vec![
+            AggregateExpr {
+                function: AggFunction::CountDistinct,
+                source_column: "value".into(),
+                output_column: "distinct".into(),
+            },
+            AggregateExpr {
+                function: AggFunction::Percentile(0.99),
+                source_column: "value".into(),
+                output_column: "p99".into(),
+            },
+            AggregateExpr {
+                function: AggFunction::TopK(5),
+                source_column: "value".into(),
+                output_column: "top".into(),
+            },
+        ];
+        mgr.register(def).unwrap();
+
+        let base = 1_700_000_000_000 - (1_700_000_000_000 % 60_000);
+        let ts: Vec<i64> = (0..50).map(|i| base + i * 1000).collect();
+        let vals: Vec<f64> = (0..50).map(|i| f64::from(i % 7)).collect();
+        mgr.on_flush_simple("cpu", &ts, &vals);
+
+        let buckets = mgr.query_all("cpu_sketch");
+        assert_eq!(buckets.len(), 1);
+        let def = mgr.get("cpu_sketch").unwrap();
+        for (acc, expr) in buckets[0].accumulators.iter().zip(&def.aggregates) {
+            let value = acc.result(&expr.function).unwrap();
+            match value {
+                Value::Float(f) => assert!(f.is_finite(), "{expr:?} gave {f}"),
+                Value::Integer(_) => {}
+                other => panic!("{expr:?} gave {other:?}"),
+            }
+        }
     }
 }

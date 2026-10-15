@@ -169,7 +169,7 @@ async fn case_insensitive_index_matches_any_case() {
     put(&db, "users", doc("u1", &[("email", text("Alice@X.com"))])).await;
     exec(
         &db,
-        "CREATE INDEX idx_email ON users (email COLLATE NOCASE)",
+        "CREATE INDEX idx_email ON users (email) COLLATE NOCASE",
     )
     .await;
     put(&db, "users", doc("u2", &[("email", text("BOB@x.com"))])).await;

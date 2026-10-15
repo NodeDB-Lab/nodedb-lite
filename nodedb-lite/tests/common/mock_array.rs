@@ -9,10 +9,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nodedb_array::sync::hlc::Hlc;
-use nodedb_lite::sync::array::PendingArrayOp;
+use nodedb_lite::sync::array::{PendingArrayOp, RejectDisposition, reject_disposition};
 use nodedb_types::sync::wire::{
-    AckStatus, ArrayAckMsg, ArrayCatchupRequestMsg, ArrayRejectMsg, ArrayRejectReason,
-    ArraySchemaSyncMsg, ArraySnapshotChunkMsg, ArraySnapshotMsg,
+    AckStatus, ArrayAckMsg, ArrayCatchupRequestMsg, ArrayRejectMsg, ArraySchemaSyncMsg,
+    ArraySnapshotChunkMsg, ArraySnapshotMsg,
 };
 
 #[derive(Default)]
@@ -76,12 +76,12 @@ impl MockArrayState {
         self.catchups.lock().expect("catchups lock").clone()
     }
 
-    /// Mirror the real delegate: a `ShapeInvalid` reject drops the op, a
-    /// `RetentionFloor` reject asks for a snapshot, every other reason keeps
-    /// the op queued.
+    /// Mirror the real delegate: a `Drop` disposition removes the op, a
+    /// `CatchUp` disposition asks for a snapshot, every other disposition
+    /// keeps the op queued.
     pub fn reject(&self, msg: &ArrayRejectMsg) -> Option<ArrayCatchupRequestMsg> {
-        match msg.reason {
-            ArrayRejectReason::ShapeInvalid => {
+        match reject_disposition(msg.reason) {
+            RejectDisposition::Drop => {
                 let hlc = Hlc::from_bytes(&msg.op_hlc_bytes);
                 self.pending
                     .lock()
@@ -89,11 +89,11 @@ impl MockArrayState {
                     .retain(|op| op.hlc != hlc);
                 None
             }
-            ArrayRejectReason::RetentionFloor => Some(ArrayCatchupRequestMsg {
+            RejectDisposition::CatchUp => Some(ArrayCatchupRequestMsg {
                 array: msg.array.clone(),
                 from_hlc_bytes: [0u8; 18],
             }),
-            _ => None,
+            RejectDisposition::ResendSchema | RejectDisposition::Park => None,
         }
     }
 

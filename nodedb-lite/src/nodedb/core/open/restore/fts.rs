@@ -249,4 +249,58 @@ mod tests {
                 .is_empty()
         );
     }
+
+    /// Allocated and limit bytes of the FTS budget.
+    fn fts_usage(db: &NodeDbLite<PagedbStorageDefault>) -> (usize, usize) {
+        let entry = db
+            .governor()
+            .snapshot()
+            .into_iter()
+            .find(|entry| entry.engine == nodedb_mem::EngineId::Fts)
+            .unwrap();
+        (entry.allocated, entry.limit)
+    }
+
+    /// A strict collection whose text fills more than half the FTS budget
+    /// reopens: open charges the rebuilt postings once, not on top of the
+    /// checkpoint's.
+    #[tokio::test]
+    async fn strict_text_admitted_live_reopens_within_the_same_fts_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("strict_budget.db");
+        let db = open(&path).await;
+        db.execute_sql(
+            "CREATE COLLECTION runs (id BIGINT PRIMARY KEY, payload TEXT) WITH storage = 'strict'",
+            &[],
+        )
+        .await
+        .unwrap();
+        let (_, limit) = fts_usage(&db);
+        let mut row = 0i64;
+        while fts_usage(&db).0 <= limit / 10 * 6 {
+            assert!(row < 10_000, "the FTS budget never filled");
+            let payload: Vec<String> = (0..64).map(|t| format!("r{row:05}t{t:03}")).collect();
+            db.strict_insert(
+                "runs",
+                &[Value::Integer(row), Value::String(payload.join(" "))],
+            )
+            .await
+            .unwrap();
+            row += 1;
+        }
+        let (live, _) = fts_usage(&db);
+        assert!(live < limit);
+        db.flush().await.unwrap();
+        drop(db);
+
+        let reopened = NodeDbLite::open_at_path_with_config(&path, Encryption::Plaintext, config())
+            .await
+            .expect("a store that accepted every write must reopen");
+        let (restored, _) = fts_usage(&reopened);
+        assert!(
+            restored <= live,
+            "open charged {restored} bytes, live admitted {live}"
+        );
+        assert_eq!(hits(&reopened, "runs", "r00000t000").await.len(), 1);
+    }
 }

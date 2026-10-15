@@ -48,7 +48,31 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             doc_id.clone(),
         )),
 
-        _ => Err(LiteError::BadRequest {
+        // The parent dispatcher routes only the sparse operations above here.
+        VectorOp::Search { .. }
+        | VectorOp::Insert { .. }
+        | VectorOp::BatchInsert { .. }
+        | VectorOp::MultiSearch { .. }
+        | VectorOp::Delete { .. }
+        | VectorOp::DeleteBySurrogate { .. }
+        | VectorOp::SetParams { .. }
+        | VectorOp::DropIndex { .. }
+        | VectorOp::QueryStats { .. }
+        | VectorOp::Seal { .. }
+        | VectorOp::CompactIndex { .. }
+        | VectorOp::Rebuild { .. }
+        | VectorOp::MultiVectorInsert { .. }
+        | VectorOp::MultiVectorDelete { .. }
+        | VectorOp::MultiVectorScoreSearch { .. }
+        | VectorOp::DirectUpsert { .. }
+        | VectorOp::DirectInsert { .. }
+        | VectorOp::DirectInsertIfAbsent { .. }
+        | VectorOp::DirectBatchWrite { .. }
+        | VectorOp::DirectDelete { .. }
+        | VectorOp::DirectTruncate { .. }
+        | VectorOp::DirectUpdate { .. }
+        | VectorOp::ResolveDirectWrite(_)
+        | VectorOp::ResolvedDirectWrite { .. } => Err(LiteError::BadRequest {
             detail: "vector sparse dispatch received a non-sparse operation".into(),
         }),
     }

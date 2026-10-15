@@ -77,7 +77,7 @@ async fn strict_indexed_lookup_after_insert() {
     // Rows stored before the index is created are built into it.
     exec(
         &*db,
-        "CREATE INDEX idx_people_email ON people (email COLLATE NOCASE)",
+        "CREATE INDEX idx_people_email ON people (email) COLLATE NOCASE",
     )
     .await;
     exec(

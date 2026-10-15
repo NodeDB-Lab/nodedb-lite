@@ -5,9 +5,9 @@
 use std::collections::HashMap;
 
 use nodedb_physical::PhysicalTaskVisitor;
-use nodedb_physical::physical_plan::SortKeySpec;
 use nodedb_physical::physical_plan::document::DocumentOp;
 use nodedb_physical::physical_plan::query::AggregateSpec;
+use nodedb_physical::physical_plan::{PARAMETERIZED_AGGREGATE_FUNCTIONS, SortKeySpec};
 use nodedb_query::expr::GroupKeySpec;
 use nodedb_sql::types::SqlPlan;
 use nodedb_sql::types::filter::Filter;
@@ -38,27 +38,38 @@ use super::scan_post::{
 };
 
 /// Convert a `nodedb_sql` `AggregateExpr` to a physical `AggregateSpec`.
-pub(super) fn sql_agg_to_spec(agg: &AggregateExpr) -> AggregateSpec {
-    let field = agg
-        .args
-        .first()
-        .and_then(|a| match a {
-            SqlExpr::Column { name, .. } => Some(name.clone()),
-            SqlExpr::Wildcard => Some("*".to_string()),
-            _ => None,
-        })
-        .unwrap_or_else(|| "*".to_string());
-
-    AggregateSpec {
-        function: agg.function.clone(),
+///
+/// A computed argument (including a `FILTER` clause the planner folded into
+/// a `CASE`) is evaluated per row. `DISTINCT` selects the deduplicating
+/// accumulator. A parameterized aggregate (`approx_topk`,
+/// `approx_percentile`, `percentile_cont`) is refused: Lite has no
+/// accumulator for one.
+pub(super) fn sql_agg_to_spec(agg: &AggregateExpr) -> Result<AggregateSpec, LiteError> {
+    let function = nodedb_sql::planner::agg_naming::aggregate_function_name(agg);
+    if PARAMETERIZED_AGGREGATE_FUNCTIONS.contains(&function.as_str()) {
+        return Err(LiteError::Unsupported {
+            detail: format!(
+                "aggregate function {}() is not supported in Lite",
+                agg.function
+            ),
+        });
+    }
+    let (field, expr) = match agg.args.first() {
+        None | Some(SqlExpr::Wildcard) => ("*".to_string(), None),
+        Some(SqlExpr::Column { name, .. }) => (name.clone(), None),
+        Some(other) => ("*".to_string(), Some(convert_sql_expr(other)?)),
+    };
+    Ok(AggregateSpec {
+        function,
         alias: agg.alias.clone(),
         user_alias: None,
         field,
-        expr: None,
-    }
+        expr,
+        param: None,
+    })
 }
 
-fn convert_aggregates(aggs: &[AggregateExpr]) -> Vec<AggregateSpec> {
+fn convert_aggregates(aggs: &[AggregateExpr]) -> Result<Vec<AggregateSpec>, LiteError> {
     aggs.iter().map(sql_agg_to_spec).collect()
 }
 
@@ -140,9 +151,9 @@ pub(super) fn lower_aggregate<'a, S: StorageEngine + 'a>(
         group_by,
         aggregates,
         having,
+        limit,
         grouping_sets,
         sort_keys,
-        ..
     } = args;
     let input = input.clone();
     // A bare column groups by field extraction; anything else is a computed key
@@ -167,7 +178,7 @@ pub(super) fn lower_aggregate<'a, S: StorageEngine + 'a>(
             }
         })
         .collect::<Result<Vec<_>, LiteError>>()?;
-    let agg_specs = convert_aggregates(aggregates);
+    let agg_specs = convert_aggregates(aggregates)?;
     // Build aggregate-function → alias lookup for HAVING post-filter.
     let agg_alias_map = make_agg_alias_map(aggregates);
     // HAVING predicates always reference aggregate results (e.g. SUM(salary) > 100)
@@ -187,7 +198,10 @@ pub(super) fn lower_aggregate<'a, S: StorageEngine + 'a>(
         let source_result = engine.execute_plan_admitted(&input, permit).await?;
         let rows = result_to_maps(source_result);
         let result = execute_aggregate(rows, &group_cols, &agg_specs, &[], &[], &sort_pairs, &gs)?;
-        Ok(apply_having_result(result, &having_post, &agg_alias_map))
+        // LIMIT counts the groups HAVING keeps, in the sorted order.
+        let mut result = apply_having_result(result, &having_post, &agg_alias_map);
+        result.rows.truncate(limit);
+        Ok(result)
     }))
 }
 

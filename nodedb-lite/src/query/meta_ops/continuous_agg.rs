@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Continuous aggregate meta-ops.
 
+use nodedb_physical::physical_plan::AggregateIncarnation;
 use nodedb_types::result::QueryResult;
 use nodedb_types::timeseries::continuous_agg::ContinuousAggregateDef;
 use nodedb_types::value::Value;
@@ -21,13 +22,56 @@ fn lock_ts<S: StorageEngine>(
         .map_err(|_| LiteError::LockPoisoned)
 }
 
+/// Refuse a pass that removes partitions of a collection while one of the
+/// continuous aggregates rooted at it is not registered here at the
+/// incarnation the caller names. The caller retries on its next pass.
+pub(crate) fn require_registered_aggregates<S: StorageEngine>(
+    engine: &LiteQueryEngine<S>,
+    op: &str,
+    aggregates: &[AggregateIncarnation],
+) -> Result<(), LiteError> {
+    if aggregates.is_empty() {
+        return Ok(());
+    }
+    let ts = lock_ts(engine)?;
+    for aggregate in aggregates {
+        let registered = ts
+            .continuous_agg_mgr
+            .get(&aggregate.name)
+            .is_some_and(|def| def.incarnation == aggregate.incarnation);
+        if !registered {
+            return Err(LiteError::ObjectNotReady {
+                object: format!("continuous aggregate '{}'", aggregate.name),
+                detail: format!(
+                    "{op}: continuous aggregate '{}' is not registered at the incarnation \
+                     the pass names",
+                    aggregate.name
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// `ContinuousAggregatesRegistered` — boot registered every aggregate. Lite
+/// keeps materialized buckets in memory only, so no persisted image of an
+/// unregistered aggregate exists to drop.
+pub async fn handle_continuous_aggregates_registered() -> Result<QueryResult, LiteError> {
+    Ok(QueryResult {
+        columns: Vec::new(),
+        rows: Vec::new(),
+        rows_affected: 0,
+        command: None,
+    })
+}
+
 /// `RegisterContinuousAggregate` — register a new aggregate definition.
 pub async fn handle_register_continuous_aggregate<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     def: ContinuousAggregateDef,
 ) -> Result<QueryResult, LiteError> {
     let mut ts = lock_ts(engine)?;
-    ts.continuous_agg_mgr.register(def.clone());
+    ts.continuous_agg_mgr.register(def.clone())?;
     Ok(QueryResult {
         columns: vec!["name".into()],
         rows: vec![vec![Value::String(def.name)]],
@@ -159,7 +203,7 @@ pub async fn handle_query_aggregate_last_values<S: StorageEngine>(
                     Value::Integer(bucket.bucket_ts),
                 ];
                 for (acc, expr) in bucket.accumulators.iter().zip(def.aggregates.iter()) {
-                    row.push(Value::Float(acc.result(&expr.function)));
+                    row.push(acc.result(&expr.function)?);
                 }
                 rows.push(row);
             }
@@ -236,7 +280,7 @@ pub async fn handle_query_aggregate_last_value<S: StorageEngine>(
         Value::Integer(bucket.bucket_ts),
     ];
     for (acc, expr) in bucket.accumulators.iter().zip(def.aggregates.iter()) {
-        row.push(Value::Float(acc.result(&expr.function)));
+        row.push(acc.result(&expr.function)?);
     }
 
     Ok(QueryResult {

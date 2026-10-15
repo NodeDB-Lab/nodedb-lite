@@ -34,7 +34,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             Ok(t) => t,
             Err(p) => p.into_inner(),
         };
-        ts.continuous_agg_mgr.register(def.clone());
+        ts.continuous_agg_mgr.register(def.clone())?;
 
         Ok(QueryResult {
             columns: vec!["result".into()],
@@ -202,6 +202,10 @@ fn parse_create_sql(sql: &str) -> Result<ContinuousAggregateDef, LiteError> {
         refresh_policy,
         retention_period_ms,
         stale: false,
+        // Lite keeps materialized buckets in memory and drops them with the
+        // definition, so no re-created aggregate can load a dropped one's
+        // buckets. One fixed incarnation is enough.
+        incarnation: nodedb_types::Hlc::ZERO,
     })
 }
 

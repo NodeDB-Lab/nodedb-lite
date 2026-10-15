@@ -90,7 +90,11 @@ pub(super) async fn connect_and_run(
 
     let ack_bytes = match &ack_msg {
         Message::Binary(b) => b.as_ref(),
-        _ => {
+        Message::Text(_)
+        | Message::Ping(_)
+        | Message::Pong(_)
+        | Message::Close(_)
+        | Message::Frame(_) => {
             return Err(LiteError::Sync {
                 detail: "expected binary handshake ack".to_string(),
             });

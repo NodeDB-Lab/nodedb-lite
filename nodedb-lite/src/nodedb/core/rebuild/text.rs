@@ -45,6 +45,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 .manager
                 .lock_or_recover()
                 .current_declaration_record(&collection);
+            self.fts_state
+                .manager
+                .lock_or_recover()
+                .release_for_rebuild(&collection);
             let candidate = build_collection_replacement(
                 &*self.storage,
                 &self.crdt,
@@ -77,6 +81,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 .manager
                 .lock_or_recover()
                 .current_declaration_record(&collection);
+            self.fts_state
+                .manager
+                .lock_or_recover()
+                .release_for_rebuild(&collection);
             let candidate = build_collection_replacement(
                 &*self.storage,
                 &self.crdt,

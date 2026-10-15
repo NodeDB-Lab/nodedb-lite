@@ -20,7 +20,7 @@ use crate::query::query_ops::{
         hash::execute_hash_join,
         nested_loop::execute_nested_loop_join,
         sort_merge::execute_sort_merge_join,
-        spec::{CollectionSide, JoinSpec, PostAggregate},
+        spec::{CollectionSide, JoinSpec},
     },
     lateral_loop::{LateralLoopSpec, execute_lateral_loop},
     lateral_top_k::{LateralTopKSpec, execute_lateral_top_k},
@@ -39,24 +39,43 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
     match op {
         QueryOp::Aggregate {
             collection,
+            input,
             group_by,
             aggregates,
             filters,
             having,
-            sort_keys,
+            limit,
+            sub_group_by,
+            sub_aggregates,
             grouping_sets,
-            ..
+            sort_keys,
         } => {
+            // Lite aggregates the rows of the named collection. An
+            // input-sourced aggregate or a nested sub-aggregation would read
+            // other rows, so either is refused.
+            if input.is_some() {
+                return Err(LiteError::Unsupported {
+                    detail: "QueryOp::Aggregate over a sub-plan input is not supported in Lite"
+                        .into(),
+                });
+            }
+            if !sub_group_by.is_empty() || !sub_aggregates.is_empty() {
+                return Err(LiteError::Unsupported {
+                    detail: "QueryOp::Aggregate with a sub-aggregation is not supported in Lite"
+                        .into(),
+                });
+            }
             let collection = collection.clone();
             let group_by = group_by.clone();
             let aggregates = aggregates.clone();
             let filters = filters.clone();
             let having = having.clone();
+            let limit = *limit;
             let sort_keys = sort_keys.clone();
             let grouping_sets = grouping_sets.clone();
             Ok(Box::pin(async move {
                 let rows = scan_collection(engine, collection.as_str()).await?;
-                execute_aggregate(
+                let mut result = execute_aggregate(
                     rows,
                     &group_by,
                     &aggregates,
@@ -64,7 +83,9 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                     &having,
                     &sort_keys,
                     &grouping_sets,
-                )
+                )?;
+                result.rows.truncate(limit);
+                Ok(result)
             }))
         }
 
@@ -96,13 +117,18 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             on,
             join_type,
             limit,
-            post_group_by,
-            post_aggregates,
             projection,
+            computed_projection,
+            join_filters,
             post_filters,
+            left_input,
+            right_input,
+            left_bitmap,
+            right_bitmap,
             left_rls_filters,
             right_rls_filters,
-            ..
+            left_scan_filters,
+            right_scan_filters,
         } => {
             // HashJoin carries no returning/rls_write_check slots: a join
             // never writes. Only the per-side read filters can hide a policy.
@@ -112,6 +138,25 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                 &[left_rls_filters.as_slice(), right_rls_filters.as_slice()],
                 &RlsWriteCheck::NoPolicyApplies,
             )?;
+            // Lite's hash join scans each side by collection name and applies
+            // only the equi-keys, the post-join filter, and the column
+            // projection. Every other stage changes the result, so a plan
+            // that carries one is refused.
+            let unsupported = [
+                (!computed_projection.is_empty(), "a computed projection"),
+                (!join_filters.is_empty(), "residual ON predicates"),
+                (left_input.is_some() || right_input.is_some(), "a resolved side input"),
+                (left_bitmap.is_some() || right_bitmap.is_some(), "a bitmap pushdown"),
+                (
+                    !left_scan_filters.is_empty() || !right_scan_filters.is_empty(),
+                    "per-side scan filters",
+                ),
+            ];
+            if let Some((_, what)) = unsupported.iter().find(|(present, _)| *present) {
+                return Err(LiteError::Unsupported {
+                    detail: format!("QueryOp::HashJoin with {what} is not supported in Lite"),
+                });
+            }
             let lc = left_collection.clone();
             let rc = right_collection.clone();
             let la = left_alias.clone();
@@ -119,8 +164,6 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             let on = on.clone();
             let jt = join_type.clone();
             let lim = *limit;
-            let pg = post_group_by.clone();
-            let pa = post_aggregates.clone();
             let proj = projection.clone();
             let pf = post_filters.clone();
             Ok(Box::pin(async move {
@@ -140,10 +183,6 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                         limit: lim,
                         projection: &proj,
                         post_filters: &pf,
-                    },
-                    &PostAggregate {
-                        group_by: &pg,
-                        aggregates: &pa,
                     },
                 )
                 .await
@@ -191,17 +230,27 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             limit,
             left_rls_filters,
             right_rls_filters,
+            left_input,
+            right_input,
         } => {
             // Lite's join executors fetch each side by collection name and have
             // no per-side filter stage, so row-level-security filters cannot be
-            // applied here yet. REFUSE rather than drop them: silently ignoring
-            // an RLS filter would return rows the caller is not authorised to
-            // see, which is strictly worse than failing the query. Empty
-            // filters (the common case) pass through unchanged.
+            // applied here. They are refused rather than dropped: ignoring an
+            // RLS filter would return rows the caller may not see. Empty
+            // filters pass through unchanged.
             if !left_rls_filters.is_empty() || !right_rls_filters.is_empty() {
                 return Err(LiteError::Unsupported {
                     detail: "row-level security filters on NestedLoopJoin are not supported on the \
                              Lite engine"
+                        .into(),
+                });
+            }
+            // A resolved side carries rows the coordinator read, such as a
+            // transaction's staged writes. Lite reads each side by name only.
+            if left_input.is_some() || right_input.is_some() {
+                return Err(LiteError::Unsupported {
+                    detail: "QueryOp::NestedLoopJoin with a resolved side input is not \
+                             supported in Lite"
                         .into(),
                 });
             }
@@ -224,6 +273,8 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             pre_sorted,
             left_rls_filters,
             right_rls_filters,
+            left_input,
+            right_input,
         } => {
             // See `NestedLoopJoin` above: refuse rather than silently bypass an
             // RLS filter Lite cannot apply.
@@ -231,6 +282,13 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                 return Err(LiteError::Unsupported {
                     detail: "row-level security filters on SortMergeJoin are not supported on the \
                              Lite engine"
+                        .into(),
+                });
+            }
+            if left_input.is_some() || right_input.is_some() {
+                return Err(LiteError::Unsupported {
+                    detail: "QueryOp::SortMergeJoin with a resolved side input is not \
+                             supported in Lite"
                         .into(),
                 });
             }

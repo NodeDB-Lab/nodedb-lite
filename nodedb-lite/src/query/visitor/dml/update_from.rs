@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use nodedb_physical::physical_plan::document::types::UpdateValue;
 use nodedb_sql::UpdateFromVisitArgs;
 use nodedb_sql::types::SqlPlan;
+use nodedb_sql::types::filter::Filter;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
@@ -21,6 +22,7 @@ use crate::query::value_utils::value_to_string;
 use crate::storage::engine::StorageEngine;
 
 use crate::query::visitor::adapter::LiteFut;
+use crate::query::visitor::scan_post::filter_mask;
 
 use super::rows::result_to_maps;
 
@@ -39,19 +41,23 @@ pub(in crate::query::visitor) fn lower_update_from<'a, S: StorageEngine + 'a>(
 ) -> Result<LiteFut<'a>, LiteError> {
     let UpdateFromVisitArgs {
         collection,
+        engine: _,
         source,
+        source_alias,
         target_join_col,
         source_join_col,
         assignments,
-        ..
+        target_filters,
+        returning: _,
     } = args;
     let target = collection.to_string();
-    let source_refs = source_refs(source);
-    let source_alias = source_refs.first().cloned().unwrap_or_default();
+    let source_refs = source_refs(source_alias, source);
+    let source_alias = source_alias.to_string();
     let source = source.clone();
     let t_join = target_join_col.to_string();
     let s_join = source_join_col.to_string();
     let updates = convert_assignments_with_source(assignments, &source_refs)?;
+    let target_filters = target_filters.to_vec();
 
     Ok(Box::pin(async move {
         let source_result = engine.execute_plan_admitted(&source, Some(permit)).await?;
@@ -68,6 +74,9 @@ pub(in crate::query::visitor) fn lower_update_from<'a, S: StorageEngine + 'a>(
         let mut planned: Vec<(String, Vec<(String, UpdateValue)>)> = Vec::new();
         for doc_id in &target_ids {
             let target_val = fetch_document_value_pub(engine, &target, doc_id).await?;
+            if !target_matches(&target_val, &target_filters)? {
+                continue;
+            }
             let Some(join_key) = target_val.get(&t_join).map(value_to_string) else {
                 continue;
             };
@@ -92,10 +101,12 @@ pub(in crate::query::visitor) fn lower_update_from<'a, S: StorageEngine + 'a>(
     }))
 }
 
-/// The names a column qualifier can use for the source relation: its alias
-/// first, then its collection. Empty for a source plan that names neither.
-fn source_refs(plan: &SqlPlan) -> Vec<String> {
-    match plan {
+/// The names a column qualifier can use for the source relation. The
+/// statement's name for the source comes first: it is the key prefix
+/// [`joined_row`] gives each source field. A scan source also answers to its
+/// alias and its collection.
+fn source_refs(source_alias: &str, plan: &SqlPlan) -> Vec<String> {
+    let scan_names: Vec<String> = match plan {
         SqlPlan::Scan {
             collection, alias, ..
         } => alias
@@ -105,7 +116,30 @@ fn source_refs(plan: &SqlPlan) -> Vec<String> {
             .collect(),
         SqlPlan::TimeseriesScan(scan) => vec![scan.collection.clone()],
         _ => Vec::new(),
+    };
+    let mut refs = vec![source_alias.to_string()];
+    refs.extend(scan_names.into_iter().filter(|name| name != source_alias));
+    refs
+}
+
+/// Whether a target row satisfies the WHERE conjuncts that read only the
+/// target. Every row passes when `filters` is empty.
+fn target_matches(row: &HashMap<String, Value>, filters: &[Filter]) -> Result<bool, LiteError> {
+    if filters.is_empty() {
+        return Ok(true);
     }
+    let (columns, values): (Vec<String>, Vec<Value>) =
+        row.iter().map(|(k, v)| (k.clone(), v.clone())).unzip();
+    let single = QueryResult {
+        columns,
+        rows: vec![values],
+        rows_affected: 0,
+        command: None,
+    };
+    Ok(filter_mask(&single, filters)?
+        .first()
+        .copied()
+        .unwrap_or(false))
 }
 
 /// The row an `UPDATE ... FROM` assignment evaluates against: the

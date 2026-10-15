@@ -1,23 +1,23 @@
 //! What Lite does with a locally-originated op Origin refuses.
 //!
 //! Origin's inbound array path returns one `ArrayRejectMsg` per refused
-//! frame. Its reason decides the op's fate:
+//! frame. Each reason has one fixed `ArrayRejectClass`, and the class decides
+//! the op's fate:
 //!
-//! | Reason | Origin's meaning | Disposition |
+//! | Class | Reasons | Disposition |
 //! |---|---|---|
-//! | `ArrayUnknown` | No schema for the array on Origin | [`RejectDisposition::ResendSchema`] |
-//! | `SchemaTooNew` | Op schema HLC is ahead of Origin's | [`RejectDisposition::ResendSchema`] |
-//! | `RetentionFloor` | This replica's catch-up cursor is below Origin's GC floor | [`RejectDisposition::CatchUp`] |
-//! | `ShapeInvalid` | The op failed decode or shape validation | [`RejectDisposition::Drop`] |
-//! | `EngineRejected`, `QuotaExceeded`, `WireVersionMismatch`, any other | Refused for a reason Lite cannot repair in this session | [`RejectDisposition::Park`] |
+//! | `SchemaRequired` | `ArrayUnknown`, `SchemaTooNew` | [`RejectDisposition::ResendSchema`] |
+//! | `CatchUp` | `RetentionFloor` | [`RejectDisposition::CatchUp`] |
+//! | `Permanent` | `ShapeInvalid`, `EngineRefused`, `PermissionDenied` | [`RejectDisposition::Drop`] |
+//! | `Transient` | `EngineUnavailable`, `SnapshotCapacity`, `SnapshotBufferLost` | [`RejectDisposition::Park`] |
+//! | `Reauthenticate` | `Unauthenticated` | [`RejectDisposition::Park`] |
 //!
-//! `EngineRejected` covers both transient errors (Raft timeout, proposer
-//! unavailable) and lasting ones (permission denied, producer fenced). Origin
-//! sends no code that tells them apart, so the op stays durable and is
-//! retried in the next session. A dropped op is a lost write that a later
-//! session can deliver.
+//! A transient reject applied nothing, so the op stays durable and the next
+//! session re-sends it. Origin deduplicates a re-sent op by its HLC. An
+//! unauthenticated session ends with a fresh handshake, and the next session
+//! re-sends the op.
 
-use nodedb_types::sync::wire::array::ArrayRejectReason;
+use nodedb_types::sync::wire::array::{ArrayRejectClass, ArrayRejectReason};
 
 /// The fate of a locally-originated op Origin refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,13 +35,11 @@ pub enum RejectDisposition {
 
 /// Map a reject reason to its disposition.
 pub fn reject_disposition(reason: ArrayRejectReason) -> RejectDisposition {
-    match reason {
-        ArrayRejectReason::ArrayUnknown | ArrayRejectReason::SchemaTooNew => {
-            RejectDisposition::ResendSchema
-        }
-        ArrayRejectReason::RetentionFloor => RejectDisposition::CatchUp,
-        ArrayRejectReason::ShapeInvalid => RejectDisposition::Drop,
-        _ => RejectDisposition::Park,
+    match reason.class() {
+        ArrayRejectClass::SchemaRequired => RejectDisposition::ResendSchema,
+        ArrayRejectClass::CatchUp => RejectDisposition::CatchUp,
+        ArrayRejectClass::Permanent => RejectDisposition::Drop,
+        ArrayRejectClass::Transient | ArrayRejectClass::Reauthenticate => RejectDisposition::Park,
     }
 }
 
@@ -70,19 +68,23 @@ mod tests {
     }
 
     #[test]
-    fn invalid_shape_drops_the_op() {
-        assert_eq!(
-            reject_disposition(ArrayRejectReason::ShapeInvalid),
-            RejectDisposition::Drop
-        );
+    fn permanent_rejects_drop_the_op() {
+        for reason in [
+            ArrayRejectReason::ShapeInvalid,
+            ArrayRejectReason::EngineRefused,
+            ArrayRejectReason::PermissionDenied,
+        ] {
+            assert_eq!(reject_disposition(reason), RejectDisposition::Drop);
+        }
     }
 
     #[test]
-    fn unrepairable_rejects_park_the_op() {
+    fn transient_and_auth_rejects_park_the_op() {
         for reason in [
-            ArrayRejectReason::EngineRejected,
-            ArrayRejectReason::QuotaExceeded,
-            ArrayRejectReason::WireVersionMismatch,
+            ArrayRejectReason::EngineUnavailable,
+            ArrayRejectReason::SnapshotCapacity,
+            ArrayRejectReason::SnapshotBufferLost,
+            ArrayRejectReason::Unauthenticated,
         ] {
             assert_eq!(reject_disposition(reason), RejectDisposition::Park);
         }

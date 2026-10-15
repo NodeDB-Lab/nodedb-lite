@@ -11,10 +11,9 @@ use nodedb_types::value::Value;
 use std::collections::HashMap;
 /// InsertSelect: copy documents from source to target collection.
 ///
-/// Scans all documents in `source_collection` up to `source_limit`, then
-/// batch-inserts them into `target_collection`. Source filters are not
-/// evaluated — all documents are copied. Callers that need filtered
-/// copying should apply a Scan + BatchInsert composition.
+/// Reads the documents of `source_collection` up to `source_limit`, then
+/// batch-inserts them into `target_collection`. Every document is copied
+/// unchanged. A key the target already stores refuses the whole copy.
 pub async fn insert_select<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
     target_collection: &str,
@@ -121,7 +120,7 @@ pub(crate) async fn insert_select_admitted<S: StorageEngine>(
         docs
     };
 
-    batch_insert_admitted(engine, permit, target_collection, &documents).await
+    batch_insert_admitted(engine, permit, target_collection, &documents, false).await
 }
 
 #[cfg(test)]

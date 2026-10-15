@@ -400,18 +400,18 @@ mod tests {
     fn refused_schema_announce_parks_the_array() {
         let mut w = ArrayPushWindow::default();
         w.record_announced("a", hlc(1));
-        w.record_reject(&reject("a", hlc(1), ArrayRejectReason::EngineRejected));
+        w.record_reject(&reject("a", hlc(1), ArrayRejectReason::EngineRefused));
         assert!(w.is_held(&op("a", 10)));
         assert!(!w.is_held(&op("b", 10)));
         assert_eq!(w.announce_step("a"), AnnounceStep::GiveUp);
     }
 
     #[test]
-    fn engine_rejected_op_is_parked_for_the_session() {
+    fn transient_reject_parks_the_op_for_the_session() {
         let mut w = ArrayPushWindow::default();
         let now = Instant::now();
         let token = send_window(&mut w, &[10, 20], now);
-        w.record_reject(&reject("a", hlc(10), ArrayRejectReason::EngineRejected));
+        w.record_reject(&reject("a", hlc(10), ArrayRejectReason::EngineUnavailable));
         let outcome = w.complete_barrier(token).expect("window closes");
         assert_eq!(outcome.confirmed, vec![hlc(20)]);
         assert!(w.is_held(&op("a", 10)));
@@ -425,7 +425,7 @@ mod tests {
         let mut w = ArrayPushWindow::default();
         let now = Instant::now();
         let token = send_window(&mut w, &[10, 20], now);
-        w.record_reject(&reject("", Hlc::ZERO, ArrayRejectReason::EngineRejected));
+        w.record_reject(&reject("", Hlc::ZERO, ArrayRejectReason::EngineUnavailable));
         let outcome = w.complete_barrier(token).expect("window closes");
         assert!(outcome.confirmed.is_empty());
         assert_eq!(outcome.parked_unattributed, 2);

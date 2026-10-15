@@ -90,6 +90,21 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
         MetaOp::ListContinuousAggregates => Ok(Box::pin(async move {
             meta_ops::handle_list_continuous_aggregates(engine).await
         })),
+        MetaOp::ContinuousAggregatesRegistered => Ok(Box::pin(async move {
+            meta_ops::handle_continuous_aggregates_registered().await
+        })),
+        // Lite folds each flush into its aggregates as the flush runs and
+        // never applies a refresh cut, so no cut exists to wait for.
+        MetaOp::AwaitContinuousAggregateRefresh {
+            collection,
+            name,
+            refresh_id,
+        } => Err(LiteError::Unsupported {
+            detail: format!(
+                "MetaOp::AwaitContinuousAggregateRefresh of '{name}' on '{collection}' \
+                 (refresh {refresh_id}): refresh cuts are not supported in Lite"
+            ),
+        }),
         MetaOp::ApplyContinuousAggRetention => Ok(Box::pin(async move {
             meta_ops::handle_apply_continuous_agg_retention(engine).await
         })),
@@ -144,11 +159,14 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             tenant_id,
             collection,
             cutoff_system_ms,
+            aggregates,
         } => {
             let tid = *tenant_id;
             let col = collection.clone();
             let cut = *cutoff_system_ms;
+            let aggs = aggregates.clone();
             Ok(Box::pin(async move {
+                meta_ops::require_registered_aggregates(engine, "TemporalPurgeColumnar", &aggs)?;
                 meta_ops::handle_temporal_purge_columnar(engine, tid, col.as_str(), cut).await
             }))
         }
@@ -179,10 +197,17 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
         MetaOp::EnforceTimeseriesRetention {
             collection,
             max_age_ms,
+            aggregates,
         } => {
             let col = collection.clone();
             let age = *max_age_ms;
+            let aggs = aggregates.clone();
             Ok(Box::pin(async move {
+                meta_ops::require_registered_aggregates(
+                    engine,
+                    "EnforceTimeseriesRetention",
+                    &aggs,
+                )?;
                 meta_ops::handle_enforce_timeseries_retention(engine, col.as_str(), age).await
             }))
         }

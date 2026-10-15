@@ -38,6 +38,9 @@ impl From<SqlError> for LiteError {
                 Self::ObjectNotReady { object, detail }
             }
             SqlError::Unsupported { detail } => Self::Unsupported { detail },
+            // A statement the object's kind does not take, such as a write to
+            // a continuous aggregate. Origin gives it the bad-request class.
+            SqlError::WrongObjectType { detail } => Self::BadRequest { detail },
             // Refusals of a construct NodeDB does not implement. `0A000`.
             refused @ (SqlError::SequencePerRowUnsupported { .. }
             | SqlError::SearchFunctionOutsideSearch { .. }

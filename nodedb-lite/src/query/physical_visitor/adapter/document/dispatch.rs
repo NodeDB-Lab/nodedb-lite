@@ -113,6 +113,7 @@ pub(in crate::query::physical_visitor::adapter) fn dispatch<'a, S: StorageEngine
         | DocumentOp::PointUpdate { .. }
         | DocumentOp::PointDelete { .. }
         | DocumentOp::BatchInsert { .. }
+        | DocumentOp::BatchUpsert { .. }
         | DocumentOp::Upsert { .. }
         | DocumentOp::Truncate { .. }
         | DocumentOp::BulkUpdate { .. }

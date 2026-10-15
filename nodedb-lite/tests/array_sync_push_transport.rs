@@ -332,7 +332,7 @@ async fn unacked_ops_are_resent_after_reconnect() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn engine_rejected_op_is_held_until_the_next_session() {
+async fn transient_rejected_op_is_held_until_the_next_session() {
     let origin = MockOrigin::bind().await;
     let client = make_client(&origin);
     let lite = open_lite_with_array(ARRAY).await;
@@ -343,7 +343,12 @@ async fn engine_rejected_op_is_held_until_the_next_session() {
     let mut ws = origin.accept_handshaked().await;
     let first = read_window(&mut ws).await;
     let refused = op_hlc(&first.deltas[0]);
-    send_reject(&mut ws, &first.deltas[0], ArrayRejectReason::EngineRejected).await;
+    send_reject(
+        &mut ws,
+        &first.deltas[0],
+        ArrayRejectReason::EngineUnavailable,
+    )
+    .await;
     answer_barrier(&mut ws, first.token).await;
 
     await_queue_len(&lite, 1).await;

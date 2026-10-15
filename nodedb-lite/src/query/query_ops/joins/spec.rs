@@ -38,10 +38,3 @@ impl JoinSpec<'_> {
         }
     }
 }
-
-/// Aggregation applied to the joined rows.
-pub struct PostAggregate<'a> {
-    pub group_by: &'a [String],
-    /// `(function, field)` pairs.
-    pub aggregates: &'a [(String, String)],
-}

@@ -1,21 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Aggregate and PartialAggregate QueryOp implementations for Lite.
 //!
-//! Supports GROUP BY, aggregate functions (COUNT/SUM/AVG/MIN/MAX/COUNT_DISTINCT),
-//! HAVING, ORDER BY, and GROUPING SETS (ROLLUP/CUBE) expansion.
+//! Supports GROUP BY, aggregate functions (COUNT, SUM, AVG, MIN, MAX,
+//! TS_STDDEV, and the DISTINCT forms of COUNT, SUM and AVG), HAVING,
+//! ORDER BY, and GROUPING SETS (ROLLUP/CUBE) expansion. Any other function
+//! is refused.
 
 use std::collections::HashMap;
 
-use nodedb_physical::physical_plan::SortKeySpec;
 use nodedb_physical::physical_plan::query::AggregateSpec;
+use nodedb_physical::physical_plan::{PARAMETERIZED_AGGREGATE_FUNCTIONS, SortKeySpec};
+use nodedb_query::EvalError;
 use nodedb_query::expr::GroupKeySpec;
 use nodedb_query::scan_filter::ScanFilter;
-use nodedb_query::simd_agg::ts_runtime;
-use nodedb_query::simd_agg_i64::i64_runtime;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
 use crate::error::LiteError;
+
+use super::aggregate_numeric::Numeric;
 
 // ─── Type aliases ─────────────────────────────────────────────────────────────
 
@@ -240,103 +243,112 @@ fn compute_one_aggregate(
     spec: &AggregateSpec,
 ) -> Result<Value, LiteError> {
     let func = spec.function.to_uppercase();
+    // Lite has no accumulator for a parameterized aggregate (`approx_topk`,
+    // `approx_percentile`, `percentile_cont`), so its parameter has nothing
+    // to feed.
+    if spec.param.is_some()
+        || PARAMETERIZED_AGGREGATE_FUNCTIONS.contains(&spec.function.to_lowercase().as_str())
+    {
+        return Err(unsupported_function(&spec.function));
+    }
+    if func == "COUNT" && spec.field == "*" && spec.expr.is_none() {
+        return Ok(Value::Integer(group.len() as i64));
+    }
+    // One input per row: the evaluated argument expression, or the field.
+    // A NULL input is skipped by every function below.
+    let inputs: Vec<Value> = group
+        .iter()
+        .map(|row| match &spec.expr {
+            Some(expr) => Ok(expr.eval(&Value::Object(row.clone()))?),
+            None => Ok(row.get(&spec.field).cloned().unwrap_or(Value::Null)),
+        })
+        .collect::<Result<_, LiteError>>()?;
+    let non_null = || inputs.iter().filter(|v| !matches!(v, Value::Null));
+    let distinct = || {
+        let mut seen: Vec<&Value> = Vec::new();
+        for v in non_null() {
+            if !seen.contains(&v) {
+                seen.push(v);
+            }
+        }
+        seen
+    };
     match func.as_str() {
-        "COUNT" if spec.field == "*" => Ok(Value::Integer(group.len() as i64)),
-        "COUNT" => {
-            let count = group
-                .iter()
-                .filter(|row| {
-                    row.get(&spec.field)
-                        .map(|v| !matches!(v, Value::Null))
-                        .unwrap_or(false)
-                })
-                .count();
-            Ok(Value::Integer(count as i64))
-        }
-        "COUNT_DISTINCT" => {
-            let mut seen: Vec<Value> = Vec::new();
-            for row in group {
-                if let Some(v) = row.get(&spec.field)
-                    && !matches!(v, Value::Null)
-                    && !seen.contains(v)
-                {
-                    seen.push(v.clone());
-                }
+        "COUNT" => Ok(Value::Integer(non_null().count() as i64)),
+        "COUNT_DISTINCT" => Ok(Value::Integer(distinct().len() as i64)),
+        "SUM" => Numeric::collect(non_null())
+            .sum()
+            .map_err(|e| total_error(spec, e)),
+        "SUM_DISTINCT" => Numeric::collect(distinct().into_iter())
+            .sum()
+            .map_err(|e| total_error(spec, e)),
+        "AVG" => Numeric::collect(non_null())
+            .avg()
+            .map_err(|e| total_error(spec, e)),
+        "AVG_DISTINCT" => Numeric::collect(distinct().into_iter())
+            .avg()
+            .map_err(|e| total_error(spec, e)),
+        "TS_STDDEV" => {
+            // Population standard deviation; NULL below two inputs.
+            let mut accum = nodedb_query::ts_functions::TsStddevAccum::new();
+            for v in Numeric::collect(non_null()).as_f64() {
+                accum.update(v);
             }
-            Ok(Value::Integer(seen.len() as i64))
-        }
-        "SUM" => {
-            let (floats, ints) = collect_numeric(group, &spec.field);
-            if !floats.is_empty() {
-                Ok(Value::Float((ts_runtime().sum_f64)(&floats)))
-            } else if !ints.is_empty() {
-                let sum128 = (i64_runtime().sum_i64)(&ints);
-                let clamped = sum128.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
-                Ok(Value::Integer(clamped))
-            } else {
-                Ok(Value::Null)
-            }
-        }
-        "AVG" => {
-            let (floats, ints) = collect_numeric(group, &spec.field);
-            if !floats.is_empty() {
-                let sum = (ts_runtime().sum_f64)(&floats);
-                Ok(Value::Float(sum / floats.len() as f64))
-            } else if !ints.is_empty() {
-                let sum: i64 = ints.iter().sum();
-                Ok(Value::Float(sum as f64 / ints.len() as f64))
-            } else {
-                Ok(Value::Null)
-            }
+            Ok(accum
+                .evaluate_population()
+                .map_or(Value::Null, Value::Float))
         }
         "MIN" => {
-            let (floats, ints) = collect_numeric(group, &spec.field);
-            if !floats.is_empty() {
-                Ok(Value::Float((ts_runtime().min_f64)(&floats)))
-            } else if !ints.is_empty() {
-                Ok(Value::Integer((i64_runtime().min_i64)(&ints)))
+            let numeric = Numeric::collect(non_null());
+            if !numeric.is_empty() {
+                Ok(numeric.min())
             } else {
                 // String MIN
-                let s = group
-                    .iter()
-                    .filter_map(|row| row.get(&spec.field))
+                let s = non_null()
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
                     .min();
                 Ok(s.map(Value::String).unwrap_or(Value::Null))
             }
         }
         "MAX" => {
-            let (floats, ints) = collect_numeric(group, &spec.field);
-            if !floats.is_empty() {
-                Ok(Value::Float((ts_runtime().max_f64)(&floats)))
-            } else if !ints.is_empty() {
-                Ok(Value::Integer((i64_runtime().max_i64)(&ints)))
+            let numeric = Numeric::collect(non_null());
+            if !numeric.is_empty() {
+                Ok(numeric.max())
             } else {
-                let s = group
-                    .iter()
-                    .filter_map(|row| row.get(&spec.field))
+                let s = non_null()
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
                     .max();
                 Ok(s.map(Value::String).unwrap_or(Value::Null))
             }
         }
-        other => Err(LiteError::Query(format!(
-            "unsupported aggregate function: {other}"
-        ))),
+        _ => Err(unsupported_function(&spec.function)),
     }
 }
 
-fn collect_numeric(group: &[HashMap<String, Value>], field: &str) -> (Vec<f64>, Vec<i64>) {
-    let mut floats = Vec::new();
-    let mut ints = Vec::new();
-    for row in group {
-        match row.get(field) {
-            Some(Value::Float(f)) => floats.push(*f),
-            Some(Value::Integer(i)) => ints.push(*i),
-            _ => {}
-        }
+/// The error of a SUM or AVG total. An exact total past the `Decimal` range
+/// is `NumericValueOutOfRange`, SQLSTATE `22003` as on Origin, and names the
+/// aggregate and its column.
+fn total_error(spec: &AggregateSpec, e: EvalError) -> LiteError {
+    match e {
+        EvalError::NumericOverflow { .. } => LiteError::NumericValueOutOfRange {
+            detail: format!(
+                "{}({}): integer total out of range",
+                spec.function.to_lowercase(),
+                spec.field
+            ),
+        },
+        other @ (EvalError::DivisionByZero
+        | EvalError::UnknownFunction { .. }
+        | EvalError::VectorDimensionMismatch { .. }
+        | EvalError::ArgumentType { .. }
+        | EvalError::InvalidJsonPath { .. }) => LiteError::from(other),
     }
-    (floats, ints)
+}
+
+fn unsupported_function(function: &str) -> LiteError {
+    LiteError::Unsupported {
+        detail: format!("aggregate function {function}() is not supported in Lite"),
+    }
 }
 
 fn apply_having(
@@ -447,6 +459,7 @@ mod tests {
             user_alias: None,
             field: field.to_string(),
             expr: None,
+            param: None,
         }
     }
 
@@ -493,6 +506,47 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
         let cat = &result.rows[0][0];
         assert_eq!(cat, &Value::String("a".into()));
+    }
+
+    #[test]
+    fn integer_sum_past_i64_does_not_clamp() {
+        let rows = make_rows(&[("a", i64::MAX, 1.0), ("a", 1, 1.0)]);
+        let aggregates = vec![make_spec("SUM", "count", "total")];
+        let result = execute_aggregate(rows, &[], &aggregates, &[], &[], &[], &[]).unwrap();
+        assert_eq!(
+            result.rows[0][0],
+            Value::Decimal(rust_decimal::Decimal::from_i128_with_scale(
+                i128::from(i64::MAX) + 1,
+                0
+            ))
+        );
+    }
+
+    #[test]
+    fn integer_sum_overflow_names_aggregate_and_column() {
+        let row = |amount| {
+            let mut m = HashMap::new();
+            m.insert("amount".to_string(), Value::Decimal(amount));
+            m
+        };
+        let max = rust_decimal::Decimal::MAX;
+        let aggregates = vec![make_spec("SUM", "amount", "total")];
+        let err = execute_aggregate(
+            vec![row(max), row(max)],
+            &[],
+            &aggregates,
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap_err();
+        match err {
+            LiteError::NumericValueOutOfRange { detail } => {
+                assert!(detail.contains("sum(amount)"), "{detail}");
+            }
+            other => panic!("expected NumericValueOutOfRange, got {other:?}"),
+        }
     }
 
     #[test]

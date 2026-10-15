@@ -193,8 +193,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// its CRDT row: only the fields that vector owns alone go, and document
     /// fields stay. The whole row goes once no vector remains attached and
     /// the collection is vector-primary or no document field remains. The
-    /// HNSW slot is reclaimed lazily on later inserts; no compaction is
-    /// performed here.
+    /// tombstoned HNSW node keeps its slot; search skips it, and nothing here
+    /// compacts the index.
     async fn vector_delete_slot(
         &self,
         collection: &str,

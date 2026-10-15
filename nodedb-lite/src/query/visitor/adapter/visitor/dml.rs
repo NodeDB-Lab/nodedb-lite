@@ -12,6 +12,8 @@ use nodedb_sql::{InsertVisitArgs, MergeVisitArgs, UpdateFromVisitArgs, UpsertVis
 
 use crate::error::LiteError;
 use crate::query::engine::LiteQueryEngine;
+use crate::query::engine_read::continuous_aggregate_refusal;
+use crate::query::returning::refuse_returning;
 use crate::query::visitor::adapter::basic::{lower_delete, lower_insert, lower_update};
 use crate::query::visitor::dml::{lower_insert_select, lower_merge, lower_update_from};
 use crate::query::visitor::kv_dml::{lower_kv_delete, lower_kv_update};
@@ -54,6 +56,7 @@ pub(super) struct UpdateRequest<'a> {
     pub assignments: &'a [(String, SqlExpr)],
     pub filters: &'a [Filter],
     pub target_keys: &'a [SqlValue],
+    pub returning: bool,
 }
 
 pub(super) fn update<'a, S: StorageEngine + 'a>(
@@ -67,7 +70,9 @@ pub(super) fn update<'a, S: StorageEngine + 'a>(
         assignments,
         filters,
         target_keys,
+        returning,
     } = request;
+    refuse_returning("UPDATE", returning)?;
     match engine_type {
         EngineType::KeyValue => {
             lower_kv_update(engine, collection, assignments, filters, target_keys)
@@ -86,6 +91,7 @@ pub(super) fn update<'a, S: StorageEngine + 'a>(
             filters,
             target_keys,
         ),
+        EngineType::ContinuousAggregate => Err(continuous_aggregate_refusal("UPDATE")),
     }
 }
 
@@ -112,6 +118,7 @@ pub(super) fn delete<'a, S: StorageEngine + 'a>(
             filters,
             target_keys,
         ),
+        EngineType::ContinuousAggregate => Err(continuous_aggregate_refusal("DELETE")),
     }
 }
 
@@ -120,10 +127,10 @@ pub(super) fn insert_select<'a, S: StorageEngine + 'a>(
     permit: &'a crate::engine::fts::coordinator::TextMutationPermit,
     target: &str,
     source: &nodedb_sql::types::SqlPlan,
-    limit: usize,
     column_map: &[(String, SqlExpr)],
+    source_columns: &[(String, String)],
 ) -> Result<LiteFut<'a>, LiteError> {
-    lower_insert_select(engine, permit, target, source, limit, column_map)
+    lower_insert_select(engine, permit, target, source, column_map, source_columns)
 }
 
 pub(super) fn update_from<'a, S: StorageEngine + 'a>(
@@ -131,6 +138,7 @@ pub(super) fn update_from<'a, S: StorageEngine + 'a>(
     permit: &'a crate::engine::fts::coordinator::TextMutationPermit,
     args: UpdateFromVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
+    refuse_returning("UPDATE ... FROM", args.returning)?;
     lower_update_from(engine, permit, args)
 }
 
@@ -139,6 +147,7 @@ pub(super) fn merge<'a, S: StorageEngine + 'a>(
     permit: &'a crate::engine::fts::coordinator::TextMutationPermit,
     args: MergeVisitArgs<'_>,
 ) -> Result<LiteFut<'a>, LiteError> {
+    refuse_returning("MERGE", args.returning)?;
     lower_merge(engine, permit, args)
 }
 

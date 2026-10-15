@@ -14,21 +14,21 @@ homepage = "https://nodedb.dev"
 [workspace.dependencies]
 # Internal
 nodedb-lite = { path = "nodedb-lite", version = "0.1.0", default-features = false }
-nodedb-types = { version = "0.5" }
-nodedb-client = { version = "0.5" }
-nodedb-codec = { version = "0.5" }
-nodedb-crdt = { version = "0.5" }
-nodedb-query = { version = "0.5" }
-nodedb-spatial = { version = "0.5" }
-nodedb-graph = { version = "0.5" }
-nodedb-vector = { version = "0.5" }
-nodedb-fts = { version = "0.5" }
-nodedb-strict = { version = "0.5" }
-nodedb-columnar = { version = "0.5" }
-nodedb-sql = { version = "0.5" }
-nodedb-array = { version = "0.5" }
-nodedb-physical = { version = "0.5" }
-nodedb-mem = { version = "0.5" }
+nodedb-types = { version = "0.6.1" }
+nodedb-client = { version = "0.6.1" }
+nodedb-codec = { version = "0.6.1" }
+nodedb-crdt = { version = "0.6.1" }
+nodedb-query = { version = "0.6.1" }
+nodedb-spatial = { version = "0.6.1" }
+nodedb-graph = { version = "0.6.1" }
+nodedb-vector = { version = "0.6.1" }
+nodedb-fts = { version = "0.6.1" }
+nodedb-strict = { version = "0.6.1" }
+nodedb-columnar = { version = "0.6.1" }
+nodedb-sql = { version = "0.6.1" }
+nodedb-array = { version = "0.6.1" }
+nodedb-physical = { version = "0.6.1" }
+nodedb-mem = { version = "0.6.1" }
 
 # Async
 tokio = { version = "1" }
@@ -53,13 +53,13 @@ zerompk = { version = "0.8", features = ["std", "derive"] }
 # A caret requirement never matches a prerelease, so `version = "0"` could not
 # resolve against a registry that only publishes `0.1.0-beta.*`. Name the
 # prerelease explicitly.
-pagedb = { version = "0.1.0-beta.6", default-features = false }
+pagedb = { version = "0.1", default-features = false }
 # Matches the `Bytes` type pagedb's txn API returns; must track pagedb's own
 # `bytes` major so the two resolve to one version and stay assignable.
 bytes = "1"
 roaring = "0.11"
 lru = "0.18"
-arrow = { version = "59", default-features = false, features = ["ipc"] }
+arrow = { version = "60", default-features = false, features = ["ipc"] }
 crc32c = "0.6"
 
 # CRDTs

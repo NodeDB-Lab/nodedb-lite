@@ -90,6 +90,9 @@ pub(crate) async fn truncate_engine_coordinated<S: StorageEngine>(
         EngineType::Array => Err(LiteError::Unsupported {
             detail: ARRAY_REFUSAL.into(),
         }),
+        EngineType::ContinuousAggregate => Err(
+            crate::query::engine_read::continuous_aggregate_refusal("TRUNCATE"),
+        ),
     }
 }
 

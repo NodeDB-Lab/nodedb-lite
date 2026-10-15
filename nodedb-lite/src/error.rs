@@ -241,10 +241,21 @@ pub(crate) fn is_corruption(e: &LiteError) -> bool {
 /// wrong type, a malformed JSONPath). SQL requires each to fail the
 /// statement rather than fold the row to `NULL`. Mapped to
 /// [`LiteError::Query`] so it surfaces to the caller instead of silently
-/// filtering rows out.
+/// filtering rows out. An exact aggregate total out of range is
+/// [`LiteError::NumericValueOutOfRange`], the class Origin gives it.
 impl From<nodedb_query::EvalError> for LiteError {
     fn from(e: nodedb_query::EvalError) -> Self {
-        Self::Query(e.to_string())
+        use nodedb_query::EvalError as Ee;
+        match e {
+            e @ Ee::NumericOverflow { .. } => Self::NumericValueOutOfRange {
+                detail: e.to_string(),
+            },
+            e @ (Ee::DivisionByZero
+            | Ee::UnknownFunction { .. }
+            | Ee::VectorDimensionMismatch { .. }
+            | Ee::ArgumentType { .. }
+            | Ee::InvalidJsonPath { .. }) => Self::Query(e.to_string()),
+        }
     }
 }
 

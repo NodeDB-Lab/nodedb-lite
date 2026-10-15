@@ -31,8 +31,26 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
             system_time,
             valid_at_ms,
             sort_keys,
+            having,
+            tiering,
         } => {
             use nodedb_types::SystemTimeScope;
+            // The Lite scan has no HAVING stage: the SQL visitor filters the
+            // grouped rows itself and sends none here. A plan that carries
+            // HAVING is refused, never answered unfiltered.
+            if !having.is_empty() {
+                return Err(LiteError::Unsupported {
+                    detail: "HAVING on the timeseries scan operator is not supported in Lite"
+                        .into(),
+                });
+            }
+            // Lite keeps no downsample tiers, so a tier layout cannot be read.
+            if tiering.is_some() {
+                return Err(LiteError::Unsupported {
+                    detail: "AUTO_TIER reads are not supported on the timeseries engine in Lite"
+                        .into(),
+                });
+            }
             // Lite's timeseries scan has no ordering stage — `ScanParams`
             // carries no sort keys, so rows come back in the engine's natural
             // order. Empty `sort_keys` means exactly that and is fine; anything
@@ -159,6 +177,35 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                 Ok(result)
             }))
         }
+
+        // Lite folds each flush into its continuous aggregates as the flush
+        // runs. It has no replicated refresh cut to apply.
+        TimeseriesOp::RefreshAggregate { collection, cut } => Err(LiteError::Unsupported {
+            detail: format!(
+                "TimeseriesOp::RefreshAggregate of '{}' on '{collection}': a replicated \
+                 refresh cut is not supported in Lite",
+                cut.aggregate
+            ),
+        }),
+
+        TimeseriesOp::Partitions { collection, action } => Err(LiteError::Unsupported {
+            detail: format!(
+                "TimeseriesOp::Partitions ({action:?}) on '{collection}': partition listing \
+                 and rewrite are not supported in Lite"
+            ),
+        }),
+
+        // Lite never resolves a continuous aggregate as a relation, so it
+        // has no read of one to answer.
+        TimeseriesOp::ReadAggregate {
+            collection,
+            aggregate,
+        } => Err(LiteError::Unsupported {
+            detail: format!(
+                "TimeseriesOp::ReadAggregate of '{aggregate}' on '{collection}': reading a \
+                 continuous aggregate as a relation is not supported in Lite"
+            ),
+        }),
 
         // Origin resolves a cross-vshard ingest before proposing it. Lite's
         // single-node engine resolves every write directly, so it never emits

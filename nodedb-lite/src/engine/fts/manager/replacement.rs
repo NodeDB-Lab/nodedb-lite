@@ -59,6 +59,17 @@ impl FtsCollectionManager {
         self.surrogate_for(collection, id)
     }
 
+    /// Drop `collection`'s resident postings and leases before an open-time
+    /// rebuild replaces them. Nothing serves the collection until the
+    /// replacement publishes, so the old leases must not stack on the new ones.
+    pub(crate) fn release_for_rebuild(&mut self, collection: &str) {
+        let system = index_key(collection, "_geohash");
+        self.indices
+            .retain(|key, _| !key_of_collection(key, collection) || key == &system);
+        self.retained
+            .retain(|key, _| !key_of_collection(key, collection) || key == &system);
+    }
+
     pub(crate) fn publish_replacement(&mut self, replacement: CollectionReplacement) {
         let CollectionReplacement {
             collection,

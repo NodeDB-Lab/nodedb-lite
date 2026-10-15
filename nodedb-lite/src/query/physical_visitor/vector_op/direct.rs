@@ -201,7 +201,28 @@ pub(super) fn dispatch<'a, S: StorageEngine + 'a>(
                 Ok(result)
             }))
         }
-        _ => Err(LiteError::BadRequest {
+        // The parent dispatcher routes only the direct writes above here.
+        VectorOp::Search { .. }
+        | VectorOp::Insert { .. }
+        | VectorOp::BatchInsert { .. }
+        | VectorOp::MultiSearch { .. }
+        | VectorOp::Delete { .. }
+        | VectorOp::DeleteBySurrogate { .. }
+        | VectorOp::SetParams { .. }
+        | VectorOp::DropIndex { .. }
+        | VectorOp::QueryStats { .. }
+        | VectorOp::Seal { .. }
+        | VectorOp::CompactIndex { .. }
+        | VectorOp::Rebuild { .. }
+        | VectorOp::SparseInsert { .. }
+        | VectorOp::SparseSearch { .. }
+        | VectorOp::SparseDelete { .. }
+        | VectorOp::MultiVectorInsert { .. }
+        | VectorOp::MultiVectorDelete { .. }
+        | VectorOp::MultiVectorScoreSearch { .. }
+        | VectorOp::DirectBatchWrite { .. }
+        | VectorOp::ResolveDirectWrite(_)
+        | VectorOp::ResolvedDirectWrite { .. } => Err(LiteError::BadRequest {
             detail: "vector direct dispatch received a non-direct operation".into(),
         }),
     }

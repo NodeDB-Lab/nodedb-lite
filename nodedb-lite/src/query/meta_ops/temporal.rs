@@ -135,10 +135,11 @@ pub async fn handle_temporal_purge_array<S: StorageEngine>(
     Ok(result)
 }
 
-/// `EnforceTimeseriesRetention` — drop timeseries partitions older than max_age_ms.
+/// `EnforceTimeseriesRetention` — drop the partitions of `collection` older
+/// than `max_age_ms`.
 pub async fn handle_enforce_timeseries_retention<S: StorageEngine>(
     engine: &LiteQueryEngine<S>,
-    _collection: &str,
+    collection: &str,
     max_age_ms: i64,
 ) -> Result<QueryResult, LiteError> {
     let now_ms = crate::runtime::now_millis_i64();
@@ -147,7 +148,7 @@ pub async fn handle_enforce_timeseries_retention<S: StorageEngine>(
         .lock()
         .map_err(|_| LiteError::LockPoisoned)?;
     let cutoff_ms = now_ms - max_age_ms;
-    let dropped = ts.purge_before_ms(cutoff_ms);
+    let dropped = ts.purge_before_ms(collection, cutoff_ms);
     Ok(QueryResult {
         columns: vec!["dropped_partitions".into()],
         rows: vec![vec![Value::Integer(dropped.len() as i64)]],

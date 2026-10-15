@@ -22,6 +22,7 @@ pub(crate) mod on_conflict;
 pub(crate) mod payload_filter;
 pub(crate) mod physical_visitor;
 pub mod query_ops;
+pub(crate) mod returning;
 pub(crate) mod scan_filter_convert;
 pub mod spatial_ops;
 pub mod strict_dml;

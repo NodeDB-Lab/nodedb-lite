@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use nodedb_types::sync::wire::{ArrayRejectMsg, PingPongMsg, SyncFrame};
+use nodedb_types::sync::wire::{ArrayAdvisoryRefusedMsg, ArrayRejectMsg, PingPongMsg, SyncFrame};
 
 use crate::sync::client::SyncClient;
 use crate::sync::delegate::SyncDelegate;
@@ -30,6 +30,27 @@ pub(super) async fn handle_array_reject(
     if let Some(request) = delegate.handle_array_reject(&msg).await {
         client.queue_array_catchup(request).await;
     }
+}
+
+/// Log an `ArrayAdvisoryRefused`: Origin refused an `ArrayAck` or an
+/// `ArrayCatchupRequest`.
+///
+/// The refusal names no local op, so the push window and the pending queue
+/// stay unchanged. A refused ack only delays Origin's GC frontier. A refused
+/// catch-up request is sent again by the next session's catch-up round.
+pub(super) fn handle_array_advisory_refused(frame: &SyncFrame) {
+    let Some(msg) = frame.decode_body::<ArrayAdvisoryRefusedMsg>() else {
+        tracing::warn!("ArrayAdvisoryRefused: failed to decode frame body");
+        return;
+    };
+    tracing::warn!(
+        array = %msg.array,
+        request = ?msg.request,
+        reason = ?msg.reason,
+        class = ?msg.reason.class(),
+        detail = %msg.detail,
+        "Origin refused an advisory array request"
+    );
 }
 
 /// Close the open array window when a pong carries its barrier token, and

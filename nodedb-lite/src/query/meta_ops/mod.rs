@@ -9,11 +9,12 @@ pub mod synonyms;
 pub mod temporal;
 
 pub use array::handle_alter_array;
+pub(crate) use continuous_agg::require_registered_aggregates;
 pub use continuous_agg::{
-    handle_apply_continuous_agg_retention, handle_list_continuous_aggregates,
-    handle_query_aggregate_last_value, handle_query_aggregate_last_values,
-    handle_query_aggregate_watermark, handle_register_continuous_aggregate,
-    handle_unregister_continuous_aggregate,
+    handle_apply_continuous_agg_retention, handle_continuous_aggregates_registered,
+    handle_list_continuous_aggregates, handle_query_aggregate_last_value,
+    handle_query_aggregate_last_values, handle_query_aggregate_watermark,
+    handle_register_continuous_aggregate, handle_unregister_continuous_aggregate,
 };
 pub use distributed::txn::{handle_calvin_active, handle_calvin_passive, handle_calvin_static};
 pub use distributed::{

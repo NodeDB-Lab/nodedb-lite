@@ -78,7 +78,7 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         assignments: &[(String, SqlExpr)],
         filters: &[Filter],
         target_keys: &[SqlValue],
-        _returning: bool,
+        returning: bool,
     ) -> Result<LiteFut<'a>, LiteError> {
         dml::update(
             self.engine,
@@ -89,6 +89,7 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
                 assignments,
                 filters,
                 target_keys,
+                returning,
             },
         )
     }
@@ -155,16 +156,16 @@ impl<'a, S: StorageEngine + 'a> PlanVisitor for LiteVisitor<'a, S> {
         &mut self,
         target: &str,
         source: &nodedb_sql::types::SqlPlan,
-        limit: usize,
         column_map: &[(String, SqlExpr)],
+        source_columns: &[(String, String)],
     ) -> Result<LiteFut<'a>, LiteError> {
         dml::insert_select(
             self.engine,
             self.mutation_permit()?,
             target,
             source,
-            limit,
             column_map,
+            source_columns,
         )
     }
 
