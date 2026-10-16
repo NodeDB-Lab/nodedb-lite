@@ -264,7 +264,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # ── npm package (@nodedb/lite) ───────────────────────────────────────────────
+  # ── npm package (@nodedb-lab/lite) ───────────────────────────────────────────────
   # Build the wasm-pack `web` bundle once, stamp package.json metadata to the tag
   # version, and hand the finished `pkg/` to the Release workflow. Nothing is
   # recompiled at publish time — npm publish just uploads this directory.
@@ -301,10 +301,10 @@ jobs:
           node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            pkg.name = '@nodedb/lite';
+            pkg.name = '@nodedb-lab/lite';
             pkg.version = process.env.VERSION;
             pkg.license = 'Apache-2.0';
-            pkg.repository = { type: 'git', url: 'https://github.com/NodeDB-Lab/nodedb-lite' };
+            pkg.repository = { type: 'git', url: 'git+https://github.com/NodeDB-Lab/nodedb-lite.git' };
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
 

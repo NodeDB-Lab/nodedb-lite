@@ -6,12 +6,12 @@ WebAssembly bindings for **NodeDB-Lite**, the embedded variant of NodeDB. Runs i
 
 ## Status
 
-Ships as part of NodeDB Lite `0.1.0`. The WASM CI lane runs `cargo check --workspace --target wasm32-unknown-unknown`, `wasm-pack build`, `wasm-pack test --node`, and `wasm-pack test --headless --chrome` on every PR. The npm package is published as `@nodedb/lite` on tag release (see `release.yml`).
+Ships as part of NodeDB Lite `0.1.0`. The WASM CI lane runs `cargo check --workspace --target wasm32-unknown-unknown`, `wasm-pack build`, `wasm-pack test --node`, and `wasm-pack test --headless --chrome` on every PR. The npm package is published as `@nodedb-lab/lite` on tag release (see `release.yml`).
 
 ## Install
 
 ```bash
-npm install @nodedb/lite
+npm install @nodedb-lab/lite
 ```
 
 Local development build:

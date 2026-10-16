@@ -12,7 +12,7 @@ sync, with file and test evidence pinned to the current tree.
 | Rust crate (`nodedb-lite`)      | Full workspace test suite green                                                   |
 | C FFI (`nodedb-lite-ffi`)       | `nodedb-lite-ffi/tests/`                                                          |
 | WASM crate (`nodedb-lite-wasm`) | `cargo check --target wasm32-unknown-unknown` clean; browser + Node tests via CI  |
-| npm `@nodedb/lite`              | Published from the WASM crate on tag release (`release.yml` → `publish-npm`)      |
+| npm `@nodedb-lab/lite`              | Published from the WASM crate on tag release (`release.yml` → `publish-npm`)      |
 | Android JNI                    | Rust cross-compiles for `aarch64-linux-android`; no automated Android packaging gate yet |
 
 iOS bindings require a macOS build environment and are not part of `0.1.0`.

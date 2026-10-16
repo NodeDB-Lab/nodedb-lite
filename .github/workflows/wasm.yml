@@ -86,10 +86,10 @@ jobs:
           node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            pkg.name = '@nodedb/lite';
+            pkg.name = '@nodedb-lab/lite';
             pkg.version = '0.1.0';
             pkg.license = 'Apache-2.0';
-            pkg.repository = { type: 'git', url: 'https://github.com/NodeDB-Lab/nodedb-lite' };
+            pkg.repository = { type: 'git', url: 'git+https://github.com/NodeDB-Lab/nodedb-lite.git' };
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
 
