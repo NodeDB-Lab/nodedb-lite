@@ -51,11 +51,11 @@ It's the engine behind **ma8e**, an in-development memory-and-knowledge layer fo
 
 ## Release Status
 
-NodeDB Lite is in **public beta** as of **v0.1.0 (2026-05-23)**. All engines listed in [`docs/lite-support-matrix.md`](docs/lite-support-matrix.md) are feature-complete and covered by tests. The public surface — the `NodeDb` trait, the supported SQL plan variants, the C FFI ABI, and the WASM / npm bindings — is stable; clients written against 0.1.0 will keep working through 1.0.
+NodeDB Lite is in **public beta** as of **v0.1.0 (2026-10-16)**. All engines listed in [`docs/lite-support-matrix.md`](docs/lite-support-matrix.md) are feature-complete and covered by tests. The public surface — the `NodeDb` trait, the supported SQL plan variants, the C FFI ABI, and the WASM / npm bindings — is stable; clients written against 0.1.0 will keep working through 1.0.
 
 **v0.1.0 — Beta (today).** Use it for embedded workloads and for piloting Lite ↔ Origin sync. The public surface is stable; expect internal changes (pagedb layout, on-disk index format, sync-protocol internals) between minor releases. Patch and minor bumps will land as needed.
 
-**v1.0.0 — Production-ready (target: 2026-07-23).** What 1.0 guarantees:
+**v1.0.0 — Production-ready.** What 1.0 guarantees:
 
 - **API & SQL stability** — semver from 1.0 onward. No breaking changes to the `NodeDb` trait, the supported SQL plan variants, or the C FFI / WASM ABIs within a major.
 - **Sync protocol stability** — the Lite ↔ Origin WebSocket wire frames frozen at the version Origin ships in its 1.0.
