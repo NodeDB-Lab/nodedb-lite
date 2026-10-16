@@ -214,6 +214,7 @@ async fn field_text_index_survives_reopen() {
             .await
             .expect("overwrite d3");
         db.flush().await.expect("second flush");
+        db.shutdown().await;
     }
 
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)

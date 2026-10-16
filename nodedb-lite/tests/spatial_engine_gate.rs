@@ -226,6 +226,7 @@ async fn spatial_index_persists_across_restart() {
         pre_restart_ids = results_before.iter().map(|e| e.id).collect();
 
         db.flush().await.expect("flush");
+        db.shutdown().await;
         // db dropped here, releasing file lock.
     }
 
@@ -306,6 +307,7 @@ async fn upsert_and_delete_after_restart() {
             &Geometry::point(-0.1278, 51.5074),
         );
         db.flush().await.expect("flush");
+        db.shutdown().await;
     }
 
     {

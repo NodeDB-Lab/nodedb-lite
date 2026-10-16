@@ -93,6 +93,7 @@ async fn select_after_reopen_works() {
 
         // Intentionally drop WITHOUT calling flush — the CRDT snapshot is
         // not saved, but the DocumentHistory write is already durable.
+        db.shutdown().await;
     }
 
     {

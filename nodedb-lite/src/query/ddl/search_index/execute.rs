@@ -333,6 +333,7 @@ mod tests {
             .expect("flush");
         assert!(!matches(&db, "python").await);
         assert!(matches(&db, "rust").await);
+        db.shutdown().await;
         drop(db);
         let reopened = NodeDbLite::open_with_config(storage, config())
             .await

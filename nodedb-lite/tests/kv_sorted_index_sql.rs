@@ -382,6 +382,7 @@ async fn sorted_index_survives_reopen() {
         )
         .await;
         db.flush().await.expect("flush");
+        db.shutdown().await;
     }
 
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)

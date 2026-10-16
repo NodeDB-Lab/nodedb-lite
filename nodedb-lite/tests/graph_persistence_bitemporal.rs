@@ -51,6 +51,7 @@ async fn graph_pagerank_finds_edges_after_reopen_without_explicit_flush() {
             .await
             .unwrap();
         // Intentionally NO .flush() call here — db drops on scope exit.
+        db.shutdown().await;
     }
 
     // Process-B-equivalent: reopen, run pagerank, MUST find all three nodes.
@@ -115,6 +116,7 @@ async fn graph_excludes_tombstoned_edges_after_reopen() {
         // Tombstone the A→C edge.
         db.graph_delete_edge("social", &edge_ac).await.unwrap();
         // No flush: db drops on scope exit.
+        db.shutdown().await;
     }
 
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
@@ -193,6 +195,7 @@ async fn batch_inserted_edges_on_bitemporal_collection_record_history() {
         .await
         .unwrap();
         // Intentionally NO .flush() call here — db drops on scope exit.
+        db.shutdown().await;
     }
 
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
@@ -243,6 +246,7 @@ async fn graph_still_works_for_non_bitemporal_collections_after_reopen() {
             .unwrap();
         // Flush so the CSR checkpoint is durable (plain collection requirement).
         db.flush().await.unwrap();
+        db.shutdown().await;
     }
 
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)

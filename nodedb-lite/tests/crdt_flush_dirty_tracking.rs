@@ -118,6 +118,7 @@ async fn write_after_flush_is_persisted() {
 
         put_note(&db, "note1", "second").await;
         db.flush().await.expect("flush second write");
+        db.shutdown().await;
     }
 
     let db = open_manual_flush(&path).await;
@@ -202,6 +203,7 @@ async fn updates_written_between_checkpoints_survive_reopen() {
             exports,
             "these writes must have gone to disk as updates for this test to mean anything"
         );
+        db.shutdown().await;
     }
 
     let db = open_manual_flush(&path).await;
@@ -288,6 +290,7 @@ async fn queued_deltas_survive_reopen() {
             put_note(&db, &format!("second{i}"), "b").await;
         }
         db.flush().await.expect("flush second batch");
+        db.shutdown().await;
     }
 
     let db = open_manual_flush(&path).await;
@@ -333,6 +336,7 @@ async fn a_corrupt_base_does_not_strand_its_updates() {
             put_note(&db, &format!("note{i}"), &format!("update {i}")).await;
             db.flush().await.expect("flush an update");
         }
+        db.shutdown().await;
     }
 
     // Corrupt the base the updates were exported against.
@@ -364,7 +368,9 @@ async fn a_corrupt_base_does_not_strand_its_updates() {
     }
 
     // Opening must succeed rather than fail on updates it cannot apply.
-    drop(open_discarding_corrupt_state(&path).await);
+    let recovered = open_discarding_corrupt_state(&path).await;
+    recovered.shutdown().await;
+    drop(recovered);
 
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
         .await

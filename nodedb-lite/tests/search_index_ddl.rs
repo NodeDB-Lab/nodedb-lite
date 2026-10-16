@@ -438,6 +438,7 @@ async fn declarations_and_drop_defaults_survive_reopen_including_empty_collectio
     )
     .await;
     db.flush().await.expect("flush");
+    db.shutdown().await;
     drop(db);
     let db = NodeDbLite::open_at_path_with_config(&path, Encryption::Plaintext, config())
         .await
@@ -454,6 +455,7 @@ async fn declarations_and_drop_defaults_survive_reopen_including_empty_collectio
     assert!(ids(&db, "empty_articles", "", "excluded").await.is_empty());
     sql(&db, "DROP SEARCH INDEX fts_articles").await;
     db.flush().await.expect("flush dropped declaration");
+    db.shutdown().await;
     drop(db);
     let db = NodeDbLite::open_at_path_with_config(&path, Encryption::Plaintext, config())
         .await

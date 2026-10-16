@@ -206,6 +206,7 @@ async fn a_sorted_index_survives_reopen() {
             .expect("register");
         put(engine, "players", "a", &scored(1)).await;
         put(engine, "players", "b", &scored(2)).await;
+        db.shutdown().await;
     }
 
     let db = open_at(&path).await;

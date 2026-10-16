@@ -47,6 +47,7 @@ async fn seed_store(path: &Path) {
     doc.set("body", Value::String("the only copy".to_string()));
     db.document_put("notes", doc).await.expect("document_put");
     db.flush().await.expect("flush");
+    db.shutdown().await;
     drop(db);
 }
 
@@ -126,6 +127,7 @@ async fn seed_mem_storage() -> PagedbStorageMem {
     doc.set("body", Value::String("the only copy".to_string()));
     db.document_put("notes", doc).await.expect("document_put");
     db.flush().await.expect("flush");
+    db.shutdown().await;
     drop(db);
     storage
 }

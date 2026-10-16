@@ -139,6 +139,7 @@ async fn startup_loads_only_persisted_collections() {
             .await
             .unwrap();
         db.flush().await.unwrap();
+        db.shutdown().await;
     }
 
     // Reopen — both should be loaded from storage.

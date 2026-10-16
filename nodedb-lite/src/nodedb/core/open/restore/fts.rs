@@ -128,6 +128,7 @@ mod tests {
             )
             .await
             .unwrap();
+        db.shutdown().await;
         drop(db);
 
         let reopened = open(&path).await;
@@ -185,6 +186,7 @@ mod tests {
         )
         .await
         .unwrap();
+        db.shutdown().await;
         drop(db);
 
         let reopened = open(&path).await;
@@ -217,6 +219,7 @@ mod tests {
             )
             .await
             .unwrap();
+        db.shutdown().await;
         drop(db);
 
         let reopened = open(&path).await;
@@ -239,6 +242,7 @@ mod tests {
         db.execute_sql("CREATE SEARCH INDEX ON articles (title)", &[])
             .await
             .unwrap();
+        db.shutdown().await;
         drop(db);
 
         let reopened = open(&path).await;
@@ -291,6 +295,7 @@ mod tests {
         let (live, _) = fts_usage(&db);
         assert!(live < limit);
         db.flush().await.unwrap();
+        db.shutdown().await;
         drop(db);
 
         let reopened = NodeDbLite::open_at_path_with_config(&path, Encryption::Plaintext, config())

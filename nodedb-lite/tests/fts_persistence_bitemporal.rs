@@ -36,6 +36,7 @@ async fn fts_returns_bitemporal_documents_after_reopen_without_explicit_flush() 
         doc.set("content", Value::String("hello world".into()));
         db.document_put("entries", doc).await.unwrap();
         // Intentionally NO .flush() call here — db drops on scope exit.
+        db.shutdown().await;
     }
 
     // Process-B-equivalent: reopen, search, MUST find the document.
@@ -92,6 +93,7 @@ async fn fts_returns_only_live_versions_after_reopen() {
         // Tombstone "ghost" — delete on a bitemporal collection appends Tombstone.
         db.document_delete("entries", "ghost").await.unwrap();
         // No flush: db drops on scope exit.
+        db.shutdown().await;
     }
 
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
@@ -156,6 +158,7 @@ async fn fts_still_works_for_non_bitemporal_collections_after_reopen() {
         db.document_put("plain", doc).await.unwrap();
         // Flush so the CRDT snapshot is durable (plain collection requirement).
         db.flush().await.unwrap();
+        db.shutdown().await;
     }
 
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)

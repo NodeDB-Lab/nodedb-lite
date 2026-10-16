@@ -38,6 +38,7 @@ async fn vector_is_durable_without_an_explicit_flush() {
             .unwrap();
         // Deliberately NO flush: this models a process that dies between the
         // acknowledged write and the next flush tick.
+        db.shutdown().await;
         drop(db);
     }
 
@@ -73,6 +74,7 @@ async fn vector_survives_reopen_after_flush() {
             .await
             .unwrap();
         db.flush().await.unwrap();
+        db.shutdown().await;
         drop(db);
     }
 
@@ -108,6 +110,7 @@ async fn reopened_search_returns_document_ids() {
                 .await
                 .unwrap();
         }
+        db.shutdown().await;
         drop(db);
     }
 
@@ -159,6 +162,7 @@ async fn second_flush_after_graph_only_restore_preserves_vectors() {
                 .unwrap();
         }
         db.flush().await.unwrap();
+        db.shutdown().await;
         drop(db);
     }
 
@@ -169,6 +173,7 @@ async fn second_flush_after_graph_only_restore_preserves_vectors() {
             .await
             .unwrap();
         db.flush().await.unwrap();
+        db.shutdown().await;
         drop(db);
     }
 
@@ -207,6 +212,7 @@ async fn eviction_after_graph_only_restore_preserves_vectors() {
             .await
             .unwrap();
         db.flush().await.unwrap();
+        db.shutdown().await;
         drop(db);
     }
 
@@ -219,6 +225,7 @@ async fn eviction_after_graph_only_restore_preserves_vectors() {
             .await
             .unwrap();
         db.evict_collections(1).await.unwrap();
+        db.shutdown().await;
         drop(db);
     }
 
@@ -253,6 +260,7 @@ async fn deleted_vector_does_not_resurrect_on_rebuild() {
             .await
             .unwrap();
         db.vector_delete(COLLECTION, "gone").await.unwrap();
+        db.shutdown().await;
         drop(db);
     }
 
@@ -297,6 +305,7 @@ async fn earlier_row_layout_is_rewritten_on_open() {
             .await
             .unwrap();
         assert_eq!(hits.first().map(|h| h.id.as_str()), Some("a"));
+        db.shutdown().await;
     }
 
     let storage = PagedbStorageDefault::open(path, Encryption::Plaintext)

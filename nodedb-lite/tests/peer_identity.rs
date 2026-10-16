@@ -30,6 +30,7 @@ async fn peer_id_persists_across_reopen() {
 
         first_open = db.peer_id();
         db.flush().await.expect("flush");
+        db.shutdown().await;
     }
 
     {

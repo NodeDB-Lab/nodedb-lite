@@ -38,6 +38,7 @@ async fn flush_and_reopen_persists_all() {
         db.document_put("docs", doc).await.unwrap();
 
         db.flush().await.unwrap();
+        db.shutdown().await;
     }
 
     {

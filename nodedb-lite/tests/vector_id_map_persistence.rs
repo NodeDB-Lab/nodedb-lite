@@ -35,6 +35,7 @@ async fn vector_search_returns_real_doc_id_after_flush_and_reopen() {
 
         // Explicit flush: HNSW checkpoint + id_map land on disk.
         db.flush().await.unwrap();
+        db.shutdown().await;
     }
 
     // ── Reopen + search ────────────────────────────────────────────────────────
@@ -86,6 +87,7 @@ async fn vector_search_multiple_collections_preserve_ids_after_reopen() {
         }
 
         db.flush().await.unwrap();
+        db.shutdown().await;
     }
 
     // ── Reopen + verify each collection independently ──────────────────────────
@@ -153,6 +155,7 @@ async fn reinserted_id_appears_once_after_reopen() {
             .await
             .unwrap();
         db.flush().await.unwrap();
+        db.shutdown().await;
     }
 
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
@@ -190,6 +193,7 @@ async fn prefix_colliding_collections_stay_separate_after_reopen() {
             .await
             .unwrap();
         db.flush().await.unwrap();
+        db.shutdown().await;
     }
 
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
@@ -233,6 +237,7 @@ async fn ids_inserted_out_of_key_order_keep_their_vectors_after_reopen() {
             db.vector_insert("ordered", id, v, None).await.unwrap();
         }
         db.flush().await.unwrap();
+        db.shutdown().await;
     }
 
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
@@ -270,6 +275,7 @@ async fn base_rebuild_after_reopen_excludes_named_field_vectors() {
             .await
             .unwrap();
         // No flush: the reopen rebuilds both indexes from durable rows.
+        db.shutdown().await;
     }
 
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)
@@ -342,6 +348,7 @@ async fn vectors_inserted_after_reopen_are_found_and_survive_a_second_reopen() {
             db.vector_insert("grow", id, v, None).await.unwrap();
         }
         db.flush().await.unwrap();
+        db.shutdown().await;
     }
 
     {
@@ -353,6 +360,7 @@ async fn vectors_inserted_after_reopen_are_found_and_survive_a_second_reopen() {
             assert_found(&db, "grow", id, v, 1e-5).await;
         }
         db.flush().await.unwrap();
+        db.shutdown().await;
     }
 
     let db = open_db(&path).await;
@@ -405,6 +413,7 @@ async fn delete_then_reopen_keeps_ids_paired(collection: &str, delete_position: 
         }
         db.vector_delete(collection, &deleted).await.unwrap();
         db.flush().await.unwrap();
+        db.shutdown().await;
     }
 
     let db = open_db(&path).await;
@@ -467,6 +476,7 @@ async fn vectors_inserted_after_reopen_are_found_without_a_delete() {
             db.vector_insert(COLLECTION, id, v, None).await.unwrap();
         }
         db.flush().await.unwrap();
+        db.shutdown().await;
     }
 
     {
@@ -479,6 +489,7 @@ async fn vectors_inserted_after_reopen_are_found_without_a_delete() {
             assert_found(&db, COLLECTION, id, v, 1e-4).await;
         }
         db.flush().await.unwrap();
+        db.shutdown().await;
     }
 
     let db = open_db(&path).await;

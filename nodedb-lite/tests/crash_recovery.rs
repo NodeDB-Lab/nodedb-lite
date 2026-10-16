@@ -32,6 +32,7 @@ async fn strict_insert_is_durable_without_explicit_flush() {
     ).await.unwrap();
     let row = vec![Value::Integer(1), Value::String("Alice".into())];
     db.strict_insert("customers", &row).await.unwrap();
+    db.shutdown().await;
     drop(db);
 
     let reopened = NodeDbLite::open_at_path_with_config(&path, Encryption::Plaintext, config)

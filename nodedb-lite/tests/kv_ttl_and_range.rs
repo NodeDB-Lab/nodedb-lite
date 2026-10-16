@@ -64,6 +64,7 @@ async fn ttl_survives_reopen() {
             .await
             .expect("kv_put_with_ttl");
         db.kv_flush().await.expect("kv_flush");
+        db.shutdown().await;
     }
 
     {
@@ -100,6 +101,7 @@ async fn ttl_expired_after_reopen() {
             .await
             .expect("kv_put_with_ttl");
         db.kv_flush().await.expect("kv_flush");
+        db.shutdown().await;
     }
 
     // Wait for TTL to elapse before reopening.

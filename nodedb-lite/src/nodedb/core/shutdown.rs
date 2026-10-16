@@ -14,10 +14,14 @@ impl<S: StorageEngine> NodeDbLite<S> {
     /// started them; a runtime torn down while one is still polling takes the
     /// task down mid-poll, which on a native runtime has crashed the process.
     ///
+    /// Call it also before reopening the same store in-process. A background
+    /// flush in flight holds the database, and so the store, open past the
+    /// drop of the last handle, and the reopen fails with `AlreadyOpen`.
+    ///
     /// Each task is signalled first and leaves its loop at a point it chose.
     /// One that ignores the signal past
-    /// [`TASK_STOP_TIMEOUT`](crate::tasks::TASK_STOP_TIMEOUT) is aborted, so
-    /// Background task shutdown uses that bound. Admitted search DDL completes before this returns.
+    /// [`TASK_STOP_TIMEOUT`](crate::tasks::TASK_STOP_TIMEOUT) is aborted.
+    /// Admitted search DDL completes before this returns.
     ///
     /// Idempotent, and safe on a database that started no tasks. It does not
     /// flush: what is in memory at shutdown is still in memory, so call

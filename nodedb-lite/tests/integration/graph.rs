@@ -88,6 +88,7 @@ async fn batch_inserted_edge_is_removed_by_delete_and_stays_removed_after_reopen
 
         db.graph_delete_edge("social", &edge_id).await.unwrap();
         db.flush().await.unwrap();
+        db.shutdown().await;
         edge_id
     };
 
@@ -224,6 +225,7 @@ async fn legacy_batch_edge_keys_are_migrated_on_open() {
         db.document_put("__edges__social", legacy).await.unwrap();
 
         db.flush().await.unwrap();
+        db.shutdown().await;
     }
 
     // Reopen: migration must rewrite the legacy key to its EdgeId form.
@@ -273,6 +275,7 @@ async fn legacy_batch_edge_keys_are_migrated_on_open() {
     .await
     .unwrap();
     db.flush().await.unwrap();
+    db.shutdown().await;
     drop(db);
 
     let storage = PagedbStorageDefault::open(&path, Encryption::Plaintext)

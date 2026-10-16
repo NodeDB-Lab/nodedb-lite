@@ -19,6 +19,7 @@ async fn encrypted_value_survives_reopen_with_same_passphrase() {
             .await
             .expect("kv_put");
         db.kv_flush().await.expect("kv_flush");
+        db.shutdown().await;
     }
 
     // Salt sidecar must exist and be exactly 16 bytes.
@@ -50,6 +51,7 @@ async fn seed_encrypted_store(path: &std::path::Path) {
         .await
         .expect("kv_put");
     db.kv_flush().await.expect("kv_flush");
+    db.shutdown().await;
 }
 
 /// Opening with a DIFFERENT passphrase must fail rather than yield a store.

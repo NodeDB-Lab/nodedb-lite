@@ -208,6 +208,7 @@ async fn index_survives_flush_close_and_reopen() {
         assert_eq!(ids(&pre_restart), vec!["a", "b"]);
 
         db.flush().await.expect("flush");
+        db.shutdown().await;
     }
 
     // ── Second open: identical results, loaded from the checkpoint ───────────
