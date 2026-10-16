@@ -141,7 +141,7 @@ jobs:
       - name: Install Rust + Android targets
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -167,12 +167,14 @@ jobs:
       - name: Set version from tag
         run: bash scripts/ci/stamp_version.sh "${{ needs.validate-version.outputs.version }}"
 
+      # No 32-bit x86 ABI: sonic-simd imports `core::arch::x86_64` on any SSE2
+      # target, so i686 does not compile. Only old emulators use that ABI.
       - name: Build jniLibs
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         run: |
           cargo ndk \
-            -t arm64-v8a -t armeabi-v7a -t x86_64 -t x86 \
+            -t arm64-v8a -t armeabi-v7a -t x86_64 \
             -o ./jniLibs \
             build -p nodedb-lite-ffi --release
 
@@ -206,6 +208,11 @@ jobs:
     name: Build FFI (ios)
     needs: [validate-version, ci, wasm]
     runs-on: macos-latest
+    # rustc and the cc crate must target one iOS version. Unset, rustc links
+    # for iOS 10 while C dependencies build for the runner SDK and call
+    # `___chkstk_darwin`, which iOS 10 lacks.
+    env:
+      IPHONEOS_DEPLOYMENT_TARGET: "15.0"
     steps:
       - uses: actions/checkout@v7
 
