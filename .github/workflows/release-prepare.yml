@@ -95,9 +95,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             cmake clang libclang-dev pkg-config protobuf-compiler perl
 
-      - name: Set version from tag
-        run: bash scripts/ci/stamp_version.sh "${{ needs.validate-version.outputs.version }}"
-
       - name: Build FFI libraries
         run: cargo build -p nodedb-lite-ffi --release --target ${{ matrix.target }}
 
@@ -164,9 +161,6 @@ jobs:
         with:
           tool: cargo-ndk
 
-      - name: Set version from tag
-        run: bash scripts/ci/stamp_version.sh "${{ needs.validate-version.outputs.version }}"
-
       # No 32-bit x86 ABI: sonic-simd imports `core::arch::x86_64` on any SSE2
       # target, so i686 does not compile. Only old emulators use that ABI.
       - name: Build jniLibs
@@ -228,9 +222,6 @@ jobs:
       - name: Install build tools
         run: brew install cmake protobuf
 
-      - name: Set version from tag
-        run: bash scripts/ci/stamp_version.sh "${{ needs.validate-version.outputs.version }}"
-
       - name: Build static libs
         run: |
           cargo build -p nodedb-lite-ffi --release --target aarch64-apple-ios
@@ -286,9 +277,6 @@ jobs:
 
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-
-      - name: Set version from tag
-        run: bash scripts/ci/stamp_version.sh "${{ needs.validate-version.outputs.version }}"
 
       - name: Build WASM release
         run: wasm-pack build --target web --release nodedb-lite-wasm

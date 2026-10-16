@@ -45,23 +45,30 @@ jobs:
           set -euo pipefail
           TAG_VERSION="${TAG#v}"
 
-          CARGO_VERSION=$(cargo metadata --no-deps --format-version=1 \
-            | jq -r '.packages[] | select(.name == "nodedb-lite") | .version')
-          CARGO_BASE=$(echo "$CARGO_VERSION" | grep -oP '^\d+\.\d+\.\d+')
+          META=$(cargo metadata --no-deps --format-version=1)
+          CARGO_VERSION=$(jq -r '.packages[] | select(.name == "nodedb-lite") | .version' <<<"$META")
 
           echo "Tag version:        $TAG_VERSION"
           echo "Cargo.toml version: $CARGO_VERSION"
-          echo "Cargo.toml base:    $CARGO_BASE"
 
-          if [[ ! "$TAG_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)(-[a-zA-Z]+\.[0-9]+)?$ ]]; then
+          if [[ ! "$TAG_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z]+\.[0-9]+)?$ ]]; then
             echo "::error::Invalid tag format '$TAG'. Expected: vX.Y.Z or vX.Y.Z-label.N"
             exit 1
           fi
 
-          TAG_BASE="${BASH_REMATCH[1]}"
+          # The tagged commit carries the release version itself. A tag on a
+          # commit without the version bump is refused.
+          if [[ "$TAG_VERSION" != "$CARGO_VERSION" ]]; then
+            echo "::error::Tag '$TAG' does not match the workspace version '$CARGO_VERSION'. Commit the version bump to $TAG_VERSION, then move the tag to that commit."
+            exit 1
+          fi
 
-          if [[ "$TAG_BASE" != "$CARGO_BASE" ]]; then
-            echo "::error::Base version mismatch! Tag '$TAG_BASE' != Cargo.toml '$CARGO_BASE'"
+          # Every publishable crate publishes at the tag version. Crates with
+          # `publish = false` keep their own version.
+          STRAY=$(jq -r --arg v "$TAG_VERSION" \
+            '.packages[] | select(.publish != [] and .version != $v) | "\(.name) \(.version)"' <<<"$META" | paste -sd, -)
+          if [[ -n "$STRAY" ]]; then
+            echo "::error::These crates are not at version $TAG_VERSION: $STRAY. Set them to version.workspace = true."
             exit 1
           fi
 
