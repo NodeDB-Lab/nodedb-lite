@@ -9,7 +9,7 @@
 #
 # Stages, in dependency order:
 #   publish_crates  -> crates.io, 2 tiers (nodedb-lite, then -ffi + -wasm)
-#   publish_npm     -> @nodedb-lab/lite on npm (from the prepared pkg/)
+#   publish_npm     -> @nodedb-lab/nodedb-lite on npm (from the prepared pkg/)
 #   github_release  -> GitHub Release with the FFI archives attached
 #
 # Each stage is idempotent: crates already indexed are skipped, an existing npm
@@ -42,7 +42,7 @@ on:
         type: boolean
         default: true
       publish_npm:
-        description: "Publish @nodedb-lab/lite to npm"
+        description: "Publish @nodedb-lab/nodedb-lite to npm"
         type: boolean
         default: true
       github_release:
@@ -189,7 +189,7 @@ jobs:
           node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            pkg.name = '@nodedb-lab/lite';
+            pkg.name = '@nodedb-lab/nodedb-lite';
             pkg.repository = { type: 'git', url: 'git+https://github.com/NodeDB-Lab/nodedb-lite.git' };
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "

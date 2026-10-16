@@ -101,7 +101,7 @@ Pre-1.0 versions may change internals between releases — that work is critical
 cargo add nodedb-lite
 
 # JavaScript / TypeScript (browser + Node)
-npm install @nodedb-lab/lite
+npm install @nodedb-lab/nodedb-lite
 ```
 
 ## Quick Start
