@@ -13,7 +13,7 @@ NodeDB Lite uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.0] - 2026-10-16
 
-First release. Embedded NodeDB for Linux, macOS, Windows, Android and the browser, built on NodeDB 0.6.1 crates and pagedb 0.1.
+First release. Embedded NodeDB for Linux, macOS, Windows, Android and the browser, built on NodeDB 0.6.2 crates and pagedb 0.1.
 
 ### Fixed
 
